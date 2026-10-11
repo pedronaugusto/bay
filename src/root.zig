@@ -67,7 +67,7 @@ pub fn buildText(a: std.mem.Allocator, package: manifest.Manifest) ![]u8 {
 
 /// A manifest with no dependencies, for `zig fetch --save` to write one into.
 pub fn scratchManifest(a: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(a, ".{{ .name = .bay_add, .version = \"0.0.0\", .fingerprint = 0x{x}, .paths = .{{\"\"}}, .dependencies = .{{}} }}\n", .{fingerprint("bay_add", "bay_add")});
+    return a.print(".{{ .name = .bay_add, .version = \"0.0.0\", .fingerprint = 0x{x}, .paths = .{{\"\"}}, .dependencies = .{{}} }}\n", .{fingerprint("bay_add", "bay_add")});
 }
 
 /// A fingerprint Zig accepts for `name`: the checksum of the name above an id.
@@ -110,12 +110,12 @@ test "the root depends on the package and each dev dependency" {
     const text = try manifestText(a, package);
     const parsed = try manifest.parse(a, try a.dupeSentinel(u8, text, 0));
     try std.testing.expectEqualStrings(root_name, parsed.name);
-    try std.testing.expect(std.mem.indexOf(u8, text, ".demo = .{ .path = \"../..\" }") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, ".local = .{ .path = \"../../../local\" }") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, ".hash = \"tool-0.1.0-AAAA\"") != null);
+    try std.testing.expect(std.mem.find(u8, text, ".demo = .{ .path = \"../..\" }") != null);
+    try std.testing.expect(std.mem.find(u8, text, ".local = .{ .path = \"../../../local\" }") != null);
+    try std.testing.expect(std.mem.find(u8, text, ".hash = \"tool-0.1.0-AAAA\"") != null);
     const build = try buildText(a, package);
-    try std.testing.expect(std.mem.indexOf(u8, build, "pub const tool = @import(\"tool\");") != null);
-    try std.testing.expect(std.mem.indexOf(u8, build, "const package = @import(\"demo\");") != null);
+    try std.testing.expect(std.mem.find(u8, build, "pub const tool = @import(\"tool\");") != null);
+    try std.testing.expect(std.mem.find(u8, build, "const package = @import(\"demo\");") != null);
 }
 
 test "the fingerprint carries the checksum Zig checks" {

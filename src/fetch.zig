@@ -16,15 +16,15 @@ pub fn fetch(io: Io, a: std.mem.Allocator, zig: []const u8, scratch: []const u8,
     // zig fetch --save edits the manifest beside the nearest build.zig up from here: this one.
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
     try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(a) });
-    const save = if (name) |given| try std.fmt.allocPrint(a, "--save={s}", .{given}) else "--save";
+    const save = if (name) |given| try a.print("--save={s}", .{given}) else "--save";
     var child = std.process.spawn(io, .{ .argv = &.{ zig, "fetch", save, url }, .cwd = .{ .path = scratch } }) catch |err|
-        return say.fail("could not run {s}: {t}", .{ zig, err });
+        try say.fail(io, "could not run {s}: {t}", .{ zig, err });
     switch (try child.wait(io)) {
         .exited => |code| if (code != 0) return null,
         else => return null,
     }
     const text = try dir.readFileAlloc(io, "build.zig.zon", a, .limited(1 << 20));
     const parsed = try manifest.parse(a, try a.dupeSentinel(u8, text, 0));
-    if (parsed.normal.len != 1) return say.fail("zig fetch saved {d} dependencies; expected one", .{parsed.normal.len});
+    if (parsed.normal.len != 1) try say.fail(io, "zig fetch saved {d} dependencies; expected one", .{parsed.normal.len});
     return parsed.normal[0];
 }

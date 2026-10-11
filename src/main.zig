@@ -7,7 +7,6 @@ const root = @import("root.zig");
 const fetch = @import("fetch.zig");
 const install = @import("install.zig");
 const say = @import("say.zig");
-const fail = say.fail;
 
 const usage =
     \\usage: bay <command> [arguments]
@@ -47,10 +46,10 @@ pub fn main(init: std.process.Init) !void {
         try Io.File.stdout().writeStreamingAll(io, usage);
         return;
     }
-    // A reported failure has said what went wrong; it ends the run without a trace.
     // Everything bay runs can run bay again, as the same program: a tool that builds
     // another checkout of the package (a benchmark comparison) needs its development build.
     try init.environ_map.put("BAY", try std.process.executablePathAlloc(io, a));
+    // A reported failure has said what went wrong; it ends the run without a trace.
     const code = dispatch(io, a, init.environ_map, args) catch |err| switch (err) {
         error.Reported => 1,
         else => return err,
@@ -100,7 +99,7 @@ const Env = struct {
 };
 
 fn findPackage(io: Io, a: std.mem.Allocator) ![]const u8 {
-    return try packageHere(io, a) orelse fail("no build.zig.zon here or in any directory above", .{});
+    return try packageHere(io, a) orelse try say.fail(io, "no build.zig.zon here or in any directory above", .{});
 }
 
 /// The nearest directory up from here with a build.zig.zon, or null outside a package.
@@ -134,7 +133,7 @@ fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const [
     }
     try argv.appendSlice(env.a, after);
     var child = std.process.spawn(env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
-        return fail("could not run {s}: {t}", .{ env.zig, err });
+        try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
     return switch (try child.wait(env.io)) {
         .exited => |code| code,
         else => 1,
@@ -145,14 +144,14 @@ fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const [
 /// the package does not have is the development build's.
 fn step(env: Env, name: []const u8, args: []const []const u8) !u8 {
     const listed = std.process.run(env.a, env.io, .{ .argv = &.{ env.zig, "build", "-l" }, .cwd = .{ .path = env.package }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
-        return fail("could not run {s}: {t}", .{ env.zig, err });
+        try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
     if (listed.term != .exited or listed.term.exited != 0) {
-        std.debug.print("{s}", .{listed.stderr});
+        try say.relay(env.io, listed.stderr);
         return 1;
     }
     if (hasStep(listed.stdout, name)) return zigBuild(env, .package, &.{name}, args);
     const parsed = try manifest.parse(env.a, try env.readManifest());
-    if (parsed.dev.len == 0) return fail("the package has no step '{s}' and no dev dependencies", .{name});
+    if (parsed.dev.len == 0) try say.fail(env.io, "the package has no step '{s}' and no dev dependencies", .{name});
     return zigBuild(env, .development, &.{name}, args);
 }
 
@@ -187,11 +186,11 @@ fn add(env: Env, args: []const []const u8) !u8 {
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dev")) kind = .dev else if (std.mem.eql(u8, args[i], "--lazy")) lazy = true else if (std.mem.eql(u8, args[i], "--name")) {
             i += 1;
-            if (i == args.len) return fail("--name needs a value", .{});
+            if (i == args.len) try say.fail(env.io, "--name needs a value", .{});
             name = args[i];
-        } else if (target == null) target = args[i] else return fail("add takes one url or directory", .{});
+        } else if (target == null) target = args[i] else try say.fail(env.io, "add takes one url or directory", .{});
     }
-    const where = target orelse return fail("add needs a url or directory", .{});
+    const where = target orelse try say.fail(env.io, "add needs a url or directory", .{});
     const dependency = if (isDirectory(env, where)) try local(env, where, name) else try fetched(env, where, name) orelse return 1;
     var entry = dependency;
     // A new pin of a dependency already in this list keeps whether it is lazy; --lazy makes it so.
@@ -206,12 +205,12 @@ fn add(env: Env, args: []const []const u8) !u8 {
     // develop with it too, so a pin in one list leaves the other as it is.
     const edited = try manifest.put(env.a, try env.readManifest(), kind, entry);
     try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = edited });
-    std.debug.print("bay: {s} pinned in .{s}\n", .{ entry.name, kind.field() });
+    try say.note(env.io, "{s} pinned in .{s}", .{ entry.name, kind.field() });
     return 0;
 }
 
 fn isDirectory(env: Env, path: []const u8) bool {
-    if (std.mem.indexOf(u8, path, "://") != null) return false;
+    if (std.mem.find(u8, path, "://") != null) return false;
     var dir = Io.Dir.cwd().openDir(env.io, path, .{}) catch return false;
     dir.close(env.io);
     return true;
@@ -220,11 +219,11 @@ fn isDirectory(env: Env, path: []const u8) bool {
 /// A directory dependency, named as its own manifest names it, at its path from the package.
 fn local(env: Env, path: []const u8, name: ?[]const u8) !manifest.Dependency {
     const absolute = try Io.Dir.cwd().realPathFileAlloc(env.io, path, env.a);
-    const relative = try std.fs.path.relative(env.a, env.package, null, env.package, absolute);
+    const relative = try std.fs.path.relativeAlloc(env.a, env.package, null, env.package, absolute);
     if (name) |given| return .{ .name = given, .source = .{ .path = relative } };
     var dir = try Io.Dir.cwd().openDir(env.io, absolute, .{});
     defer dir.close(env.io);
-    const text = dir.readFileAlloc(env.io, "build.zig.zon", env.a, .limited(1 << 20)) catch return fail("{s} has no build.zig.zon; name it with --name", .{path});
+    const text = dir.readFileAlloc(env.io, "build.zig.zon", env.a, .limited(1 << 20)) catch try say.fail(env.io, "{s} has no build.zig.zon; name it with --name", .{path});
     const parsed = try manifest.parse(env.a, try env.a.dupeSentinel(u8, text, 0));
     return .{ .name = parsed.name, .source = .{ .path = relative } };
 }
@@ -237,17 +236,17 @@ fn removeCommand(env: Env, args: []const []const u8) !u8 {
     var kind: manifest.Kind = .normal;
     var name: ?[]const u8 = null;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--dev")) kind = .dev else if (name == null) name = arg else return fail("remove takes one name", .{});
+        if (std.mem.eql(u8, arg, "--dev")) kind = .dev else if (name == null) name = arg else try say.fail(env.io, "remove takes one name", .{});
     }
-    const target = name orelse return fail("remove needs a name", .{});
+    const target = name orelse try say.fail(env.io, "remove needs a name", .{});
     const edited = manifest.remove(env.a, try env.readManifest(), kind, target) catch |err| switch (err) {
-        error.NotFound => return fail("no {s} in .{s}", .{ target, kind.field() }),
+        error.NotFound => try say.fail(env.io, "no {s} in .{s}", .{ target, kind.field() }),
         else => return err,
     };
     var dir = try env.dir();
     defer dir.close(env.io);
     try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = edited });
-    std.debug.print("bay: {s} removed from .{s}\n", .{ target, kind.field() });
+    try say.note(env.io, "{s} removed from .{s}", .{ target, kind.field() });
     return 0;
 }
 
@@ -268,17 +267,17 @@ fn update(env: Env, names: []const []const u8) !u8 {
                 .path => continue,
             };
             const url = manifest.following(env.a, remote.url) orelse {
-                std.debug.print("bay: {s} is pinned to an exact commit; bay add it with a branch or tag to follow one\n", .{dependency.name});
+                try say.note(env.io, "{s} is pinned to an exact commit; bay add it with a branch or tag to follow one", .{dependency.name});
                 continue;
             };
             var next = try fetched(env, url, dependency.name) orelse return 1;
             next.lazy = dependency.lazy;
             if (std.mem.eql(u8, next.source.remote.hash, remote.hash)) continue;
             text = try manifest.put(env.a, text, kind, next);
-            std.debug.print("bay: {s} {s} -> {s}\n", .{ dependency.name, remote.hash, next.source.remote.hash });
+            try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
         }
     }
-    if (names.len != 0 and found < names.len) return fail("not every name given is a dependency", .{});
+    if (names.len != 0 and found < names.len) try say.fail(env.io, "not every name given is a dependency", .{});
     var dir = try env.dir();
     defer dir.close(env.io);
     try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = text });
@@ -294,10 +293,10 @@ fn list(env: Env) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
     for ([_]manifest.Kind{ .normal, .dev }) |kind| {
         const dependencies = if (kind == .normal) parsed.normal else parsed.dev;
-        try say.out(env.io, env.a, ".{s}{s}\n", .{ kind.field(), if (dependencies.len == 0) ": none" else "" });
+        try say.out(env.io, ".{s}{s}\n", .{ kind.field(), if (dependencies.len == 0) ": none" else "" });
         for (dependencies) |dependency| switch (dependency.source) {
-            .remote => |remote| try say.out(env.io, env.a, "  {s}{s}  {s}\n    {s}\n", .{ dependency.name, if (dependency.lazy) " (lazy)" else "", remote.url, remote.hash }),
-            .path => |path| try say.out(env.io, env.a, "  {s}{s}  {s}\n", .{ dependency.name, if (dependency.lazy) " (lazy)" else "", path }),
+            .remote => |remote| try say.out(env.io, "  {s}{s}  {s}\n    {s}\n", .{ dependency.name, if (dependency.lazy) " (lazy)" else "", remote.url, remote.hash }),
+            .path => |path| try say.out(env.io, "  {s}{s}  {s}\n", .{ dependency.name, if (dependency.lazy) " (lazy)" else "", path }),
         };
     }
     return 0;
@@ -321,16 +320,16 @@ const dev_function =
 fn initCommand(io: Io, a: std.mem.Allocator, zig: []const u8) !u8 {
     const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
     if (Io.Dir.cwd().access(io, "build.zig.zon", .{})) |_| {} else |_| {
-        if (enclosing(io, a, here)) |package| return fail("this is inside the package at {s}: run bay init there, or bay new <name> for a package of its own", .{package});
+        if (enclosing(io, a, here)) |package| try say.fail(io, "this is inside the package at {s}: run bay init there, or bay new <name> for a package of its own", .{package});
     }
     return prepare(io, a, zig, here);
 }
 
 /// `bay new <name>`: a new package in a new directory `name` here.
 fn newCommand(io: Io, a: std.mem.Allocator, zig: []const u8, args: []const []const u8) !u8 {
-    if (args.len != 1) return fail("new takes one name: the directory and the package", .{});
+    if (args.len != 1) try say.fail(io, "new takes one name: the directory and the package", .{});
     Io.Dir.cwd().createDir(io, args[0], .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => return fail("{s} exists; bay init inside it makes it a package", .{args[0]}),
+        error.PathAlreadyExists => try say.fail(io, "{s} exists; bay init inside it makes it a package", .{args[0]}),
         else => return err,
     };
     return prepare(io, a, zig, try Io.Dir.cwd().realPathFileAlloc(io, args[0], a));
@@ -350,7 +349,7 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
     var dir = try Io.Dir.cwd().openDir(io, path, .{});
     defer dir.close(io);
     if (dir.access(io, "build.zig.zon", .{})) |_| {} else |_| {
-        var child = std.process.spawn(io, .{ .argv = &.{ zig, "init" }, .cwd = .{ .path = path } }) catch |err| return fail("could not run {s}: {t}", .{ zig, err });
+        var child = std.process.spawn(io, .{ .argv = &.{ zig, "init" }, .cwd = .{ .path = path } }) catch |err| try say.fail(io, "could not run {s}: {t}", .{ zig, err });
         switch (try child.wait(io)) {
             .exited => |code| if (code != 0) return code,
             else => return 1,
@@ -359,13 +358,13 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
     const text = try dir.readFileAlloc(io, "build.zig.zon", a, .limited(1 << 20));
     if (try manifest.ensureList(a, try a.dupeSentinel(u8, text, 0), .dev)) |edited| try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = edited });
     const build = dir.readFileAlloc(io, "build.zig", a, .limited(1 << 20)) catch |err| switch (err) {
-        error.FileNotFound => return fail("build.zig.zon has no build.zig beside it", .{}),
+        error.FileNotFound => try say.fail(io, "build.zig.zon has no build.zig beside it", .{}),
         else => return err,
     };
-    if (std.mem.indexOf(u8, build, "pub fn dev(") == null) {
+    if (std.mem.find(u8, build, "pub fn dev(") == null) {
         try dir.writeFile(io, .{ .sub_path = "build.zig", .data = try std.mem.concat(a, u8, &.{ build, dev_function }) });
     }
-    std.debug.print("bay: {s} is ready; bay add --dev <url> pins a development tool, bay <step> runs its steps\n", .{path});
+    try say.note(io, "{s} is ready; bay add --dev <url> pins a development tool, bay <step> runs its steps", .{path});
     return 0;
 }
 

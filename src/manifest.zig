@@ -105,14 +105,14 @@ pub fn put(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind, dependency:
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const text = try std.fmt.allocPrint(a, ".{f} = {f},\n", .{ std.zig.fmtId(dependency.name), entryText(dependency) });
+    const text = try a.print(".{f} = {f},\n", .{ std.zig.fmtId(dependency.name), entryText(dependency) });
     const located = try locate(a, source, kind, dependency.name);
     const edited = if (located.entry) |range|
         try splice(a, source, range, text)
     else if (located.list) |list|
-        try splice(a, source, .{ .start = list.close, .end = list.close }, try std.fmt.allocPrint(a, "{s}{s}", .{ if (list.needs_comma) "," else "", text }))
+        try splice(a, source, .{ .start = list.close, .end = list.close }, try a.print("{s}{s}", .{ if (list.needs_comma) "," else "", text }))
     else
-        try splice(a, source, .{ .start = located.root_close, .end = located.root_close }, try std.fmt.allocPrint(a, "{s}.{s} = .{{\n{s}}},\n", .{ if (located.root_needs_comma) "," else "", kind.field(), text }));
+        try splice(a, source, .{ .start = located.root_close, .end = located.root_close }, try a.print("{s}.{s} = .{{\n{s}}},\n", .{ if (located.root_needs_comma) "," else "", kind.field(), text }));
     return format(gpa, edited);
 }
 
@@ -123,7 +123,7 @@ pub fn ensureList(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind) !?[:
     const a = arena.allocator();
     const located = try locate(a, source, kind, "");
     if (located.list != null) return null;
-    const text = try std.fmt.allocPrint(a, "{s}.{s} = .{{}},\n", .{ if (located.root_needs_comma) "," else "", kind.field() });
+    const text = try a.print("{s}.{s} = .{{}},\n", .{ if (located.root_needs_comma) "," else "", kind.field() });
     return try format(gpa, try splice(a, source, .{ .start = located.root_close, .end = located.root_close }, text));
 }
 
@@ -216,9 +216,9 @@ fn format(gpa: std.mem.Allocator, source: [:0]const u8) ![:0]u8 {
 /// only a commit.
 pub fn following(a: std.mem.Allocator, url: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, url, "git+")) return url;
-    const without_commit = url[0 .. std.mem.indexOfScalar(u8, url, '#') orelse url.len];
-    const query = std.mem.indexOf(u8, without_commit, "?ref=") orelse return null;
-    return std.fmt.allocPrint(a, "{s}#{s}", .{ without_commit[0..query], without_commit[query + "?ref=".len ..] }) catch null;
+    const without_commit = url[0 .. std.mem.findScalar(u8, url, '#') orelse url.len];
+    const query = std.mem.find(u8, without_commit, "?ref=") orelse return null;
+    return a.print("{s}#{s}", .{ without_commit[0..query], without_commit[query + "?ref=".len ..] }) catch null;
 }
 
 const sample =
@@ -311,7 +311,7 @@ test "ensureList adds an empty list once" {
     const gpa = std.testing.allocator;
     const added = (try ensureList(gpa, sample, .dev)).?;
     defer gpa.free(added);
-    try std.testing.expect(std.mem.indexOf(u8, added, ".dev_dependencies = .{},") != null);
+    try std.testing.expect(std.mem.find(u8, added, ".dev_dependencies = .{},") != null);
     try std.testing.expectEqual(null, try ensureList(gpa, added, .dev));
     try std.testing.expectEqual(null, try ensureList(gpa, sample, .normal));
 }
@@ -320,4 +320,34 @@ test "a dependency missing its hash is refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.InvalidManifest, parse(arena.allocator(), ".{ .name = .demo, .dev_dependencies = .{ .tool = .{ .url = \"x\" } } }"));
+}
+
+test "any bytes parse or are refused, and a dependency put into what parses parses back" {
+    try std.testing.fuzz({}, parseAny, .{ .corpus = &.{
+        ".{ .name = .demo, .version = \"0.0.0\", .dependencies = .{} }",
+        ".{ .name = .demo, .dependencies = .{ .a = .{ .url = \"git+https://example.org/a#1\", .hash = \"a-1\", .lazy = true } }, .dev_dependencies = .{ .t = .{ .path = \"../t\" } } }",
+        ".{ .name = .demo, .paths = .{\"\"} }",
+    } });
+}
+
+fn parseAny(_: void, smith: *std.testing.Smith) anyerror!void {
+    var bytes: [4096]u8 = undefined;
+    const len = smith.slice(&bytes);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = try a.dupeSentinel(u8, bytes[0..len], 0);
+    _ = parse(a, source) catch |err| switch (err) {
+        error.InvalidManifest => return,
+        error.OutOfMemory => return err,
+    };
+    const added: Dependency = .{ .name = "fuzzed", .source = .{ .path = "../fuzzed" } };
+    for ([_]Kind{ .normal, .dev }) |kind| {
+        const edited = try put(a, source, kind, added);
+        const back = try parse(a, edited);
+        const list = if (kind == .dev) back.dev else back.normal;
+        var found = false;
+        for (list) |dependency| found = found or std.mem.eql(u8, dependency.name, added.name);
+        try std.testing.expect(found);
+    }
 }
