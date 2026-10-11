@@ -33,8 +33,9 @@ pub const Input = struct {
     members: []const []const u8 = &.{},
 };
 
-/// A root manifest entry that must change to name the one hash of its package.
-pub const Raise = struct { kind: manifest.Kind, from: manifest.Dependency, to: manifest.Dependency };
+/// A manifest entry that must change to name the one hash of its package: in
+/// the package's manifest, or a workspace member's (`directory`).
+pub const Raise = struct { directory: []const u8, kind: manifest.Kind, from: manifest.Dependency, to: manifest.Dependency };
 
 pub const Resolution = struct {
     input: Input,
@@ -56,12 +57,14 @@ pub const Resolution = struct {
     /// The forks for one build, written under the package, as `--fork=` arguments
     /// relative to it. Only packages in that build's graph get one: Zig refuses a
     /// fork that matches nothing.
-    pub fn forks(r: Resolution, build: Build) ![]const []const u8 {
+    /// `from` is the directory Zig runs in, which is the build's root: Zig reads a
+    /// fork's path from there.
+    pub fn forks(r: Resolution, build: Build, from: []const u8) ![]const []const u8 {
         const a = r.input.a;
         var arguments: std.ArrayList([]const u8) = .empty;
         for (try r.reachable(build)) |key| {
             const directory = try r.forkFor(key) orelse continue;
-            const relative = try std.fs.path.relative(a, r.input.package, null, r.input.package, directory);
+            const relative = try std.fs.path.relative(a, from, null, from, directory);
             try arguments.append(a, try a.print("--fork={s}", .{if (relative.len == 0) "." else relative}));
         }
         return arguments.toOwnedSlice(a);
@@ -136,13 +139,14 @@ pub fn resolve(input: Input) !Resolution {
     };
     const graph = try select.select(a, packages.loader(), &.{}, mains.items, .{ .coexist = input.parsed.coexist, .chosen = chosen.items });
     if (graph.problem) |problem| try refuse(input.io, problem);
-    var resolution: Resolution = .{ .input = input, .store = packages, .graph = graph, .places = try places(a, graph), .raises = &.{} };
+    var resolution: Resolution = .{ .input = input, .store = packages, .graph = graph, .places = try places(a, graph, chosen.items), .raises = &.{} };
     resolution.raises = try raises(resolution);
     return resolution;
 }
 
 /// The one place of each package: the selected revision's, or the highest hash pinned for a main module.
-fn places(a: std.mem.Allocator, graph: select.Graph) !std.array_hash_map.String(select.Place) {
+/// Between equal versions of a main module, the hash the root names stands for it.
+fn places(a: std.mem.Allocator, graph: select.Graph, chosen: []const []const u8) !std.array_hash_map.String(select.Place) {
     var result: std.array_hash_map.String(select.Place) = .empty;
     for (graph.selected.keys(), graph.selected.values()) |key, revision| try result.put(a, key, revision.place);
     var best: std.array_hash_map.String(select.Revision) = .empty;
@@ -150,24 +154,46 @@ fn places(a: std.mem.Allocator, graph: select.Graph) !std.array_hash_map.String(
         const key = graph.keys.get(place).?; // safe: every place read has its key
         if (!graph.mains.contains(key) or revision.place != .remote) continue;
         const entry = try best.getOrPut(a, key);
-        if (!entry.found_existing or revision.version.order(entry.value_ptr.version) == .gt) entry.value_ptr.* = revision;
+        const replace = !entry.found_existing or switch (revision.version.order(entry.value_ptr.version)) {
+            .gt => true,
+            .eq => named(chosen, revision.place.key()) and !named(chosen, entry.value_ptr.place.key()),
+            .lt => false,
+        };
+        if (replace) entry.value_ptr.* = revision;
     }
     for (best.keys(), best.values()) |key, revision| try result.put(a, key, revision.place);
     return result;
 }
 
+fn named(chosen: []const []const u8, key: []const u8) bool {
+    for (chosen) |place| if (std.mem.eql(u8, place, key)) return true;
+    return false;
+}
+
+/// The manifests a workspace owns, the package's first: each must pin every
+/// package at its one hash, since Zig builds a main module from its directory.
 fn raises(r: Resolution) ![]const Raise {
+    const a = r.input.a;
     var list: std.ArrayList(Raise) = .empty;
+    try raisesOf(r, &list, r.input.package, r.input.parsed);
+    for (r.input.members) |member| {
+        const path = try std.fs.path.join(a, &.{ member, "build.zig.zon" });
+        const text = try Io.Dir.cwd().readFileAlloc(r.input.io, path, a, .limited(1 << 20));
+        try raisesOf(r, &list, member, try manifest.parse(a, try a.dupeSentinel(u8, text, 0)));
+    }
+    return list.toOwnedSlice(a);
+}
+
+fn raisesOf(r: Resolution, list: *std.ArrayList(Raise), directory: []const u8, parsed: manifest.Manifest) !void {
     for ([_]manifest.Kind{ .normal, .dev }) |kind| {
-        const dependencies = if (kind == .dev) r.input.parsed.dev else r.input.parsed.normal;
-        for (dependencies, try store.pins(r.input.a, r.input.package, dependencies)) |dependency, pin| {
+        const dependencies = if (kind == .dev) parsed.dev else parsed.normal;
+        for (dependencies, try store.pins(r.input.a, directory, dependencies)) |dependency, pin| {
             if (pin.place != .remote) continue; // a path dependency names a directory, not a version
             const target = r.wanted(pin) orelse continue;
             if (target != .remote or std.mem.eql(u8, target.remote.hash, pin.place.remote.hash)) continue;
-            try list.append(r.input.a, .{ .kind = kind, .from = dependency, .to = .{ .name = dependency.name, .lazy = dependency.lazy, .source = .{ .remote = .{ .url = target.remote.url, .hash = target.remote.hash } } } });
+            try list.append(r.input.a, .{ .directory = directory, .kind = kind, .from = dependency, .to = .{ .name = dependency.name, .lazy = dependency.lazy, .source = .{ .remote = .{ .url = target.remote.url, .hash = target.remote.hash } } } });
         }
     }
-    return list.toOwnedSlice(r.input.a);
 }
 
 /// A copy of the package at `remote` with `rewrites` in its manifest, named by

@@ -21,7 +21,11 @@ const usage =
     \\                             fetch and pin a dependency; --dev for development only
     \\  bay remove [--dev] <name>  drop a dependency
     \\  bay update [name...]       re-resolve each pinned ref (?ref=) and pin what it names now
+    \\  bay tidy                   pin each package at the version selection picks: the
+    \\                             highest any manifest in the graph asks for (Go's MVS)
     \\  bay list                   both lists, with their pins
+    \\  bay locate [--dev]         the package's directory, or its development build's root,
+    \\                             which is the directory Zig runs in and reads the build's paths from
     \\  bay fetch                  fetch every dependency of both kinds
     \\
     \\  bay install [--prefix <dir>] [--force] [<url or directory>]
@@ -36,6 +40,7 @@ const usage =
     \\  bay init                   the same for the package here, adding only what is
     \\                             missing; zig init first where there is no package
     \\
+    \\bay --locked <command> refuses to change a manifest, as CI should.
     \\Arguments after the step go to zig build. ZIG names the zig executable (default: zig).
     \\
 ;
@@ -59,7 +64,10 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(code);
 }
 
-fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, args: []const []const u8) !u8 {
+fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, given: []const []const u8) !u8 {
+    const locked = given.len != 0 and std.mem.eql(u8, given[0], "--locked");
+    const args = if (locked) given[1..] else given;
+    if (args.len == 0) try say.fail(io, "--locked comes before a command", .{});
     const zig = environ.get("ZIG") orelse "zig";
     if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, zig);
     if (std.mem.eql(u8, args[0], "new")) return newCommand(io, a, zig, args[1..]);
@@ -68,12 +76,14 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, arg
         const context: install.Context = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = try packageHere(io, a) };
         return if (std.mem.eql(u8, args[0], "install")) install.command(context, args[1..]) else install.uninstall(context, args[1..]);
     }
-    const env: Env = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = try findPackage(io, a) };
+    const env: Env = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = try findPackage(io, a), .locked = locked };
     const command = args[0];
     if (std.mem.eql(u8, command, "add")) return add(env, args[1..]);
     if (std.mem.eql(u8, command, "remove")) return removeCommand(env, args[1..]);
     if (std.mem.eql(u8, command, "update")) return update(env, args[1..]);
     if (std.mem.eql(u8, command, "list")) return list(env);
+    if (std.mem.eql(u8, command, "tidy")) return tidy(env);
+    if (std.mem.eql(u8, command, "locate")) return locate(env, args[1..]);
     if (std.mem.eql(u8, command, "fetch")) return fetchAll(env);
     if (std.mem.eql(u8, command, "build")) return zigBuild(env, .package, &.{}, args[1..]);
     if (std.mem.eql(u8, command, "dev")) return zigBuild(env, .development, &.{}, args[1..]);
@@ -87,6 +97,8 @@ const Env = struct {
     environ: *const std.process.Environ.Map,
     /// The package's directory: the nearest one up from here with a build.zig.zon.
     package: []const u8,
+    /// `--locked`: no manifest may change, as in CI.
+    locked: bool = false,
 
     fn dir(env: Env) !Io.Dir {
         return Io.Dir.cwd().openDir(env.io, env.package, .{});
@@ -125,9 +137,12 @@ fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const [
         for (resolution.raises) |raise| try say.note(env.io, "{s} is pinned below the selection: {s}", .{ raise.from.name, try describe(resolution, raise.to) });
         try say.fail(env.io, "build.zig.zon disagrees with the selection; bay tidy writes it", .{});
     }
+    // Zig runs in the build's root, so it reads every path, a fork's too, from one place:
+    // the package, or its development root.
+    const build_root = if (where == .development) try std.fs.path.join(env.a, &.{ env.package, root.directory }) else env.package;
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(env.a, &.{ env.zig, "build" });
-    try argv.appendSlice(env.a, try resolution.forks(if (where == .development) .development else .package));
+    try argv.appendSlice(env.a, try resolution.forks(if (where == .development) .development else .package, build_root));
     try argv.appendSlice(env.a, before);
     if (where == .development) {
         var dir = try env.dir();
@@ -139,18 +154,57 @@ fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const [
         };
         // The development build shares the package's cache and installs where the package does.
         try argv.appendSlice(env.a, &.{
-            "--build-file", try std.fs.path.join(env.a, &.{ env.package, root.directory, "build.zig" }),
+            "--build-file", try std.fs.path.join(env.a, &.{ build_root, "build.zig" }),
             "--cache-dir",  try std.fs.path.join(env.a, &.{ env.package, ".zig-cache" }),
             "--prefix",     try std.fs.path.join(env.a, &.{ env.package, "zig-out" }),
         });
     }
     try argv.appendSlice(env.a, after);
-    var child = std.process.spawn(env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
+    var child = std.process.spawn(env.io, .{ .argv = argv.items, .cwd = .{ .path = build_root }, .environ_map = env.environ }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
     return switch (try child.wait(env.io)) {
         .exited => |code| code,
         else => 1,
     };
+}
+
+/// `bay locate [--dev]`: the package's directory, or its development root, on
+/// stdout, as `cargo locate-project` names a project to a script. Zig runs a
+/// build in its root, so a tool reading a configured build resolves its paths there.
+fn locate(env: Env, args: []const []const u8) !u8 {
+    const dev = args.len == 1 and std.mem.eql(u8, args[0], "--dev");
+    if (args.len > 1 or (args.len == 1 and !dev)) try say.fail(env.io, "locate takes --dev or nothing", .{});
+    const directory = if (dev) try std.fs.path.join(env.a, &.{ env.package, root.directory }) else env.package;
+    try say.out(env.io, "{s}\n", .{directory});
+    return 0;
+}
+
+/// Writes the package's manifest; `--locked` refuses, since it would change.
+fn writeManifest(env: Env, text: []const u8) !void {
+    if (env.locked) try say.fail(env.io, "--locked: build.zig.zon would change", .{});
+    var dir = try env.dir();
+    defer dir.close(env.io);
+    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = text });
+}
+
+/// `bay tidy`: every manifest the workspace owns pins each package at its one
+/// hash, as Go writes go.mod; raised pins are named. Nothing to write is said.
+fn tidy(env: Env) !u8 {
+    const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
+    if (resolution.raises.len == 0) return 0;
+    if (env.locked) {
+        for (resolution.raises) |raise| try say.note(env.io, "{s}: {s} would rise to {s}", .{ raise.directory, raise.from.name, try describe(resolution, raise.to) });
+        try say.fail(env.io, "--locked: the selection would change a manifest", .{});
+    }
+    var texts: std.array_hash_map.String([:0]const u8) = .empty;
+    for (resolution.raises) |raise| {
+        const entry = try texts.getOrPut(env.a, raise.directory);
+        if (!entry.found_existing) entry.value_ptr.* = try env.a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(env.io, try std.fs.path.join(env.a, &.{ raise.directory, "build.zig.zon" }), env.a, .limited(1 << 20)), 0);
+        entry.value_ptr.* = try manifest.put(env.a, entry.value_ptr.*, raise.kind, raise.to);
+        try say.note(env.io, "{s} raised to {s}{s}", .{ raise.from.name, try describe(resolution, raise.to), if (std.mem.eql(u8, raise.directory, env.package)) "" else try env.a.print(" in {s}", .{raise.directory}) });
+    }
+    for (texts.keys(), texts.values()) |directory, text| try Io.Dir.cwd().writeFile(env.io, .{ .sub_path = try std.fs.path.join(env.a, &.{ directory, "build.zig.zon" }), .data = text });
+    return 0;
 }
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.
@@ -225,14 +279,11 @@ fn add(env: Env, args: []const []const u8) !u8 {
         if (std.mem.eql(u8, existing.name, entry.name)) entry.lazy = existing.lazy;
     }
     if (lazy) entry.lazy = true;
-    var dir = try env.dir();
-    defer dir.close(env.io);
     // Each list is its own, as Cargo's are: a package may ship a dependency and
     // develop with it too, so a pin in one list leaves the other as it is.
-    const edited = try manifest.put(env.a, try env.readManifest(), kind, entry);
-    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = edited });
+    try writeManifest(env, try manifest.put(env.a, try env.readManifest(), kind, entry));
     try say.note(env.io, "{s} pinned in .{s}", .{ entry.name, kind.field() });
-    return 0;
+    return tidy(env);
 }
 
 fn isDirectory(env: Env, path: []const u8) bool {
@@ -269,11 +320,9 @@ fn removeCommand(env: Env, args: []const []const u8) !u8 {
         error.NotFound => try say.fail(env.io, "no {s} in .{s}", .{ target, kind.field() }),
         else => return err,
     };
-    var dir = try env.dir();
-    defer dir.close(env.io);
-    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = edited });
+    try writeManifest(env, edited);
     try say.note(env.io, "{s} removed from .{s}", .{ target, kind.field() });
-    return 0;
+    return tidy(env);
 }
 
 /// `bay update`: each remote pin of either kind (or those named) fetched again
@@ -304,10 +353,8 @@ fn update(env: Env, names: []const []const u8) !u8 {
         }
     }
     if (names.len != 0 and found < names.len) try say.fail(env.io, "not every name given is a dependency", .{});
-    var dir = try env.dir();
-    defer dir.close(env.io);
-    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = text });
-    return 0;
+    try writeManifest(env, text);
+    return tidy(env);
 }
 
 fn contains(names: []const []const u8, name: []const u8) bool {
