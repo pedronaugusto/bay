@@ -52,9 +52,13 @@ pub fn dev(b: *std.Build, tools: type) void {
 
 `zig build` works as before for everything in `build`. `bay <step>` runs a step
 of the package's own build, or else of its development build: a package that
-bay writes under `.zig-cache/bay`, whose dependencies are this package and its
-dev dependencies, and whose build calls `dev`. In `dev`, `b` is that build's;
-the package's own files are reached through `b.dependency("<its name>", ...)`.
+bay writes under `.zig-cache/bay`, whose dependencies are this package, its
+dependencies and its dev dependencies, and whose build calls `dev`. In `dev`, `b`
+is that build's; the package's own files are reached through
+`b.dependency("<its name>", ...)`, and a dependency it ships through
+`b.dependency("<that name>", ...)`, the same package Zig gives the package. A
+dependency the package ships and also develops with is listed once, in
+`.dependencies`.
 
 ## Commands
 

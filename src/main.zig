@@ -123,7 +123,11 @@ fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const [
         const parsed = try manifest.parse(env.a, try env.readManifest());
         var dir = try env.dir();
         defer dir.close(env.io);
-        try root.write(env.io, env.a, dir, parsed);
+        root.write(env.io, env.a, dir, parsed) catch |err| switch (err) {
+            error.DevDependencyNamedAsPackage => try say.fail(env.io, "a dev dependency is named {s}, the package's own name", .{parsed.name}),
+            error.PinnedTwiceDifferently => try say.fail(env.io, "a name is pinned differently in .dependencies and .dev_dependencies: one name is one dependency", .{}),
+            else => |e| return e,
+        };
         // The development build shares the package's cache and installs where the package does.
         try argv.appendSlice(env.a, &.{
             "--build-file", try std.fs.path.join(env.a, &.{ env.package, root.directory, "build.zig" }),
