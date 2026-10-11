@@ -135,7 +135,7 @@ fn decode(out: []u8, text: []const u8) !void {
 }
 
 const testing = std.testing;
-const Encoder = std.base64.standard.Encoder;
+const encoder = std.base64.standard.Encoder;
 
 /// A minisign key and the text of a signature it makes, as minisign writes them.
 const Signer = struct {
@@ -147,7 +147,7 @@ const Signer = struct {
     }
 
     fn publicKey(signer: Signer, buffer: []u8) []const u8 {
-        return Encoder.encode(buffer, &("Ed".* ++ signer.id ++ signer.pair.public_key.toBytes()));
+        return encoder.encode(buffer, &("Ed".* ++ signer.id ++ signer.pair.public_key.toBytes()));
     }
 
     fn sign(signer: Signer, a: std.mem.Allocator, file: []const u8, algorithm: Algorithm, comment: []const u8) ![]u8 {
@@ -165,10 +165,10 @@ const Signer = struct {
         };
         var line_buffer: [100]u8 = undefined;
         var global_buffer: [100]u8 = undefined;
-        return std.fmt.allocPrint(a, "untrusted comment: signature from minisign secret key\n{s}\ntrusted comment: {s}\n{s}\n", .{
-            Encoder.encode(&line_buffer, tag ++ signer.id ++ signature),
+        return a.print("untrusted comment: signature from minisign secret key\n{s}\ntrusted comment: {s}\n{s}\n", .{
+            encoder.encode(&line_buffer, tag ++ signer.id ++ signature),
             comment,
-            Encoder.encode(&global_buffer, &global),
+            encoder.encode(&global_buffer, &global),
         });
     }
 };
@@ -217,7 +217,7 @@ test "a changed file, comment, key or algorithm is refused, each by name" {
     var line_buffer: [100]u8 = undefined;
     var global_buffer: [100]u8 = undefined;
     const zeros: [64]u8 = @splat(0);
-    const unknown = try std.fmt.allocPrint(a, "untrusted comment: x\n{s}\ntrusted comment: c\n{s}\n", .{ Encoder.encode(&line_buffer, "XX" ++ signer.id ++ zeros), Encoder.encode(&global_buffer, &zeros) });
+    const unknown = try a.print("untrusted comment: x\n{s}\ntrusted comment: c\n{s}\n", .{ encoder.encode(&line_buffer, "XX" ++ signer.id ++ zeros), encoder.encode(&global_buffer, &zeros) });
     try testing.expectError(error.UnsupportedAlgorithm, Signature.parse(unknown));
     try testing.expectError(error.InvalidSignature, Signature.parse("untrusted comment: x\nnot base64\n"));
     try testing.expectError(error.InvalidSignature, Signature.parse(try std.mem.concat(a, u8, &.{ text, "a fifth line\n" })));

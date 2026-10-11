@@ -26,7 +26,7 @@ pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []con
     const directory = std.fs.path.dirname(found.path).?; // safe: a found file has a directory
     var list: std.ArrayList([]const u8) = .empty;
     for (work.members) |member| {
-        const absolute = try std.fs.path.resolve(a, &.{ directory, member });
+        const absolute = try std.fs.path.resolveAlloc(a, &.{ directory, member });
         if (std.mem.eql(u8, absolute, package)) continue;
         const manifest_path = try std.fs.path.join(a, &.{ absolute, "build.zig.zon" });
         Io.Dir.cwd().access(io, manifest_path, .{}) catch |err| switch (err) {

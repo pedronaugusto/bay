@@ -64,7 +64,7 @@ pub const Resolution = struct {
         var arguments: std.ArrayList([]const u8) = .empty;
         for (try r.reachable(build)) |key| {
             const directory = try r.forkFor(key) orelse continue;
-            const relative = try std.fs.path.relative(a, from, null, from, directory);
+            const relative = try std.fs.path.relativeAlloc(a, from, null, from, directory);
             try arguments.append(a, try a.print("--fork={s}", .{if (relative.len == 0) "." else relative}));
         }
         return arguments.toOwnedSlice(a);
@@ -126,7 +126,7 @@ pub fn resolve(input: Input) !Resolution {
     for (input.members) |member| try mains.append(a, try store.revisionAt(input.io, a, member, .{ .directory = member }));
     for (input.parsed.overrides) |override| try mains.append(a, switch (override.source) {
         .path => |path| main: {
-            const directory = try std.fs.path.resolve(a, &.{ input.package, path });
+            const directory = try std.fs.path.resolveAlloc(a, &.{ input.package, path });
             break :main try store.revisionAt(input.io, a, directory, .{ .directory = directory });
         },
         .remote => |remote| try store.revisionAt(input.io, a, try packages.directoryOf(.{ .url = remote.url, .hash = remote.hash }), .{ .remote = .{ .url = remote.url, .hash = remote.hash } }),

@@ -148,7 +148,7 @@ pub fn pins(a: std.mem.Allocator, directory: []const u8, dependencies: []const m
         .lazy = dependency.lazy,
         .place = switch (dependency.source) {
             .remote => |remote| .{ .remote = .{ .url = remote.url, .hash = remote.hash } },
-            .path => |relative| .{ .directory = try std.fs.path.resolve(a, &.{ directory, relative }) },
+            .path => |relative| .{ .directory = try std.fs.path.resolveAlloc(a, &.{ directory, relative }) },
         },
     };
     return list;
