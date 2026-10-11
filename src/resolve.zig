@@ -300,7 +300,12 @@ pub fn copyTree(io: Io, a: std.mem.Allocator, from: []const u8, to: []const u8) 
             .sym_link => {
                 var buffer: [std.fs.max_path_bytes]u8 = undefined;
                 const link = try source.readLink(io, entry.path, &buffer);
-                try Io.Dir.cwd().symLink(io, buffer[0..link], target, .{});
+                // Windows makes a link to a directory apart from one to a file: what it reaches says which.
+                const to_directory = if (source.statFile(io, entry.path, .{})) |stat| stat.kind == .directory else |err| switch (err) {
+                    error.FileNotFound => false, // a link to nothing is kept as a link to a file
+                    else => |e| return e,
+                };
+                try Io.Dir.cwd().symLink(io, buffer[0..link], target, .{ .is_directory = to_directory });
             },
             else => {},
         }

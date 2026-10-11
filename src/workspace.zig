@@ -41,7 +41,8 @@ pub fn all(io: Io, a: std.mem.Allocator, from: []const u8) !?[]const []const u8 
             error.FileNotFound => try say.fail(io, "{s} names {s}, which has no build.zig.zon", .{ found.path, member }),
             else => |e| return e,
         };
-        try list.append(a, absolute);
+        // As the file system names it, as the package's own directory is: one spelling of each.
+        try list.append(a, try Io.Dir.cwd().realPathFileAlloc(io, absolute, a));
     }
     return try list.toOwnedSlice(a);
 }

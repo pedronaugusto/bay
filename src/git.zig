@@ -143,7 +143,13 @@ fn write(io: Io, a: std.mem.Allocator, listing: []const u8, out: Io.Dir, reader:
     // Links last, so no file is ever written through one.
     for (links.items) |link| {
         if (std.fs.path.dirname(link.path)) |parent| try out.createDirPath(io, parent);
-        try out.symLink(io, link.target, link.path, .{});
+        // Windows makes a link to a directory apart from one to a file: what it reaches in the tree says which.
+        const reached = try std.fs.path.join(a, &.{ std.fs.path.dirname(link.path) orelse ".", link.target });
+        const to_directory = if (out.statFile(io, reached, .{})) |stat| stat.kind == .directory else |err| switch (err) {
+            error.FileNotFound => false, // a link to nothing in the tree is kept as a link to a file
+            else => |e| return e,
+        };
+        try out.symLink(io, link.target, link.path, .{ .is_directory = to_directory });
     }
 }
 

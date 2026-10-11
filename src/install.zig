@@ -183,7 +183,10 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
     defer stage_dir.close(c.io);
     var prefix_dir = try Io.Dir.cwd().createDirPathOpen(c.io, prefix, .{});
     defer prefix_dir.close(c.io);
-    for (files) |file| try stage_dir.copyFile(file, prefix_dir, file, c.io, .{ .make_path = true });
+    for (files) |file| {
+        try moveAside(c, prefix_dir, file);
+        try stage_dir.copyFile(file, prefix_dir, file, c.io, .{ .make_path = true });
+    }
     const record: Record = .{ .name = name, .source = recorded, .prefix = prefix, .files = files };
     if (previous) |index| records.items[index] = record else try records.append(c.a, record);
     try save(c, records.items);
@@ -253,4 +256,21 @@ test "an install's name is an identifier, never a path" {
     try std.testing.expect(identifier("bay"));
     try std.testing.expect(identifier("zig_tool2"));
     for ([_][]const u8{ "", "2fast", "../..", "a/b", "a-b", "a.b" }) |name| try std.testing.expect(!identifier(name));
+}
+
+/// On Windows a running program cannot be written over, only renamed: the one
+/// being replaced, bay itself among them, moves aside to `<file>.old` first.
+fn moveAside(c: Context, dir: Io.Dir, file: []const u8) !void {
+    if (builtin.os.tag != .windows) return;
+    dir.access(c.io, file, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    const aside = try c.a.print("{s}.old", .{file});
+    dir.deleteFile(c.io, aside) catch |err| switch (err) {
+        error.FileNotFound => {},
+        error.AccessDenied => try say.fail(c.io, "{s} still runs from an earlier install: end it and install again", .{aside}),
+        else => |e| return e,
+    };
+    try dir.rename(file, dir, aside, c.io);
 }
