@@ -1,13 +1,30 @@
 const std = @import("std");
 
+/// The bay program, and its tests, which need nothing but std.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const module = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize });
-    const exe = b.addExecutable(.{ .name = "bay", .root_module = module });
+    const exe = b.addExecutable(.{ .name = "bay", .root_module = program(b, b, target, optimize) });
     b.installArtifact(exe);
-    const run = b.addRunArtifact(exe);
-    b.step("run", "Run bay").dependOn(&run.step);
-    const tests = b.addTest(.{ .root_module = module });
-    b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
+    b.step("run", "Run bay").dependOn(&b.addRunArtifact(exe).step);
+    b.step("test", "Run the tests").dependOn(tests(b, b, target, optimize));
+}
+
+/// bay's development: the same tests under preflight's gate.
+pub fn dev(b: *std.Build, tools: type) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const package = b.dependency("bay", .{ .target = target, .optimize = optimize }).builder;
+    const step = b.step("test", "Run the tests");
+    step.dependOn(tests(b, package, target, optimize));
+    tools.preflight.addCi(b, package, .{ .tests = step });
+}
+
+/// bay's root module from `package`'s sources, built in `b`.
+fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize });
+}
+
+fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Step {
+    return &b.addRunArtifact(b.addTest(.{ .root_module = program(b, package, target, optimize) })).step;
 }

@@ -52,8 +52,8 @@ pub fn command(c: Context, args: []const []const u8) !u8 {
     switch (mode) {
         .list => {
             for (records.items) |record| {
-                std.debug.print("{s}  {s}\n", .{ record.name, record.source });
-                for (record.files) |file| std.debug.print("    {s}\n", .{try std.fs.path.join(c.a, &.{ record.prefix, file })});
+                try say.out(c.io, c.a, "{s}  {s}\n", .{ record.name, record.source });
+                for (record.files) |file| try say.out(c.io, c.a, "    {s}\n", .{try std.fs.path.join(c.a, &.{ record.prefix, file })});
             }
             if (records.items.len == 0) std.debug.print("bay: nothing installed\n", .{});
             return 0;

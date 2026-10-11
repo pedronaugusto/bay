@@ -303,10 +303,10 @@ fn list(env: Env) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
     for ([_]manifest.Kind{ .normal, .dev }) |kind| {
         const dependencies = if (kind == .normal) parsed.normal else parsed.dev;
-        std.debug.print(".{s}{s}\n", .{ kind.field(), if (dependencies.len == 0) ": none" else "" });
+        try say.out(env.io, env.a, ".{s}{s}\n", .{ kind.field(), if (dependencies.len == 0) ": none" else "" });
         for (dependencies) |dependency| switch (dependency.source) {
-            .remote => |remote| std.debug.print("  {s}{s}  {s}\n    {s}\n", .{ dependency.name, if (dependency.lazy) " (lazy)" else "", remote.url, remote.hash }),
-            .path => |path| std.debug.print("  {s}{s}  {s}\n", .{ dependency.name, if (dependency.lazy) " (lazy)" else "", path }),
+            .remote => |remote| try say.out(env.io, env.a, "  {s}{s}  {s}\n    {s}\n", .{ dependency.name, if (dependency.lazy) " (lazy)" else "", remote.url, remote.hash }),
+            .path => |path| try say.out(env.io, env.a, "  {s}{s}  {s}\n", .{ dependency.name, if (dependency.lazy) " (lazy)" else "", path }),
         };
     }
     return 0;
