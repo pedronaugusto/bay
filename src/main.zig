@@ -267,7 +267,10 @@ fn writeManifest(env: Env, text: []const u8) !void {
     if (env.locked) try say.fail(env.io, "--locked: build.zig.zon would change", .{});
     var dir = try env.dir();
     defer dir.close(env.io);
-    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = text });
+    // Written beside and renamed over: a member resolving at the same moment reads
+    // the old manifest or the new one, never half of one.
+    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon.bay-partial", .data = text });
+    try dir.rename("build.zig.zon.bay-partial", dir, "build.zig.zon", env.io);
 }
 
 /// `bay tidy`: the package's manifest pins each workspace member at its release

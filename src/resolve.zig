@@ -83,7 +83,8 @@ pub const Resolution = struct {
             const key = r.graph.keys.get(queue.items[next].place.key()) orelse continue;
             if ((try seen.getOrPut(a, key)).found_existing) continue;
             const revision = r.graph.mains.get(key) orelse r.graph.selected.get(key).?; // safe: a key read is main or selected
-            try queue.appendSlice(a, revision.pins);
+            // What Zig builds: a dependency's dev pins are never part of it.
+            for (revision.pins) |pin| if (!pin.dev) try queue.append(a, pin);
         }
         return seen.keys();
     }
@@ -112,7 +113,8 @@ pub const Resolution = struct {
         var rewrites: std.ArrayList(manifest.Dependency) = .empty;
         for (revision.pins) |pin| {
             const target = r.wanted(pin) orelse continue;
-            if (target != .remote or std.mem.eql(u8, target.key(), pin.place.key())) continue;
+            // A dev pin is in no manifest Zig reads as a dependency's.
+            if (pin.dev or target != .remote or std.mem.eql(u8, target.key(), pin.place.key())) continue;
             try rewrites.append(r.input.a, .{ .name = pin.key, .lazy = pin.lazy, .source = .{ .remote = .{ .url = target.remote.url, .hash = target.remote.hash } } });
         }
         return rewrites.toOwnedSlice(r.input.a);
@@ -130,11 +132,10 @@ pub fn resolve(input: Input) !Resolution {
     const a = input.a;
     const packages = try store.Store.init(input.io, a, input.zig, input.package);
     var mains: std.ArrayList(select.Revision) = .empty;
-    var package = try store.revisionAt(input.io, a, input.package, .{ .directory = input.package });
-    // The package's development takes part in selection, as a Go module's tests do.
-    package.pins = try store.pins(a, input.package, try std.mem.concat(a, manifest.Dependency, &.{ input.parsed.normal, input.parsed.dev }));
-    try mains.append(a, package);
-    for (input.members) |member| try mains.append(a, try store.revisionAt(input.io, a, member, .{ .directory = member }));
+    // Every package under development takes part with its development, as Go
+    // counts each workspace module's tests: every member resolves one graph.
+    try mains.append(a, try store.developedAt(input.io, a, input.package));
+    for (input.members) |member| try mains.append(a, try store.developedAt(input.io, a, member));
     for (input.parsed.overrides) |override| try mains.append(a, switch (override.source) {
         .path => |path| main: {
             const directory = try std.fs.path.resolveAlloc(a, &.{ input.package, path });

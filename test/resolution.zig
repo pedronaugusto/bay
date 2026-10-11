@@ -442,3 +442,22 @@ test "a coexisting line that needs its pins rewritten is refused" {
     try std.testing.expect(refused(refusal));
     try std.testing.expect(std.mem.find(u8, refusal.stderr, "c 0.4.0 coexists with another line of c and needs its pins rewritten") != null);
 }
+
+test "a workspace is one graph: its tidy settles in one pass, development pins included" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // The app develops with c 0.1.1; a, beside it, pins c 0.1.0.
+    try f.application("app", try f.pin("a", "a"), &.{"a"}, "pub fn main() void {}");
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .dev_dependencies = .{{ {s} }} }}\n", .{ std.mem.trimEnd(u8, manifest[0..close], " "), try f.pin("c", "c2") }));
+    try f.write(".", "bay.work", ".{ .members = .{ \"app\", \"a\" } }\n");
+    try std.testing.expect(succeeded(try f.bay(".", &.{ "--workspace", "--jobs", "2", "tidy" })));
+    // a's pin rose to what the app's development asks for, in the same pass.
+    try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, "a/build.zig.zon", f.a, .limited(1 << 16)), "c-0.1.1-") != null);
+    const settled = try f.bay(".", &.{ "--locked", "--workspace", "tidy" });
+    try std.testing.expect(succeeded(settled));
+}

@@ -41,8 +41,9 @@ pub const Place = union(enum) {
     }
 };
 
-/// One entry of a manifest's `.dependencies`.
-pub const Pin = struct { key: []const u8, lazy: bool = false, place: Place };
+/// One entry of a manifest's dependencies; `dev` for `.dev_dependencies`, which
+/// Zig never builds as a dependency's and selection counts for a main module.
+pub const Pin = struct { key: []const u8, lazy: bool = false, dev: bool = false, place: Place };
 
 /// A revision read: what it is, where, and what it pins.
 pub const Revision = struct {

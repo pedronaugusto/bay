@@ -126,6 +126,16 @@ pub const Store = struct {
 /// with path dependencies made absolute. A package without a manifest pins
 /// nothing and is known by its place.
 pub fn revisionAt(io: Io, a: std.mem.Allocator, directory: []const u8, place: select.Place) !select.Revision {
+    return read(io, a, directory, place, false);
+}
+
+/// A package under development in `directory`: its revision with its dev
+/// dependencies among its pins, marked so, as Go counts a main module's tests.
+pub fn developedAt(io: Io, a: std.mem.Allocator, directory: []const u8) !select.Revision {
+    return read(io, a, directory, .{ .directory = directory }, true);
+}
+
+fn read(io: Io, a: std.mem.Allocator, directory: []const u8, place: select.Place, developed: bool) !select.Revision {
     const path = try std.fs.path.join(a, &.{ directory, "build.zig.zon" });
     const text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => return .{ .identity = .{ .name = place.key(), .fingerprint = 0 }, .version = .{ .major = 0, .minor = 0, .patch = 0 }, .place = place, .pins = &.{} },
@@ -137,17 +147,20 @@ pub fn revisionAt(io: Io, a: std.mem.Allocator, directory: []const u8, place: se
     };
     const version = std.SemanticVersion.parse(parsed.version) catch
         try say.fail(io, "{s}: .version \"{s}\" is not a semantic version", .{ path, parsed.version });
+    const shipped = try pins(a, directory, parsed.normal);
+    const developing = try pins(a, directory, if (developed) parsed.dev else &.{});
+    for (developing) |*pin| pin.dev = true;
     return .{
         .identity = .{ .name = parsed.name, .fingerprint = parsed.fingerprint },
         .version = version,
         .place = place,
-        .pins = try pins(a, directory, parsed.normal),
+        .pins = try std.mem.concat(a, select.Pin, &.{ shipped, developing }),
         .retracted = parsed.retracted,
     };
 }
 
 /// A manifest's dependencies as places, a path one made absolute against `directory`.
-pub fn pins(a: std.mem.Allocator, directory: []const u8, dependencies: []const manifest.Dependency) ![]const select.Pin {
+pub fn pins(a: std.mem.Allocator, directory: []const u8, dependencies: []const manifest.Dependency) ![]select.Pin {
     const list = try a.alloc(select.Pin, dependencies.len);
     for (list, dependencies) |*pin, dependency| pin.* = .{
         .key = dependency.name,
