@@ -157,6 +157,7 @@ version selected, and the workspace is one graph, every member's development in 
 a tool one member develops with can raise the floor another member ships with, as in
 a Go workspace. `bay tidy` writes only the package's own manifest; `bay --workspace
 tidy` tidies every member.
+
 `bay --workspace <command>` runs a command in every member, each after the members it
 ships with, and members with nothing between them at once (`--jobs <n>` at most; one
 per CPU by default). A member that fails skips the members that depend on it, and the
