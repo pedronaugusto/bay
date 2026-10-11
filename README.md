@@ -66,8 +66,8 @@ bay build | test | run     zig build, zig build test, zig build run
 bay <step> [args]          the step from the package's build, or else its development build
 bay dev [args]             zig build in the development build, as given
 bay add [--dev] [--lazy] [--name <name>] <url or directory>
-                           pin a dependency through zig fetch; a name pinned in the
-                           other list moves to this one
+                           pin a dependency through zig fetch in that list alone;
+                           a package may ship a dependency and develop with it too
 bay remove [--dev] <name>  drop a dependency
 bay update [name...]       pin what each recorded ref (?ref=) names now
 bay list                   both lists, with their pins

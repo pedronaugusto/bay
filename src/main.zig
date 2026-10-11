@@ -176,7 +176,7 @@ fn fetchAll(env: Env) !u8 {
 }
 
 /// `bay add`: Zig fetches into a scratch manifest with `zig fetch --save`, so
-/// the URL and hash are exactly what Zig records; bay moves the entry into the
+/// the URL and hash are exactly what Zig records; bay puts the entry in the
 /// package's list of that kind.
 fn add(env: Env, args: []const []const u8) !u8 {
     var kind: manifest.Kind = .normal;
@@ -202,20 +202,11 @@ fn add(env: Env, args: []const []const u8) !u8 {
     if (lazy) entry.lazy = true;
     var dir = try env.dir();
     defer dir.close(env.io);
-    // A name is one dependency: pinned in the other list, it moves to this one.
-    const other: manifest.Kind = if (kind == .dev) .normal else .dev;
-    var text = try env.readManifest();
-    var moved = true;
-    text = manifest.remove(env.a, text, other, entry.name) catch |err| switch (err) {
-        error.NotFound => blk: {
-            moved = false;
-            break :blk text;
-        },
-        else => return err,
-    };
-    const edited = try manifest.put(env.a, text, kind, entry);
+    // Each list is its own, as Cargo's are: a package may ship a dependency and
+    // develop with it too, so a pin in one list leaves the other as it is.
+    const edited = try manifest.put(env.a, try env.readManifest(), kind, entry);
     try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = edited });
-    if (moved) std.debug.print("bay: {s} moved from .{s} to .{s}\n", .{ entry.name, other.field(), kind.field() }) else std.debug.print("bay: {s} pinned in .{s}\n", .{ entry.name, kind.field() });
+    std.debug.print("bay: {s} pinned in .{s}\n", .{ entry.name, kind.field() });
     return 0;
 }
 
