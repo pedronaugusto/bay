@@ -9,7 +9,11 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const fetch = @import("fetch.zig");
+const dirs = @import("dirs.zig");
 const say = @import("say.zig");
+const store = @import("store.zig");
+const resolve = @import("resolve.zig");
+const toolchain = @import("toolchain.zig");
 
 pub const Record = struct {
     name: []const u8,
@@ -44,7 +48,7 @@ pub fn command(c: Context, args: []const []const u8) !u8 {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--list")) mode = .list else if (std.mem.eql(u8, arg, "--update")) mode = .update else if (std.mem.eql(u8, arg, "--force")) force = true else if (std.mem.eql(u8, arg, "--prefix") or std.mem.eql(u8, arg, "--name")) {
             i += 1;
-            if (i == args.len) return say.fail("{s} needs a value", .{arg});
+            if (i == args.len) try say.fail(c.io, "{s} needs a value", .{arg});
             if (std.mem.eql(u8, arg, "--prefix")) prefix = args[i] else name = args[i];
         } else try rest.append(c.a, arg);
     }
@@ -52,21 +56,21 @@ pub fn command(c: Context, args: []const []const u8) !u8 {
     switch (mode) {
         .list => {
             for (records.items) |record| {
-                try say.out(c.io, c.a, "{s}  {s}\n", .{ record.name, record.source });
-                for (record.files) |file| try say.out(c.io, c.a, "    {s}\n", .{try std.fs.path.join(c.a, &.{ record.prefix, file })});
+                try say.out(c.io, "{s}  {s}\n", .{ record.name, record.source });
+                for (record.files) |file| try say.out(c.io, "    {s}\n", .{try std.fs.path.join(c.a, &.{ record.prefix, file })});
             }
-            if (records.items.len == 0) std.debug.print("bay: nothing installed\n", .{});
+            if (records.items.len == 0) try say.note(c.io, "nothing installed", .{});
             return 0;
         },
         .update => {
             for (records.items) |record| {
                 if (rest.items.len != 0 and !contains(rest.items, record.name)) continue;
-                if (std.mem.indexOf(u8, record.source, "://") == null) {
+                if (std.mem.find(u8, record.source, "://") == null) {
                     if (try one(c, &records, record.source, record.prefix, record.name, true) != 0) return 1;
                     continue;
                 }
                 const url = manifest.following(c.a, record.source) orelse {
-                    std.debug.print("bay: {s} was installed from an exact commit; bay install it with a branch or tag to follow one\n", .{record.name});
+                    try say.note(c.io, "{s} was installed from an exact commit; bay install it with a branch or tag to follow one", .{record.name});
                     continue;
                 };
                 if (try one(c, &records, url, record.prefix, record.name, true) != 0) return 1;
@@ -74,8 +78,8 @@ pub fn command(c: Context, args: []const []const u8) !u8 {
             return 0;
         },
         .one => {
-            if (rest.items.len > 1) return say.fail("install takes one url or directory", .{});
-            const source = if (rest.items.len == 1) rest.items[0] else c.package orelse return say.fail("install needs a url or directory, or a package here", .{});
+            if (rest.items.len > 1) try say.fail(c.io, "install takes one url or directory", .{});
+            const source = if (rest.items.len == 1) rest.items[0] else c.package orelse try say.fail(c.io, "install needs a url or directory, or a package here", .{});
             return one(c, &records, source, prefix orelse try defaultPrefix(c), name, force);
         },
     }
@@ -83,7 +87,7 @@ pub fn command(c: Context, args: []const []const u8) !u8 {
 
 /// `bay uninstall <name>`: removes the files the install of `name` put in place.
 pub fn uninstall(c: Context, args: []const []const u8) !u8 {
-    if (args.len != 1) return say.fail("uninstall takes one name", .{});
+    if (args.len != 1) try say.fail(c.io, "uninstall takes one name", .{});
     var records = try load(c);
     for (records.items, 0..) |record, index| {
         if (!std.mem.eql(u8, record.name, args[0])) continue;
@@ -93,71 +97,101 @@ pub fn uninstall(c: Context, args: []const []const u8) !u8 {
         };
         _ = records.orderedRemove(index);
         try save(c, records.items);
-        std.debug.print("bay: {s} uninstalled\n", .{record.name});
+        try say.note(c.io, "{s} uninstalled", .{record.name});
         return 0;
     }
-    return say.fail("{s} is not installed; bay install --list names what is", .{args[0]});
+    try say.fail(c.io, "{s} is not installed; bay install --list names what is", .{args[0]});
+}
+
+/// The install build of the copy in `work`, as bay builds any package: with the
+/// Zig it names, its graph resolved, its pins raised to the selection in the copy
+/// and a fork wherever content differs.
+fn buildCommand(c: Context, work: []const u8, stage: []const u8, cache: []const u8) ![]const []const u8 {
+    const zig = try toolchain.forPackage(c.io, c.a, c.environ, work);
+    const manifest_path = try std.fs.path.join(c.a, &.{ work, "build.zig.zon" });
+    var text = try c.a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(c.io, manifest_path, c.a, .limited(1 << 20)), 0);
+    const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text), .development = false });
+    for (resolution.raises) |raise| text = try manifest.put(c.a, text, raise.kind, raise.to);
+    try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = manifest_path, .data = text });
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(c.a, &.{ zig, "build", "install", "-Doptimize=ReleaseSafe", "--prefix", stage, "--cache-dir", cache });
+    try argv.appendSlice(c.a, try resolution.forks(.package, work));
+    return argv.toOwnedSlice(c.a);
 }
 
 /// Installs one package from `source`, a URL or a directory, replacing an
-/// earlier install of the same name.
-fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, prefix: []const u8, given_name: ?[]const u8, force: bool) !u8 {
-    const data = try dataDirectory(c);
+/// earlier install of the same name. What it records is absolute, so an
+/// `uninstall` or `--update` from anywhere names the same places.
+fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_prefix: []const u8, given_name: ?[]const u8, force: bool) !u8 {
+    const data = try dirs.data(c.io, c.a, c.environ);
     var recorded = source;
-    const package_dir = if (std.mem.indexOf(u8, source, "://") == null)
-        try Io.Dir.cwd().realPathFileAlloc(c.io, source, c.a)
-    else directory: {
+    const prefix = try std.fs.path.resolveAlloc(c.a, &.{ try Io.Dir.cwd().realPathFileAlloc(c.io, ".", c.a), given_prefix });
+    const package_dir = if (std.mem.find(u8, source, "://") == null) recorded: {
+        recorded = try Io.Dir.cwd().realPathFileAlloc(c.io, source, c.a);
+        break :recorded recorded;
+    } else directory: {
         const dependency = try fetch.fetch(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }), source, given_name) orelse return 1;
         recorded = dependency.source.remote.url;
-        // zig fetch in a project keeps the package in the project's zig-pkg; elsewhere, in the global cache.
-        const local = try std.fs.path.join(c.a, &.{ data, "fetch", "zig-pkg", dependency.source.remote.hash });
-        if (Io.Dir.cwd().access(c.io, local, .{})) |_| break :directory local else |_| {}
-        break :directory try std.fs.path.join(c.a, &.{ try globalCache(c), "p", dependency.source.remote.hash });
+        const packages = try store.Store.init(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }));
+        break :directory try packages.directoryOf(.{ .url = dependency.source.remote.url, .hash = dependency.source.remote.hash });
     };
     const package_text = Io.Dir.cwd().readFileAlloc(c.io, try std.fs.path.join(c.a, &.{ package_dir, "build.zig.zon" }), c.a, .limited(1 << 20)) catch
-        return say.fail("{s} has no build.zig.zon", .{source});
+        try say.fail(c.io, "{s} has no build.zig.zon", .{source});
     const name = given_name orelse (try manifest.parse(c.a, try c.a.dupeSentinel(u8, package_text, 0))).name;
+    // The name names directories bay writes and deletes: it must be a Zig identifier, as a manifest's is.
+    if (!identifier(name)) try say.fail(c.io, "{s} is not a package name: letters, digits and _, not starting with a digit", .{name});
     // The build runs in a copy, so Zig's package cache is never written to.
     const work = try std.fs.path.join(c.a, &.{ data, "work", name });
     const stage = try std.fs.path.join(c.a, &.{ data, "stage", name });
     try Io.Dir.cwd().deleteTree(c.io, work);
     try Io.Dir.cwd().deleteTree(c.io, stage);
-    try copyTree(c, package_dir, work);
-    var child = std.process.spawn(c.io, .{ .argv = &.{ c.zig, "build", "install", "-Doptimize=ReleaseSafe", "--prefix", stage, "--cache-dir", try std.fs.path.join(c.a, &.{ data, "cache", name }) }, .cwd = .{ .path = work } }) catch |err|
-        return say.fail("could not run {s}: {t}", .{ c.zig, err });
+    try resolve.copyTree(c.io, c.a, package_dir, work);
+    const argv = try buildCommand(c, work, stage, try std.fs.path.join(c.a, &.{ data, "cache", name }));
+    var child = std.process.spawn(c.io, .{ .argv = argv, .cwd = .{ .path = work } }) catch |err|
+        try say.fail(c.io, "could not run {s}: {t}", .{ argv[0], err });
     switch (try child.wait(c.io)) {
         .exited => |code| if (code != 0) return code,
         else => return 1,
     }
     const files = try listTree(c, stage);
-    if (files.len == 0) return say.fail("{s} installs nothing", .{name});
+    if (files.len == 0) try say.fail(c.io, "{s} installs nothing", .{name});
     const previous = find(records.items, name);
     for (files) |file| {
         const destination = try std.fs.path.join(c.a, &.{ prefix, file });
         for (records.items) |record| {
             if (std.mem.eql(u8, record.name, name) or !std.mem.eql(u8, record.prefix, prefix)) continue;
-            if (contains(record.files, file)) return say.fail("{s} belongs to {s}; bay uninstall {s} first", .{ destination, record.name, record.name });
+            if (contains(record.files, file)) try say.fail(c.io, "{s} belongs to {s}; bay uninstall {s} first", .{ destination, record.name, record.name });
         }
         const ours = if (previous) |index| std.mem.eql(u8, records.items[index].prefix, prefix) and contains(records.items[index].files, file) else false;
         if (!ours and !force) if (Io.Dir.cwd().access(c.io, destination, .{})) |_| {
-            return say.fail("{s} exists and bay did not install it; --force replaces it", .{destination});
-        } else |_| {};
+            try say.fail(c.io, "{s} exists and bay did not install it; --force replaces it", .{destination});
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| return e,
+        };
     }
     // What the earlier install put in place and this one does not: all of it, when the prefix moved.
     if (previous) |index| for (records.items[index].files) |file| {
         if (std.mem.eql(u8, records.items[index].prefix, prefix) and contains(files, file)) continue;
-        Io.Dir.cwd().deleteFile(c.io, try std.fs.path.join(c.a, &.{ records.items[index].prefix, file })) catch {};
+        Io.Dir.cwd().deleteFile(c.io, try std.fs.path.join(c.a, &.{ records.items[index].prefix, file })) catch |err| switch (err) {
+            // Removed by hand since: nothing is left to remove.
+            error.FileNotFound => {},
+            else => |e| return e,
+        };
     };
     var stage_dir = try Io.Dir.cwd().openDir(c.io, stage, .{});
     defer stage_dir.close(c.io);
     var prefix_dir = try Io.Dir.cwd().createDirPathOpen(c.io, prefix, .{});
     defer prefix_dir.close(c.io);
-    for (files) |file| try stage_dir.copyFile(file, prefix_dir, file, c.io, .{ .make_path = true });
+    for (files) |file| {
+        try moveAside(c, prefix_dir, file);
+        try stage_dir.copyFile(file, prefix_dir, file, c.io, .{ .make_path = true });
+    }
     const record: Record = .{ .name = name, .source = recorded, .prefix = prefix, .files = files };
     if (previous) |index| records.items[index] = record else try records.append(c.a, record);
     try save(c, records.items);
-    std.debug.print("bay: {s} installed from {s}\n", .{ name, recorded });
-    for (files) |file| std.debug.print("    {s}\n", .{try std.fs.path.join(c.a, &.{ prefix, file })});
+    try say.note(c.io, "{s} installed from {s}", .{ name, recorded });
+    for (files) |file| try say.out(c.io, "{s}\n", .{try std.fs.path.join(c.a, &.{ prefix, file })});
     return 0;
 }
 
@@ -169,32 +203,6 @@ fn find(records: []const Record, name: []const u8) ?usize {
 fn contains(list: []const []const u8, item: []const u8) bool {
     for (list) |candidate| if (std.mem.eql(u8, candidate, item)) return true;
     return false;
-}
-
-/// Directories a build makes or a checkout keeps, which are not the package's sources.
-fn skipped(name: []const u8) bool {
-    for ([_][]const u8{ ".git", ".zig-cache", "zig-out", "zig-pkg" }) |skip| if (std.mem.eql(u8, name, skip)) return true;
-    return false;
-}
-
-fn copyTree(c: Context, from: []const u8, to: []const u8) !void {
-    var source = try Io.Dir.cwd().openDir(c.io, from, .{ .iterate = true });
-    defer source.close(c.io);
-    var target = try Io.Dir.cwd().createDirPathOpen(c.io, to, .{});
-    defer target.close(c.io);
-    var walker = try source.walk(c.a);
-    defer walker.deinit();
-    while (try walker.next(c.io)) |entry| {
-        if (skipped(entry.basename)) {
-            if (entry.kind == .directory) walker.leave(c.io);
-            continue;
-        }
-        switch (entry.kind) {
-            .directory => try target.createDirPath(c.io, entry.path),
-            .file => try source.copyFile(entry.path, target, entry.path, c.io, .{ .make_path = true }),
-            else => {},
-        }
-    }
 }
 
 /// The files under `path`, relative to it.
@@ -210,48 +218,59 @@ fn listTree(c: Context, path: []const u8) ![]const []const u8 {
 
 /// `~/.local`, whose `bin` is on PATH on most systems; `%LOCALAPPDATA%\bay` on Windows.
 fn defaultPrefix(c: Context) ![]const u8 {
-    if (builtin.os.tag == .windows) return std.fs.path.join(c.a, &.{ c.environ.get("LOCALAPPDATA") orelse return say.fail("LOCALAPPDATA is not set; give --prefix", .{}), "bay" });
-    return std.fs.path.join(c.a, &.{ c.environ.get("HOME") orelse return say.fail("HOME is not set; give --prefix", .{}), ".local" });
-}
-
-/// Where bay keeps its records and build copies: `$XDG_DATA_HOME/bay`,
-/// `~/.local/share/bay`, or `%LOCALAPPDATA%\bay\data`.
-fn dataDirectory(c: Context) ![]const u8 {
-    if (builtin.os.tag == .windows) return std.fs.path.join(c.a, &.{ c.environ.get("LOCALAPPDATA") orelse return say.fail("LOCALAPPDATA is not set", .{}), "bay", "data" });
-    if (c.environ.get("XDG_DATA_HOME")) |data| return std.fs.path.join(c.a, &.{ data, "bay" });
-    return std.fs.path.join(c.a, &.{ c.environ.get("HOME") orelse return say.fail("HOME is not set", .{}), ".local", "share", "bay" });
-}
-
-/// Zig's global package cache, as `zig env` reports it.
-fn globalCache(c: Context) ![]const u8 {
-    const result = std.process.run(c.a, c.io, .{ .argv = &.{ c.zig, "env" }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
-        return say.fail("could not run {s} env: {t}", .{ c.zig, err });
-    const Env = struct { global_cache_dir: []const u8 };
-    var diagnostics: std.zon.parse.Diagnostics = undefined;
-    const env = std.zon.parse.fromSlice(Env, .{ .gpa = c.a, .arena = c.a, .source = try c.a.dupeSentinel(u8, result.stdout, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
-        return say.fail("could not read {s} env", .{c.zig});
-    return env.global_cache_dir;
+    if (builtin.os.tag == .windows) return std.fs.path.join(c.a, &.{ c.environ.get("LOCALAPPDATA") orelse try say.fail(c.io, "LOCALAPPDATA is not set; give --prefix", .{}), "bay" });
+    return std.fs.path.join(c.a, &.{ c.environ.get("HOME") orelse try say.fail(c.io, "HOME is not set; give --prefix", .{}), ".local" });
 }
 
 fn load(c: Context) !std.ArrayList(Record) {
-    const path = try std.fs.path.join(c.a, &.{ try dataDirectory(c), "installed.zon" });
+    const path = try std.fs.path.join(c.a, &.{ try dirs.data(c.io, c.a, c.environ), "installed.zon" });
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     const text = Io.Dir.cwd().readFileAlloc(c.io, path, c.a, .limited(1 << 24)) catch |err| switch (err) {
         error.FileNotFound => return .empty,
         else => return err,
     };
     const records = std.zon.parse.fromSlice(Records, .{ .gpa = c.a, .arena = c.a, .source = try c.a.dupeSentinel(u8, text, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
-        return say.fail("{s} is not a record bay can read", .{path});
+        try say.fail(c.io, "{s} is not a record bay can read", .{path});
     var list: std.ArrayList(Record) = .empty;
     try list.appendSlice(c.a, records.installs);
     return list;
 }
 
 fn save(c: Context, records: []const Record) !void {
-    const data = try dataDirectory(c);
+    const data = try dirs.data(c.io, c.a, c.environ);
     try Io.Dir.cwd().createDirPath(c.io, data);
     var out: Io.Writer.Allocating = .init(c.a);
     try std.zon.stringify.serialize(Records{ .installs = records }, .{}, &out.writer);
     try out.writer.writeByte('\n');
     try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = try std.fs.path.join(c.a, &.{ data, "installed.zon" }), .data = out.written() });
+}
+
+/// Whether `name` is a Zig identifier: what a manifest's `.name` must be.
+fn identifier(name: []const u8) bool {
+    if (name.len == 0 or std.ascii.isDigit(name[0])) return false;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    return true;
+}
+
+test "an install's name is an identifier, never a path" {
+    try std.testing.expect(identifier("bay"));
+    try std.testing.expect(identifier("zig_tool2"));
+    for ([_][]const u8{ "", "2fast", "../..", "a/b", "a-b", "a.b" }) |name| try std.testing.expect(!identifier(name));
+}
+
+/// On Windows a running program cannot be written over, only renamed: the one
+/// being replaced, bay itself among them, moves aside to `<file>.old` first.
+fn moveAside(c: Context, dir: Io.Dir, file: []const u8) !void {
+    if (builtin.os.tag != .windows) return;
+    dir.access(c.io, file, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    const aside = try c.a.print("{s}.old", .{file});
+    dir.deleteFile(c.io, aside) catch |err| switch (err) {
+        error.FileNotFound => {},
+        error.AccessDenied => try say.fail(c.io, "{s} still runs from an earlier install: end it and install again", .{aside}),
+        else => |e| return e,
+    };
+    try dir.rename(file, dir, aside, c.io);
 }

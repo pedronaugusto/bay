@@ -28,11 +28,38 @@ pub const Source = union(enum) {
 
 pub const Dependency = struct { name: []const u8, source: Source, lazy: bool = false };
 
+/// One entry of the manifest in `directory` that must change: `from`, in the
+/// list `kind`, becomes `to`.
+pub const Repin = struct { directory: []const u8, kind: Kind, from: Dependency, to: Dependency };
+
+/// What a Zig package hash names: `<name>-<version>-<44 characters>`.
+pub const Named = struct { name: []const u8, version: std.SemanticVersion };
+
+pub fn named(hash: []const u8) ?Named {
+    const suffix = 44;
+    const dash = std.mem.findScalar(u8, hash, '-') orelse return null;
+    if (hash.len < dash + 1 + 1 + suffix or hash[hash.len - suffix - 1] != '-') return null;
+    const version = std.SemanticVersion.parse(hash[dash + 1 .. hash.len - suffix - 1]) catch return null;
+    return .{ .name = hash[0..dash], .version = version };
+}
+
 pub const Manifest = struct {
     name: []const u8,
+    /// The package's `.version`; a manifest without one is 0.0.0.
+    version: []const u8 = "0.0.0",
+    /// With the name, what the package is whatever its revision; 0 when absent.
+    fingerprint: u64 = 0,
     minimum_zig_version: ?[]const u8,
     normal: []const Dependency,
     dev: []const Dependency,
+    /// bay's: packages replaced for the whole graph when this package is the root.
+    overrides: []const Dependency = &.{},
+    /// bay's: packages whose incompatible lines may be selected side by side.
+    coexist: []const []const u8 = &.{},
+    /// bay's: the exact Zig this package builds with; else `minimum_zig_version`.
+    zig_version: ?[]const u8 = null,
+    /// bay's: versions of this package no selection may pick, read from its newest manifest.
+    retracted: []const []const u8 = &.{},
 };
 
 pub const ParseError = error{ InvalidManifest, OutOfMemory };
@@ -46,15 +73,33 @@ pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest
     const root = Zoir.Node.Index.root.get(&zoir);
     if (root != .struct_literal) return error.InvalidManifest;
     var manifest: Manifest = .{ .name = "", .minimum_zig_version = null, .normal = &.{}, .dev = &.{} };
-    for (root.struct_literal.names, 0..) |name, i| {
-        const field = name.get(&zoir);
-        const value = root.struct_literal.vals.at(@intCast(i)).get(&zoir);
+    var fields: Fields = .of(root.struct_literal);
+    while (fields.next(&zoir)) |entry| {
+        const field = entry.name;
+        const value = entry.value;
         if (std.mem.eql(u8, field, "name")) {
             if (value != .enum_literal) return error.InvalidManifest;
             manifest.name = try arena.dupe(u8, value.enum_literal.get(&zoir));
         } else if (std.mem.eql(u8, field, "minimum_zig_version")) {
-            if (value != .string_literal) return error.InvalidManifest;
-            manifest.minimum_zig_version = try arena.dupe(u8, value.string_literal);
+            manifest.minimum_zig_version = try string(arena, value);
+        } else if (std.mem.eql(u8, field, "version")) {
+            manifest.version = try string(arena, value);
+        } else if (std.mem.eql(u8, field, "zig_version")) {
+            manifest.zig_version = try string(arena, value);
+        } else if (std.mem.eql(u8, field, "fingerprint")) {
+            manifest.fingerprint = switch (value) {
+                .int_literal => |number| switch (number) {
+                    .small => |small| std.math.cast(u64, small) orelse return error.InvalidManifest,
+                    .big => |big| big.toInt(u64) catch return error.InvalidManifest,
+                },
+                else => return error.InvalidManifest,
+            };
+        } else if (std.mem.eql(u8, field, "overrides")) {
+            manifest.overrides = try dependencies(arena, &zoir, value);
+        } else if (std.mem.eql(u8, field, "coexist")) {
+            manifest.coexist = try names(arena, &zoir, value);
+        } else if (std.mem.eql(u8, field, "retracted")) {
+            manifest.retracted = try strings(arena, &zoir, value);
         } else if (std.mem.eql(u8, field, Kind.normal.field())) {
             manifest.normal = try dependencies(arena, &zoir, value);
         } else if (std.mem.eql(u8, field, Kind.dev.field())) {
@@ -65,23 +110,90 @@ pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest
     return manifest;
 }
 
+/// A ZON list's items in order, by the `u32` index Zoir gives them.
+const Items = struct {
+    range: Zoir.Node.Index.Range,
+    index: u32 = 0,
+
+    fn next(items: *Items, zoir: *const Zoir) ?Zoir.Node {
+        if (items.index == items.range.len) return null;
+        defer items.index += 1;
+        return items.range.at(items.index).get(zoir);
+    }
+};
+
+/// A ZON struct's fields in order: each name with its value, by the `u32` index Zoir gives them.
+const Fields = struct {
+    names: []const Zoir.NullTerminatedString,
+    values: Zoir.Node.Index.Range,
+    index: u32 = 0,
+
+    const Field = struct { name: []const u8, value: Zoir.Node };
+
+    fn of(literal: @FieldType(Zoir.Node, "struct_literal")) Fields {
+        return .{ .names = literal.names, .values = literal.vals };
+    }
+
+    fn next(fields: *Fields, zoir: *const Zoir) ?Field {
+        if (fields.index == fields.values.len) return null;
+        defer fields.index += 1;
+        return .{ .name = fields.names[fields.index].get(zoir), .value = fields.values.at(fields.index).get(zoir) };
+    }
+};
+
+fn string(arena: std.mem.Allocator, node: Zoir.Node) ParseError![]const u8 {
+    if (node != .string_literal) return error.InvalidManifest;
+    return arena.dupe(u8, node.string_literal);
+}
+
+/// A list of strings: `.{ "0.2.1", "0.3.0" }`.
+fn strings(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError![]const []const u8 {
+    const range = switch (node) {
+        .empty_literal => return &.{},
+        .array_literal => |range| range,
+        else => return error.InvalidManifest,
+    };
+    var list: std.ArrayList([]const u8) = .empty;
+    var items: Items = .{ .range = range };
+    while (items.next(zoir)) |item| try list.append(arena, try string(arena, item));
+    return list.items;
+}
+
+/// A list of package names: `.{ .aegis, .glint }`.
+fn names(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError![]const []const u8 {
+    const range = switch (node) {
+        .empty_literal => return &.{},
+        .array_literal => |range| range,
+        else => return error.InvalidManifest,
+    };
+    var list: std.ArrayList([]const u8) = .empty;
+    var items: Items = .{ .range = range };
+    while (items.next(zoir)) |item| {
+        if (item != .enum_literal) return error.InvalidManifest;
+        try list.append(arena, try arena.dupe(u8, item.enum_literal.get(zoir)));
+    }
+    return list.items;
+}
+
 fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError![]const Dependency {
     const entries = switch (node) {
         .empty_literal => return &.{},
         .struct_literal => |entries| entries,
         else => return error.InvalidManifest,
     };
-    const list = try arena.alloc(Dependency, entries.names.len);
-    for (list, entries.names, 0..) |*dependency, name, i| {
-        const value = entries.vals.at(@intCast(i)).get(zoir);
+    var list: std.ArrayList(Dependency) = .empty;
+    var each: Fields = .of(entries);
+    while (each.next(zoir)) |entry| {
+        const value = entry.value;
         if (value != .struct_literal) return error.InvalidManifest;
         var url: ?[]const u8 = null;
         var hash: ?[]const u8 = null;
         var path: ?[]const u8 = null;
         var lazy = false;
-        for (value.struct_literal.names, 0..) |field_name, j| {
-            const field = field_name.get(zoir);
-            switch (value.struct_literal.vals.at(@intCast(j)).get(zoir)) {
+        var fields: Fields = .of(value.struct_literal);
+        while (fields.next(zoir)) |pair| {
+            const field = pair.name;
+            switch (pair.value) {
                 .string_literal => |text| {
                     const copy = try arena.dupe(u8, text);
                     if (std.mem.eql(u8, field, "url")) url = copy else if (std.mem.eql(u8, field, "hash")) hash = copy else if (std.mem.eql(u8, field, "path")) path = copy else return error.InvalidManifest;
@@ -94,9 +206,9 @@ fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Pa
             }
         }
         const source: Source = if (path) |p| .{ .path = p } else .{ .remote = .{ .url = url orelse return error.InvalidManifest, .hash = hash orelse return error.InvalidManifest } };
-        dependency.* = .{ .name = try arena.dupe(u8, name.get(zoir)), .source = source, .lazy = lazy };
+        try list.append(arena, .{ .name = try arena.dupe(u8, entry.name), .source = source, .lazy = lazy });
     }
-    return list;
+    return list.items;
 }
 
 /// `source` with `dependency` in the `kind` list, added or replaced in place,
@@ -105,14 +217,14 @@ pub fn put(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind, dependency:
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const text = try std.fmt.allocPrint(a, ".{f} = {f},\n", .{ std.zig.fmtId(dependency.name), entryText(dependency) });
+    const text = try a.print(".{f} = {f},\n", .{ std.zig.fmtId(dependency.name), entryText(dependency) });
     const located = try locate(a, source, kind, dependency.name);
     const edited = if (located.entry) |range|
         try splice(a, source, range, text)
     else if (located.list) |list|
-        try splice(a, source, .{ .start = list.close, .end = list.close }, try std.fmt.allocPrint(a, "{s}{s}", .{ if (list.needs_comma) "," else "", text }))
+        try splice(a, source, .{ .start = list.close, .end = list.close }, try a.print("{s}{s}", .{ if (list.needs_comma) "," else "", text }))
     else
-        try splice(a, source, .{ .start = located.root_close, .end = located.root_close }, try std.fmt.allocPrint(a, "{s}.{s} = .{{\n{s}}},\n", .{ if (located.root_needs_comma) "," else "", kind.field(), text }));
+        try splice(a, source, .{ .start = located.root_close, .end = located.root_close }, try a.print("{s}.{s} = .{{\n{s}}},\n", .{ if (located.root_needs_comma) "," else "", kind.field(), text }));
     return format(gpa, edited);
 }
 
@@ -123,7 +235,7 @@ pub fn ensureList(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind) !?[:
     const a = arena.allocator();
     const located = try locate(a, source, kind, "");
     if (located.list != null) return null;
-    const text = try std.fmt.allocPrint(a, "{s}.{s} = .{{}},\n", .{ if (located.root_needs_comma) "," else "", kind.field() });
+    const text = try a.print("{s}.{s} = .{{}},\n", .{ if (located.root_needs_comma) "," else "", kind.field() });
     return try format(gpa, try splice(a, source, .{ .start = located.root_close, .end = located.root_close }, text));
 }
 
@@ -136,6 +248,21 @@ pub fn remove(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind, name: []
     return format(gpa, try splice(a, source, range, ""));
 }
 
+/// A path as a manifest holds it: escaped as a ZON string, with `/` between its
+/// parts on every host, so a manifest written on Windows reads the same elsewhere.
+pub fn portable(path: []const u8) std.fmt.Alt([]const u8, writePortable) {
+    return .{ .data = path };
+}
+
+fn writePortable(path: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    var parts = std.mem.splitScalar(u8, path, '\\');
+    var first = true;
+    while (parts.next()) |part| : (first = false) {
+        if (!first) try w.writeByte('/');
+        try w.print("{f}", .{std.zig.fmtString(part)});
+    }
+}
+
 fn entryText(dependency: Dependency) std.fmt.Alt(Dependency, writeEntry) {
     return .{ .data = dependency };
 }
@@ -144,7 +271,7 @@ fn writeEntry(dependency: Dependency, w: *std.Io.Writer) std.Io.Writer.Error!voi
     try w.writeAll(".{\n");
     switch (dependency.source) {
         .remote => |remote| try w.print(".url = \"{f}\",\n.hash = \"{f}\",\n", .{ std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) }),
-        .path => |path| try w.print(".path = \"{f}\",\n", .{std.zig.fmtString(path)}),
+        .path => |path| try w.print(".path = \"{f}\",\n", .{portable(path)}),
     }
     if (dependency.lazy) try w.writeAll(".lazy = true,\n");
     try w.writeAll("}");
@@ -216,9 +343,9 @@ fn format(gpa: std.mem.Allocator, source: [:0]const u8) ![:0]u8 {
 /// only a commit.
 pub fn following(a: std.mem.Allocator, url: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, url, "git+")) return url;
-    const without_commit = url[0 .. std.mem.indexOfScalar(u8, url, '#') orelse url.len];
-    const query = std.mem.indexOf(u8, without_commit, "?ref=") orelse return null;
-    return std.fmt.allocPrint(a, "{s}#{s}", .{ without_commit[0..query], without_commit[query + "?ref=".len ..] }) catch null;
+    const without_commit = url[0 .. std.mem.findScalar(u8, url, '#') orelse url.len];
+    const query = std.mem.find(u8, without_commit, "?ref=") orelse return null;
+    return a.print("{s}#{s}", .{ without_commit[0..query], without_commit[query + "?ref=".len ..] }) catch null;
 }
 
 const sample =
@@ -311,7 +438,7 @@ test "ensureList adds an empty list once" {
     const gpa = std.testing.allocator;
     const added = (try ensureList(gpa, sample, .dev)).?;
     defer gpa.free(added);
-    try std.testing.expect(std.mem.indexOf(u8, added, ".dev_dependencies = .{},") != null);
+    try std.testing.expect(std.mem.find(u8, added, ".dev_dependencies = .{},") != null);
     try std.testing.expectEqual(null, try ensureList(gpa, added, .dev));
     try std.testing.expectEqual(null, try ensureList(gpa, sample, .normal));
 }
@@ -320,4 +447,80 @@ test "a dependency missing its hash is refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.InvalidManifest, parse(arena.allocator(), ".{ .name = .demo, .dev_dependencies = .{ .tool = .{ .url = \"x\" } } }"));
+}
+
+test "any bytes parse or are refused, and a dependency put into what parses parses back" {
+    try std.testing.fuzz({}, parseAny, .{ .corpus = &.{
+        ".{ .name = .demo, .version = \"0.0.0\", .dependencies = .{} }",
+        ".{ .name = .demo, .dependencies = .{ .a = .{ .url = \"git+https://example.org/a#1\", .hash = \"a-1\", .lazy = true } }, .dev_dependencies = .{ .t = .{ .path = \"../t\" } } }",
+        ".{ .name = .demo, .paths = .{\"\"} }",
+    } });
+}
+
+fn parseAny(_: void, smith: *std.testing.Smith) anyerror!void {
+    var bytes: [4096]u8 = undefined;
+    const len = smith.slice(&bytes);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = try a.dupeSentinel(u8, bytes[0..len], 0);
+    _ = parse(a, source) catch |err| switch (err) {
+        error.InvalidManifest => return,
+        error.OutOfMemory => return err,
+    };
+    const added: Dependency = .{ .name = "fuzzed", .source = .{ .path = "../fuzzed" } };
+    for ([_]Kind{ .normal, .dev }) |kind| {
+        const edited = try put(a, source, kind, added);
+        const back = try parse(a, edited);
+        const list = if (kind == .dev) back.dev else back.normal;
+        var found = false;
+        for (list) |dependency| found = found or std.mem.eql(u8, dependency.name, added.name);
+        try std.testing.expect(found);
+    }
+}
+
+test "the fields resolution reads: version, fingerprint, overrides, coexist, the Zig, retractions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const text =
+        \\.{
+        \\    .name = .demo,
+        \\    .version = "0.4.1",
+        \\    .fingerprint = 0xa1b2c3d4e5f60718,
+        \\    .minimum_zig_version = "0.17.0",
+        \\    .zig_version = "0.17.0",
+        \\    .dependencies = .{},
+        \\    .overrides = .{ .aegis = .{ .path = "../aegis" } },
+        \\    .coexist = .{ .strand, .warp },
+        \\    .retracted = .{ "0.4.0" },
+        \\}
+    ;
+    const parsed = try parse(arena.allocator(), text);
+    try std.testing.expectEqualStrings("0.4.1", parsed.version);
+    try std.testing.expectEqual(0xa1b2c3d4e5f60718, parsed.fingerprint);
+    try std.testing.expectEqualStrings("0.17.0", parsed.zig_version.?);
+    try std.testing.expectEqualStrings("../aegis", parsed.overrides[0].source.path);
+    try std.testing.expectEqualStrings("warp", parsed.coexist[1]);
+    try std.testing.expectEqualStrings("0.4.0", parsed.retracted[0]);
+}
+
+test "a path is written with / between its parts on every host" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A quote is still escaped as ZON escapes it.
+    try std.testing.expectEqualStrings("a\\\"b/c", try a.print("{f}", .{portable("a\"b\\c")}));
+    try std.testing.expectEqualStrings("../core", try a.print("{f}", .{portable("..\\core")}));
+    try std.testing.expectEqualStrings("C:/work/core", try a.print("{f}", .{portable("C:\\work\\core")}));
+}
+
+test "a package hash names the package and its version" {
+    const ghostty = named("ghostty-1.3.2-dev-5UdBC-lZeAVJbemF7Fz8y5ApP0uA6wTc2uzECn3c6Z_Y").?;
+    try std.testing.expectEqualStrings("ghostty", ghostty.name);
+    try std.testing.expectEqualStrings("dev", ghostty.version.pre.?);
+    const aegis = named("aegis-0.2.1-" ++ &@as([44]u8, @splat('A'))).?;
+    try std.testing.expectEqualStrings("aegis", aegis.name);
+    try std.testing.expectEqual(1, aegis.version.patch);
+    try std.testing.expectEqual(null, named("aegis-0.2.1-short"));
+    try std.testing.expectEqual(null, named("1220" ++ &@as([64]u8, @splat('0'))));
 }
