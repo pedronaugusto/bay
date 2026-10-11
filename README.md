@@ -9,6 +9,48 @@ without bay, from each manifest's own pins.
 
 Work in progress. Requires Zig 0.17.0.
 
+## Install
+
+From a clone, with Zig 0.17.0 on the PATH:
+
+```
+zig build -Doptimize=ReleaseSafe
+./zig-out/bin/bay install
+```
+
+bay installs itself into `~/.local/bin` (put it on the PATH) and records what it
+put there. Installed from a URL instead (`bay install git+https://...#v0.1.0`), it
+updates with `bay install --update bay`. From then on bay
+fetches the exact Zig each package names; the one on the PATH only starts a new
+package.
+
+## Getting started
+
+A new package:
+
+```
+bay new example && cd example
+bay add git+https://github.com/owner/library#v1.2.0     # a dependency it ships
+bay add --dev git+https://github.com/owner/checker      # a tool it is developed with
+bay test                                                 # its tests, as zig build test runs them
+bay tree                                                 # what it builds with
+```
+
+An existing package: `bay init` at its root adds the empty `.dev_dependencies`
+and a `dev` function and changes nothing else; `zig build` keeps working. Move a
+tool from `.dependencies` with `bay remove <name>` and `bay add --dev <url>`, and
+its steps from `build` into `dev`. A project that depends on yours never runs
+bay: it sees `build` and `.dependencies`, as before.
+
+Developing several packages together: put a `bay.work` above them naming each
+(see Workspaces), and every build uses the local checkouts. `bay tidy` keeps
+their pins on one version of each.
+
+In CI: install bay, then `bay --locked tidy` fails if a manifest is not what the
+selection says, and `bay --locked <step>` runs the step without changing
+anything. `bay vendor` keeps every package in the project for a build with no
+network.
+
 ## Development dependencies
 
 A Zig manifest has one list of dependencies. A test tool listed there is part of

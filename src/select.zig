@@ -1,9 +1,11 @@
 //! Minimal Version Selection, Go modules' algorithm, over Zig packages.
 //!
-//! A pin is a minimum. Every revision reachable from the roots is read, and
-//! for each package (its name and fingerprint) the revision selected is the
-//! highest `.version` any of them pins: the same answer whatever order they are
-//! read in. A main module (the package under development, a workspace member, a
+//! A pin is a minimum. For each package (its name and fingerprint) the revision
+//! selected is the highest `.version` pinned by the root or by a revision
+//! selected, as Go has pruned its graph since 1.17: what an older revision asked
+//! for no longer counts once a newer one is chosen. Each round is computed over
+//! the whole set, so the answer does not depend on the order things are read in,
+//! and selections only rise, so it ends. A main module (the package under development, a workspace member, a
 //! local override) always wins over every revision of itself. Compatibility is
 //! then checked over what was selected only: a pin from a selected revision must
 //! ask for the same major version (below 1.0, the same minor) as the selection,
@@ -103,40 +105,52 @@ pub const Options = struct {
     chosen: []const []const u8 = &.{},
 };
 
-/// Selects from everything reachable from `roots` and the mains' own pins.
+/// Selects in rounds from the roots and the mains' own pins: each round reads
+/// every place the selected revisions pin, then selects again; it ends when
+/// nothing new is pinned. A revision never selected is read to know what it is,
+/// and its own pins are never followed.
 pub fn select(a: Allocator, loader: Loader, roots: []const Pin, mains: []const Revision, options: Options) !Graph {
     var graph: Graph = .{ .selected = .empty, .mains = .empty, .read = .empty, .keys = .empty, .problem = null };
-    var queue: std.ArrayList(Place) = .empty;
+    var frontier: std.ArrayList(Place) = .empty;
     for (mains) |main| {
         const identity = try main.identity.key(a);
         try graph.mains.put(a, identity, main);
         try graph.read.put(a, main.place.key(), main);
         try graph.keys.put(a, main.place.key(), identity);
-        for (main.pins) |pin| try queue.append(a, pin.place);
+        for (main.pins) |pin| try frontier.append(a, pin.place);
     }
-    for (roots) |pin| try queue.append(a, pin.place);
-    // Every revision at the highest version seen, by selection key.
+    for (roots) |pin| try frontier.append(a, pin.place);
+    // Every revision at the highest version pinned so far, by selection key.
     var tops: std.array_hash_map.String(std.ArrayList(Revision)) = .empty;
-    var next: usize = 0;
-    while (next < queue.items.len) : (next += 1) {
-        const place = queue.items[next];
-        if (graph.read.contains(place.key())) continue;
-        const revision = try loader.load(place);
-        const identity = try revision.identity.key(a);
-        const selection = if (graph.mains.contains(identity)) identity else try selectionKey(a, revision, identity, options.coexist);
-        try graph.read.put(a, place.key(), revision);
-        try graph.keys.put(a, place.key(), selection);
-        // A main module stands for every revision of itself; their pins are not its own.
-        if (graph.mains.contains(identity)) continue;
-        for (revision.pins) |pin| try queue.append(a, pin.place);
-        const top = try tops.getOrPut(a, selection);
-        if (!top.found_existing) top.value_ptr.* = .empty;
-        if (top.value_ptr.items.len != 0) switch (revision.version.order(top.value_ptr.items[0].version)) {
-            .gt => top.value_ptr.clearRetainingCapacity(),
-            .eq => {},
-            .lt => continue,
-        };
-        try top.value_ptr.append(a, revision);
+    // The revisions whose pins were followed, by place key.
+    var followed: std.array_hash_map.String(void) = .empty;
+    while (frontier.items.len != 0) {
+        for (frontier.items) |place| {
+            if (graph.read.contains(place.key())) continue;
+            const revision = try loader.load(place);
+            const identity = try revision.identity.key(a);
+            const selection = if (graph.mains.contains(identity)) identity else try selectionKey(a, revision, identity, options.coexist);
+            try graph.read.put(a, place.key(), revision);
+            try graph.keys.put(a, place.key(), selection);
+            // A main module stands for every revision of itself.
+            if (graph.mains.contains(identity)) continue;
+            const top = try tops.getOrPut(a, selection);
+            if (!top.found_existing) top.value_ptr.* = .empty;
+            if (top.value_ptr.items.len != 0) switch (revision.version.order(top.value_ptr.items[0].version)) {
+                .gt => top.value_ptr.clearRetainingCapacity(),
+                .eq => {},
+                .lt => continue,
+            };
+            try top.value_ptr.append(a, revision);
+        }
+        frontier.clearRetainingCapacity();
+        // The next round follows what is selected now; a tie not yet decided waits,
+        // and is refused if nothing settles it.
+        for (tops.values()) |candidates| {
+            const selected = decide(candidates.items, options.chosen) orelse continue;
+            if ((try followed.getOrPut(a, selected.place.key())).found_existing) continue;
+            for (selected.pins) |pin| try frontier.append(a, pin.place);
+        }
     }
     for (tops.keys(), tops.values()) |selection, candidates| {
         try graph.selected.put(a, selection, decide(candidates.items, options.chosen) orelse {
@@ -332,10 +346,11 @@ test "an incompatible line is refused unless the package may coexist" {
     try std.testing.expectEqualStrings("c4", apart.resolve(hashed("c4")).?.place.key());
 }
 
-test "a requirement of an older revision still counts, and an older line it reaches is not checked" {
+test "what a revision never selected pins is never followed" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // a was made against b 1.0.0, which pinned an old line of c; the root picks b 1.1.0.
     const b1 = rev("b", 2, "1.0.0", "b1", &.{pinTo("c", "c-old-line")});
     const b2 = rev("b", 2, "1.1.0", "b2", &.{pinTo("c", "c5")});
     const old_line = rev("c", 7, "0.4.0", "c-old-line", &.{});
@@ -345,7 +360,8 @@ test "a requirement of an older revision still counts, and an older line it reac
     const graph = try select(a, table.loader(), &.{ pinTo("a", "a"), pinTo("b", "b2") }, &.{}, .{});
     try std.testing.expectEqual(null, graph.problem);
     try std.testing.expectEqualStrings("b2", graph.resolve(hashed("b1")).?.place.key());
-    try std.testing.expectEqualStrings("c5", graph.resolve(hashed("c-old-line")).?.place.key());
+    try std.testing.expectEqualStrings("c5", graph.resolve(hashed("c5")).?.place.key());
+    try std.testing.expect(!graph.read.contains("c-old-line"));
 }
 
 test "selected revisions that depend on each other are refused" {
