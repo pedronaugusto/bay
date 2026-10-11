@@ -140,7 +140,7 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, prefix: 
     const stage = try std.fs.path.join(c.a, &.{ data, "stage", name });
     try Io.Dir.cwd().deleteTree(c.io, work);
     try Io.Dir.cwd().deleteTree(c.io, stage);
-    try copyTree(c, package_dir, work);
+    try resolve.copyTree(c.io, c.a, package_dir, work);
     const argv = try buildCommand(c, work, stage, try std.fs.path.join(c.a, &.{ data, "cache", name }));
     var child = std.process.spawn(c.io, .{ .argv = argv, .cwd = .{ .path = work } }) catch |err|
         try say.fail(c.io, "could not run {s}: {t}", .{ argv[0], err });
@@ -195,32 +195,6 @@ fn find(records: []const Record, name: []const u8) ?usize {
 fn contains(list: []const []const u8, item: []const u8) bool {
     for (list) |candidate| if (std.mem.eql(u8, candidate, item)) return true;
     return false;
-}
-
-/// Directories a build makes or a checkout keeps, which are not the package's sources.
-fn skipped(name: []const u8) bool {
-    for ([_][]const u8{ ".git", ".zig-cache", "zig-out", "zig-pkg" }) |skip| if (std.mem.eql(u8, name, skip)) return true;
-    return false;
-}
-
-fn copyTree(c: Context, from: []const u8, to: []const u8) !void {
-    var source = try Io.Dir.cwd().openDir(c.io, from, .{ .iterate = true });
-    defer source.close(c.io);
-    var target = try Io.Dir.cwd().createDirPathOpen(c.io, to, .{});
-    defer target.close(c.io);
-    var walker = try source.walk(c.a);
-    defer walker.deinit();
-    while (try walker.next(c.io)) |entry| {
-        if (skipped(entry.basename)) {
-            if (entry.kind == .directory) walker.leave(c.io);
-            continue;
-        }
-        switch (entry.kind) {
-            .directory => try target.createDirPath(c.io, entry.path),
-            .file => try source.copyFile(entry.path, target, entry.path, c.io, .{ .make_path = true }),
-            else => {},
-        }
-    }
 }
 
 /// The files under `path`, relative to it.

@@ -357,3 +357,24 @@ test "with no Zig named and none on the PATH, a new package is made by the Zig b
     const made = try f.tmp.dir.readFileAlloc(f.io, "fresh/build.zig.zon", f.a, .limited(1 << 16));
     try std.testing.expect(std.mem.find(u8, made, ".dev_dependencies") != null);
 }
+
+test "a member whose pins are behind builds from a copy with them rewritten, and only its own tidy writes it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b"), try f.pin("c", "c2") }), &.{ "a", "b" }, main_ab);
+    // a is worked on beside the app, and still pins c 0.1.0 where the graph selects 0.1.1.
+    try f.write(".", "bay.work", ".{ .members = .{ \"app\", \"a\" } }\n");
+    const before = try f.tmp.dir.readFileAlloc(f.io, "a/build.zig.zon", f.a, .limited(1 << 16));
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "a sees 0.1.1, b sees 0.1.1") != null);
+    try std.testing.expect(succeeded(try f.bay("app", &.{"tidy"})));
+    try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, "a/build.zig.zon", f.a, .limited(1 << 16)));
+    // Each member tidied by itself: a's pin rises to the selection.
+    try std.testing.expect(succeeded(try f.bay(".", &.{ "--workspace", "tidy" })));
+    const after = try f.tmp.dir.readFileAlloc(f.io, "a/build.zig.zon", f.a, .limited(1 << 16));
+    try std.testing.expect(std.mem.find(u8, after, "c-0.1.1-") != null);
+}

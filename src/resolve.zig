@@ -88,20 +88,34 @@ pub const Resolution = struct {
         return seen.keys();
     }
 
-    /// The fork of one package, when its content differs from its one hash.
+    /// The fork of one package, when its content differs from its one hash. A
+    /// main module other than the package itself (a workspace member, a
+    /// directory override) whose pins disagree with the selection is built from
+    /// a copy of its working tree with only those pins rewritten: its manifest
+    /// is its own to tidy, and no build needs it tidied first.
     fn forkFor(r: Resolution, key: []const u8) !?[]const u8 {
         const place = r.places.get(key) orelse return null;
         if (place != .remote) return null;
-        if (r.graph.mains.get(key)) |main| if (main.place == .directory) return main.place.directory;
         const revision = r.graph.mains.get(key) orelse r.graph.selected.get(key).?; // safe: a placed key is main or selected
+        const rewrites = try r.rewritesOf(revision);
+        if (r.graph.mains.contains(key) and revision.place == .directory) {
+            // The package's own pins agree, or its build stops before any fork.
+            if (rewrites.len == 0 or std.mem.eql(u8, revision.place.directory, r.input.package)) return revision.place.directory;
+            return try writeWorkingFork(r.input, revision, rewrites);
+        }
+        if (rewrites.len == 0) return null;
+        return try writeFork(r.input, r.store, place.remote, rewrites);
+    }
+
+    /// The pins of `revision` that name another revision than the selection's.
+    fn rewritesOf(r: Resolution, revision: select.Revision) ![]const manifest.Dependency {
         var rewrites: std.ArrayList(manifest.Dependency) = .empty;
         for (revision.pins) |pin| {
             const target = r.wanted(pin) orelse continue;
-            if (std.mem.eql(u8, target.key(), pin.place.key())) continue;
+            if (target != .remote or std.mem.eql(u8, target.key(), pin.place.key())) continue;
             try rewrites.append(r.input.a, .{ .name = pin.key, .lazy = pin.lazy, .source = .{ .remote = .{ .url = target.remote.url, .hash = target.remote.hash } } });
         }
-        if (rewrites.items.len == 0) return null;
-        return try writeFork(r.input, r.store, place.remote, rewrites.items);
+        return rewrites.toOwnedSlice(r.input.a);
     }
 
     /// The one place a pin must name: its package's.
@@ -169,18 +183,13 @@ fn named(chosen: []const []const u8, key: []const u8) bool {
     return false;
 }
 
-/// The manifests a workspace owns, the package's first: each must pin every
-/// package at its one hash, since Zig builds a main module from its directory.
+/// The package's own pins that name another revision than the selection's:
+/// its manifest is the one its build reads, so each must name the one hash.
+/// A member's pins are its own to tidy; its build reads a rewritten copy.
 fn raises(r: Resolution) ![]const manifest.Repin {
-    const a = r.input.a;
     var list: std.ArrayList(manifest.Repin) = .empty;
     try raisesOf(r, &list, r.input.package, r.input.parsed);
-    for (r.input.members) |member| {
-        const path = try std.fs.path.join(a, &.{ member, "build.zig.zon" });
-        const text = try Io.Dir.cwd().readFileAlloc(r.input.io, path, a, .limited(1 << 20));
-        try raisesOf(r, &list, member, try manifest.parse(a, try a.dupeSentinel(u8, text, 0)));
-    }
-    return list.toOwnedSlice(a);
+    return list.toOwnedSlice(r.input.a);
 }
 
 fn raisesOf(r: Resolution, list: *std.ArrayList(manifest.Repin), directory: []const u8, parsed: manifest.Manifest) !void {
@@ -198,20 +207,36 @@ fn raisesOf(r: Resolution, list: *std.ArrayList(manifest.Repin), directory: []co
 /// A copy of the package at `remote` with `rewrites` in its manifest, named by
 /// its hash and the rewrites, so an unchanged selection reuses it.
 fn writeFork(input: Input, packages: *store.Store, remote: select.Place.Remote, rewrites: []const manifest.Dependency) ![]const u8 {
-    const a = input.a;
+    const directory = try std.fs.path.join(input.a, &.{ input.package, forks_directory, try input.a.print("{s}-{x}", .{ remote.hash, digestOf(rewrites) }) });
+    if (Io.Dir.cwd().access(input.io, directory, .{})) |_| return directory else |err| switch (err) {
+        error.FileNotFound => {},
+        else => |e| return e,
+    }
+    try materialize(input, try packages.directoryOf(remote), directory, rewrites);
+    return directory;
+}
+
+/// A copy of a main module's working tree with `rewrites` in its manifest,
+/// made afresh for every build, since the tree is being worked on.
+fn writeWorkingFork(input: Input, main: select.Revision, rewrites: []const manifest.Dependency) ![]const u8 {
+    const directory = try std.fs.path.join(input.a, &.{ input.package, forks_directory, try input.a.print("{s}-working-{x}", .{ main.identity.name, digestOf(rewrites) }) });
+    try materialize(input, main.place.directory, directory, rewrites);
+    return directory;
+}
+
+fn digestOf(rewrites: []const manifest.Dependency) u64 {
     var digest = std.hash.Wyhash.init(0);
     for (rewrites) |rewrite| {
         digest.update(rewrite.name);
         digest.update(rewrite.source.remote.hash);
     }
-    const name = try a.print("{s}-{x}", .{ remote.hash, digest.final() });
-    const directory = try std.fs.path.join(a, &.{ input.package, forks_directory, name });
-    if (Io.Dir.cwd().access(input.io, directory, .{})) |_| return directory else |err| switch (err) {
-        error.FileNotFound => {},
-        else => |e| return e,
-    }
-    const source = try packages.directoryOf(remote);
-    // Written beside, then renamed: a fork is never seen half copied.
+    return digest.final();
+}
+
+/// Copies `source` to `directory` with `rewrites` in its manifest: written
+/// beside and then renamed over any older copy, so a fork is never seen half made.
+fn materialize(input: Input, source: []const u8, directory: []const u8, rewrites: []const manifest.Dependency) !void {
+    const a = input.a;
     const partial = try a.print("{s}.partial", .{directory});
     try Io.Dir.cwd().deleteTree(input.io, partial);
     try copyTree(input.io, a, source, partial);
@@ -219,10 +244,12 @@ fn writeFork(input: Input, packages: *store.Store, remote: select.Place.Remote, 
     var text = try a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(input.io, manifest_path, a, .limited(1 << 20)), 0);
     for (rewrites) |rewrite| text = try manifest.put(a, text, .normal, rewrite);
     try Io.Dir.cwd().writeFile(input.io, .{ .sub_path = manifest_path, .data = text });
+    try Io.Dir.cwd().deleteTree(input.io, directory);
     try Io.Dir.cwd().rename(partial, Io.Dir.cwd(), directory, input.io);
-    return directory;
 }
 
+/// Copies a package's files from `from` to `to`, leaving out what building and
+/// version control keep beside them: `.git`, `.zig-cache`, `zig-out`, `zig-pkg`.
 pub fn copyTree(io: Io, a: std.mem.Allocator, from: []const u8, to: []const u8) !void {
     try Io.Dir.cwd().createDirPath(io, to);
     var source = try Io.Dir.cwd().openDir(io, from, .{ .iterate = true });
@@ -230,6 +257,10 @@ pub fn copyTree(io: Io, a: std.mem.Allocator, from: []const u8, to: []const u8) 
     var walker = try source.walk(a);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
+        if (beside(entry.basename)) {
+            if (entry.kind == .directory) walker.leave(io);
+            continue;
+        }
         const target = try std.fs.path.join(a, &.{ to, entry.path });
         switch (entry.kind) {
             .directory => try Io.Dir.cwd().createDirPath(io, target),
@@ -242,6 +273,11 @@ pub fn copyTree(io: Io, a: std.mem.Allocator, from: []const u8, to: []const u8) 
             else => {},
         }
     }
+}
+
+fn beside(name: []const u8) bool {
+    for ([_][]const u8{ ".git", ".zig-cache", "zig-out", "zig-pkg" }) |kept| if (std.mem.eql(u8, name, kept)) return true;
+    return false;
 }
 
 /// The revisions that pin `place`, as a person reads them.

@@ -142,13 +142,16 @@ developed together:
 ```
 
 Every member is built from its directory wherever the graph pins it, so a change in
-one is built and tested against the others before it is published anywhere.
+one is built and tested against the others before it is published anywhere. A member
+whose own pins are behind the selection is built from a copy of its working tree with
+only those pins rewritten, so no member's manifest has to change for another to build.
 
 A member's pins are what everyone outside the workspace builds with, so `bay tidy`
-pins each member another member depends on at its release: the tag of the member's
-own `.version` (`v1.4.0` or `1.4.0`) on its remote. A member whose version has no tag
-yet has unreleased work, and pins to it stay. Pins of every other package go to the
-one version selected.
+pins each member the package depends on at its release: the tag of the member's own
+`.version` (`v1.4.0` or `1.4.0`) on its remote. A member whose version has no tag yet
+has unreleased work, and pins to it stay. Pins of every other package go to the one
+version selected. `bay tidy` writes only the package's own manifest; `bay --workspace
+tidy` tidies every member.
 
 `bay --workspace <command>` runs a command in every member, each after the members it
 ships with, and members with nothing between them at once (`--jobs <n>` at most; one

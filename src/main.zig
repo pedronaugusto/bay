@@ -256,16 +256,16 @@ fn writeManifest(env: Env, text: []const u8) !void {
     try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = text });
 }
 
-/// `bay tidy`: every manifest the workspace owns pins each member at its
-/// release and each package at its one hash, as Go writes go.mod; what moves
-/// is named, and nothing to write says nothing.
+/// `bay tidy`: the package's manifest pins each workspace member at its release
+/// and each package at its one hash, as Go writes go.mod; what moves is named,
+/// and nothing to write says nothing. Only this manifest is written: every
+/// member's is its own (`bay --workspace tidy` tidies them all).
 fn tidy(env: Env) !u8 {
     const others = try workspace.members(env.io, env.a, env.package);
     if (others.len != 0) {
-        // Members first: what their releases pin is then part of the selection.
-        const owners = try std.mem.concat(env.a, []const u8, &.{ &.{env.package}, others });
+        // Releases first: what they pin is then part of the selection.
         const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
-        const syncs = try published.syncs(env.io, env.a, env.zig, scratch, owners, owners);
+        const syncs = try published.syncs(env.io, env.a, env.zig, scratch, &.{env.package}, try std.mem.concat(env.a, []const u8, &.{ &.{env.package}, others }));
         try repin(env, syncs, "pinned at its release", null);
     }
     const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
@@ -273,25 +273,18 @@ fn tidy(env: Env) !u8 {
     return 0;
 }
 
-/// Writes each entry into its manifest, saying what moved; `--locked` says
-/// what would and refuses.
+/// Writes each entry into the package's manifest, saying what moved; `--locked`
+/// says what would and refuses.
 fn repin(env: Env, pins: []const manifest.Repin, verb: []const u8, resolution: ?resolve.Resolution) !void {
     if (pins.len == 0) return;
-    var texts: std.array_hash_map.String([:0]const u8) = .empty;
+    var text = try env.readManifest();
     for (pins) |pin| {
+        std.debug.assert(std.mem.eql(u8, pin.directory, env.package)); // tidy writes only the package's manifest
         const to = if (resolution) |r| try describe(r, pin.to) else pin.to.source.remote.hash;
-        const where = if (std.mem.eql(u8, pin.directory, env.package)) "" else try env.a.print(" in {s}", .{pin.directory});
-        if (env.locked) {
-            try say.note(env.io, "{s} would be {s} {s}{s}", .{ pin.from.name, verb, to, where });
-            continue;
-        }
-        const entry = try texts.getOrPut(env.a, pin.directory);
-        if (!entry.found_existing) entry.value_ptr.* = try env.a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(env.io, try std.fs.path.join(env.a, &.{ pin.directory, "build.zig.zon" }), env.a, .limited(1 << 20)), 0);
-        entry.value_ptr.* = try manifest.put(env.a, entry.value_ptr.*, pin.kind, pin.to);
-        try say.note(env.io, "{s} {s} {s}{s}", .{ pin.from.name, verb, to, where });
+        try say.note(env.io, "{s} {s}{s} {s}", .{ pin.from.name, if (env.locked) "would be " else "", verb, to });
+        text = try manifest.put(env.a, text, pin.kind, pin.to);
     }
-    if (env.locked) try say.fail(env.io, "--locked: a manifest would change", .{});
-    for (texts.keys(), texts.values()) |directory, text| try Io.Dir.cwd().writeFile(env.io, .{ .sub_path = try std.fs.path.join(env.a, &.{ directory, "build.zig.zon" }), .data = text });
+    try writeManifest(env, text);
 }
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.

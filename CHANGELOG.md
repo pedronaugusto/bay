@@ -7,7 +7,7 @@
 - One version of each package, as Go selects it (Minimal Version Selection): each package builds at the highest `.version` any manifest in the graph pins; the package under development wins over every revision of itself. Zig gets a graph with each package once, a dependency whose pins differ built from a copy with only its pins rewritten (`zig build --fork`). Two contents claiming one version, two lines of one package, a ring and a retracted version are refused in a sentence that names who asks.
 - `bay tidy` writes the package's pins to the selection; a build that disagrees stops; `bay --locked` never writes a manifest; `add`, `remove` and `update` tidy.
 - Workspaces (`bay.work`), `.overrides`, `.coexist` and `.retracted`.
-- `bay tidy` in a workspace pins each member another member depends on at its release: the tag of the member's own `.version`, when its remote has one.
+- `bay tidy` in a workspace pins each member the package depends on at its release: the tag of the member's own `.version`, when its remote has one. `tidy` writes only the package's own manifest; a member whose pins are behind builds from a copy with them rewritten.
 - `bay --workspace [--jobs <n>] <command>`: the command in every member, each after the members it ships with and the rest at once; a failure skips what depends on it.
 - `bay update` moves a pin to a release tag to the newest release on its line.
 - `git+ssh://` and `git+file://` dependencies, fetched with the system's git to the hash Zig gives the same tree.
