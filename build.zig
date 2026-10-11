@@ -18,7 +18,7 @@ fn dist(b: *std.Build) void {
     const step = b.step("dist", "Build the release programs for every host into zig-out/dist");
     const hosts = [_][]const u8{ "x86_64-linux-musl", "aarch64-linux-musl", "x86_64-macos", "aarch64-macos", "x86_64-windows-gnu", "aarch64-windows-gnu" };
     for (hosts) |triple| {
-        const query = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch unreachable; // safe: the triples above parse
+        const query = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch unreachable; // unreachable: the triples above parse
         const target = b.resolveTargetQuery(query);
         const module = program(b, b, target, .ReleaseSafe);
         // Safety checks stay; the debug information a person has no use for does not.
