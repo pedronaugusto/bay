@@ -73,9 +73,10 @@ pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest
     const root = Zoir.Node.Index.root.get(&zoir);
     if (root != .struct_literal) return error.InvalidManifest;
     var manifest: Manifest = .{ .name = "", .minimum_zig_version = null, .normal = &.{}, .dev = &.{} };
-    for (root.struct_literal.names, 0..) |name, i| {
-        const field = name.get(&zoir);
-        const value = root.struct_literal.vals.at(@intCast(i)).get(&zoir);
+    var fields: Fields = .of(root.struct_literal);
+    while (fields.next(&zoir)) |entry| {
+        const field = entry.name;
+        const value = entry.value;
         if (std.mem.eql(u8, field, "name")) {
             if (value != .enum_literal) return error.InvalidManifest;
             manifest.name = try arena.dupe(u8, value.enum_literal.get(&zoir));
@@ -109,6 +110,37 @@ pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest
     return manifest;
 }
 
+/// A ZON list's items in order, by the `u32` index Zoir gives them.
+const Items = struct {
+    range: Zoir.Node.Index.Range,
+    index: u32 = 0,
+
+    fn next(items: *Items, zoir: *const Zoir) ?Zoir.Node {
+        if (items.index == items.range.len) return null;
+        defer items.index += 1;
+        return items.range.at(items.index).get(zoir);
+    }
+};
+
+/// A ZON struct's fields in order: each name with its value, by the `u32` index Zoir gives them.
+const Fields = struct {
+    names: []const Zoir.NullTerminatedString,
+    values: Zoir.Node.Index.Range,
+    index: u32 = 0,
+
+    const Field = struct { name: []const u8, value: Zoir.Node };
+
+    fn of(literal: @FieldType(Zoir.Node, "struct_literal")) Fields {
+        return .{ .names = literal.names, .values = literal.vals };
+    }
+
+    fn next(fields: *Fields, zoir: *const Zoir) ?Field {
+        if (fields.index == fields.values.len) return null;
+        defer fields.index += 1;
+        return .{ .name = fields.names[fields.index].get(zoir), .value = fields.values.at(fields.index).get(zoir) };
+    }
+};
+
 fn string(arena: std.mem.Allocator, node: Zoir.Node) ParseError![]const u8 {
     if (node != .string_literal) return error.InvalidManifest;
     return arena.dupe(u8, node.string_literal);
@@ -121,9 +153,10 @@ fn strings(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseEr
         .array_literal => |range| range,
         else => return error.InvalidManifest,
     };
-    const list = try arena.alloc([]const u8, range.len);
-    for (list, 0..) |*item, i| item.* = try string(arena, range.at(@intCast(i)).get(zoir)); // safe: a ZON list has fewer than 2^32 items
-    return list;
+    var list: std.ArrayList([]const u8) = .empty;
+    var items: Items = .{ .range = range };
+    while (items.next(zoir)) |item| try list.append(arena, try string(arena, item));
+    return list.items;
 }
 
 /// A list of package names: `.{ .aegis, .glint }`.
@@ -133,13 +166,13 @@ fn names(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseErro
         .array_literal => |range| range,
         else => return error.InvalidManifest,
     };
-    const list = try arena.alloc([]const u8, range.len);
-    for (list, 0..) |*item, i| {
-        const entry = range.at(@intCast(i)).get(zoir); // safe: a ZON list has fewer than 2^32 items
-        if (entry != .enum_literal) return error.InvalidManifest;
-        item.* = try arena.dupe(u8, entry.enum_literal.get(zoir));
+    var list: std.ArrayList([]const u8) = .empty;
+    var items: Items = .{ .range = range };
+    while (items.next(zoir)) |item| {
+        if (item != .enum_literal) return error.InvalidManifest;
+        try list.append(arena, try arena.dupe(u8, item.enum_literal.get(zoir)));
     }
-    return list;
+    return list.items;
 }
 
 fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError![]const Dependency {
@@ -148,17 +181,19 @@ fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Pa
         .struct_literal => |entries| entries,
         else => return error.InvalidManifest,
     };
-    const list = try arena.alloc(Dependency, entries.names.len);
-    for (list, entries.names, 0..) |*dependency, name, i| {
-        const value = entries.vals.at(@intCast(i)).get(zoir);
+    var list: std.ArrayList(Dependency) = .empty;
+    var each: Fields = .of(entries);
+    while (each.next(zoir)) |entry| {
+        const value = entry.value;
         if (value != .struct_literal) return error.InvalidManifest;
         var url: ?[]const u8 = null;
         var hash: ?[]const u8 = null;
         var path: ?[]const u8 = null;
         var lazy = false;
-        for (value.struct_literal.names, 0..) |field_name, j| {
-            const field = field_name.get(zoir);
-            switch (value.struct_literal.vals.at(@intCast(j)).get(zoir)) {
+        var fields: Fields = .of(value.struct_literal);
+        while (fields.next(zoir)) |pair| {
+            const field = pair.name;
+            switch (pair.value) {
                 .string_literal => |text| {
                     const copy = try arena.dupe(u8, text);
                     if (std.mem.eql(u8, field, "url")) url = copy else if (std.mem.eql(u8, field, "hash")) hash = copy else if (std.mem.eql(u8, field, "path")) path = copy else return error.InvalidManifest;
@@ -171,9 +206,9 @@ fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Pa
             }
         }
         const source: Source = if (path) |p| .{ .path = p } else .{ .remote = .{ .url = url orelse return error.InvalidManifest, .hash = hash orelse return error.InvalidManifest } };
-        dependency.* = .{ .name = try arena.dupe(u8, name.get(zoir)), .source = source, .lazy = lazy };
+        try list.append(arena, .{ .name = try arena.dupe(u8, entry.name), .source = source, .lazy = lazy });
     }
-    return list;
+    return list.items;
 }
 
 /// `source` with `dependency` in the `kind` list, added or replaced in place,

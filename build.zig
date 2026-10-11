@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// The bay program, and its tests, which need nothing but std.
+/// The bay program, and its tests: std and aegis.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -40,9 +40,10 @@ pub fn dev(b: *std.Build, tools: type) void {
     tools.preflight.addCi(b, package, .{ .tests = step });
 }
 
-/// bay's root module from `package`'s sources, built in `b`.
+/// bay's root module from `package`'s sources, built in `b`, with aegis.
 fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize });
+    const aegis = package.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
+    return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "aegis", .module = aegis }} });
 }
 
 /// The unit tests, and bay end to end over real packages, run with the Zig that builds it.

@@ -36,12 +36,8 @@ pub const Store = struct {
         return store;
     }
 
-    pub fn loader(store: *Store) select.Loader {
-        return .{ .context = store, .loadFn = load };
-    }
-
-    fn load(context: *anyopaque, place: select.Place) anyerror!select.Revision {
-        const store: *Store = @ptrCast(@alignCast(context)); // safe: the loader is made from a *Store
+    /// The revision at a place, for selection: fetched and read.
+    pub fn load(store: *Store, place: select.Place) !select.Revision {
         const directory = switch (place) {
             .remote => |remote| try store.directoryOf(remote),
             .directory => |directory| directory,

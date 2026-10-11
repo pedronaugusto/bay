@@ -149,7 +149,7 @@ pub fn resolve(input: Input) !Resolution {
         .remote => |remote| try chosen.append(a, remote.hash),
         .path => {},
     };
-    const graph = try select.select(a, packages.loader(), &.{}, mains.items, .{ .coexist = input.parsed.coexist, .chosen = chosen.items });
+    const graph = try select.select(a, packages, &.{}, mains.items, .{ .coexist = input.parsed.coexist, .chosen = chosen.items });
     if (graph.problem) |problem| try refuse(a, input.io, graph, problem);
     var resolution: Resolution = .{ .input = input, .store = packages, .graph = graph, .places = try places(a, graph, chosen.items), .raises = &.{} };
     try materializable(resolution);

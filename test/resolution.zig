@@ -91,7 +91,7 @@ const Fixture = struct {
 
 /// A fingerprint Zig accepts for `name`: its checksum above an id.
 fn fingerprint(name: []const u8) u64 {
-    var id: u32 = @truncate(std.hash.Wyhash.hash(0, name));
+    var id = std.hash.XxHash32.hash(0, name);
     if (id == 0 or id == std.math.maxInt(u32)) id = 1;
     return @as(u64, std.hash.Crc32.hash(name)) << 32 | id;
 }

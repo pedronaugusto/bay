@@ -109,7 +109,7 @@ pub fn scratchManifest(a: std.mem.Allocator, name: []const u8, dependencies: []c
 /// The id is derived from the package's name, so the root of one package keeps
 /// one identity across runs and machines.
 fn fingerprint(name: []const u8, package: []const u8) u64 {
-    var id: u32 = @truncate(std.hash.Wyhash.hash(0, package));
+    var id = std.hash.XxHash32.hash(0, package);
     if (id == 0 or id == std.math.maxInt(u32)) id = 1;
     return @as(u64, std.hash.Crc32.hash(name)) << 32 | id;
 }
@@ -155,7 +155,7 @@ test "the root depends on the package and each dev dependency" {
 
 test "the fingerprint carries the checksum Zig checks" {
     const value = fingerprint(root_name, "demo");
-    try std.testing.expectEqual(std.hash.Crc32.hash(root_name), @as(u32, @truncate(value >> 32)));
+    try std.testing.expectEqual(@as(u64, std.hash.Crc32.hash(root_name)), value >> 32);
     try std.testing.expectEqual(value, fingerprint(root_name, "demo"));
     try std.testing.expect(value != fingerprint(root_name, "other"));
 }

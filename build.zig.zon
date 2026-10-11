@@ -4,7 +4,12 @@
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0xe12d5522677902bb,
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
-    .dependencies = .{},
+    .dependencies = .{
+        .aegis = .{
+            .url = "git+https://github.com/pedronaugusto/aegis#bb408fa199e81ef295e0d9eeb4873691b37e9df4",
+            .hash = "aegis-0.0.0-rsxoumUhBwBeTJdwPVd-FOyms_nA80JzANSwBePZTvDS",
+        },
+    },
     .dev_dependencies = .{
         .preflight = .{
             .url = "git+https://github.com/pedronaugusto/preflight#8c363bb6b25cf05218899f5296bd47143f044b49",

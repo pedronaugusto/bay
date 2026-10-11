@@ -55,16 +55,6 @@ pub const Revision = struct {
     retracted: []const []const u8 = &.{},
 };
 
-/// Reads the revision at a place: a fetch and a parse, or a test's table.
-pub const Loader = struct {
-    context: *anyopaque,
-    loadFn: *const fn (context: *anyopaque, place: Place) anyerror!Revision,
-
-    fn load(loader: Loader, place: Place) anyerror!Revision {
-        return loader.loadFn(loader.context, place);
-    }
-};
-
 /// Why there is no selection.
 pub const Problem = union(enum) {
     /// Two contents claim one version of a package: which is meant is not known.
@@ -108,7 +98,9 @@ pub const Options = struct {
 /// pins of each one read, then selects for each package the highest version
 /// among them. A revision of a main module stands for nothing: the main module
 /// is built, and what its other revisions pin is never followed.
-pub fn select(a: Allocator, loader: Loader, roots: []const Pin, mains: []const Revision, options: Options) !Graph {
+/// `loader` reads the revision at a place: `loader.load(place)`, a fetch and a
+/// parse, or a test's table.
+pub fn select(a: Allocator, loader: anytype, roots: []const Pin, mains: []const Revision, options: Options) !Graph {
     var graph: Graph = .{ .selected = .empty, .mains = .empty, .read = .empty, .keys = .empty, .problem = null };
     var frontier: std.ArrayList(Place) = .empty;
     for (mains) |main| {
@@ -228,15 +220,10 @@ const Table = struct {
     revisions: []const Revision,
     loads: usize = 0,
 
-    fn load(context: *anyopaque, place: Place) anyerror!Revision {
-        const table: *Table = @ptrCast(@alignCast(context)); // safe: tests pass a *Table
+    fn load(table: *Table, place: Place) !Revision {
         table.loads += 1;
         for (table.revisions) |revision| if (std.mem.eql(u8, revision.place.key(), place.key())) return revision;
         return error.NotFound;
-    }
-
-    fn loader(table: *Table) Loader {
-        return .{ .context = table, .loadFn = load };
     }
 };
 
@@ -261,7 +248,7 @@ test "the highest version pinned anywhere is selected, whatever the order" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var table: Table = .{ .revisions = &.{ c1, c2, a_, b } };
-        const graph = try select(arena.allocator(), table.loader(), roots, &.{}, .{});
+        const graph = try select(arena.allocator(), &table, roots, &.{}, .{});
         try std.testing.expectEqual(null, graph.problem);
         try std.testing.expectEqualStrings("c2", graph.resolve(hashed("c1")).?.place.key());
         try std.testing.expectEqual(3, graph.selected.count());
@@ -276,7 +263,7 @@ test "a main module stands for every revision of itself, and its pins are its ow
     const shakedown = rev("shakedown", 3, "0.2.0", "sd", &.{pinTo("aegis", "aegis-old")});
     const working: Revision = .{ .identity = .{ .name = "aegis", .fingerprint = 9 }, .version = try Version.parse("0.5.0"), .place = .{ .directory = "/work/aegis" }, .pins = &.{} };
     var table: Table = .{ .revisions = &.{ aegis_old, shakedown } };
-    const graph = try select(a, table.loader(), &.{pinTo("shakedown", "sd")}, &.{working}, .{});
+    const graph = try select(a, &table, &.{pinTo("shakedown", "sd")}, &.{working}, .{});
     try std.testing.expectEqual(null, graph.problem);
     try std.testing.expectEqualStrings("/work/aegis", graph.resolve(hashed("aegis-old")).?.place.key());
     // The old revision is read to learn what it is, never followed.
@@ -291,12 +278,12 @@ test "two contents at the selected version are refused; a higher version settles
     const y = rev("c", 7, "0.1.0", "y", &.{});
     const z = rev("c", 7, "0.1.2", "z", &.{});
     var table: Table = .{ .revisions = &.{ x, y, z } };
-    const tied = try select(a, table.loader(), &.{ pinTo("c", "x"), pinTo("c", "y") }, &.{}, .{});
+    const tied = try select(a, &table, &.{ pinTo("c", "x"), pinTo("c", "y") }, &.{}, .{});
     try std.testing.expect(tied.problem.? == .same_version);
-    const settled = try select(a, table.loader(), &.{ pinTo("c", "x"), pinTo("c", "y"), pinTo("c", "z") }, &.{}, .{});
+    const settled = try select(a, &table, &.{ pinTo("c", "x"), pinTo("c", "y"), pinTo("c", "z") }, &.{}, .{});
     try std.testing.expectEqual(null, settled.problem);
     // The root naming one of them decides.
-    const decided = try select(a, table.loader(), &.{ pinTo("c", "x"), pinTo("c", "y") }, &.{}, .{ .chosen = &.{"y"} });
+    const decided = try select(a, &table, &.{ pinTo("c", "x"), pinTo("c", "y") }, &.{}, .{ .chosen = &.{"y"} });
     try std.testing.expectEqual(null, decided.problem);
     try std.testing.expectEqualStrings("y", decided.resolve(hashed("x")).?.place.key());
 }
@@ -309,10 +296,10 @@ test "an incompatible line is refused unless the package may coexist" {
     const c4 = rev("c", 7, "0.4.0", "c4", &.{});
     const old = rev("old", 1, "1.0.0", "old", &.{pinTo("c", "c3")});
     var table: Table = .{ .revisions = &.{ c3, c4, old } };
-    const refused = try select(a, table.loader(), &.{ pinTo("old", "old"), pinTo("c", "c4") }, &.{}, .{});
+    const refused = try select(a, &table, &.{ pinTo("old", "old"), pinTo("c", "c4") }, &.{}, .{});
     try std.testing.expect(refused.problem.? == .incompatible);
     try std.testing.expectEqualStrings("old", refused.problem.?.incompatible.by);
-    const apart = try select(a, table.loader(), &.{ pinTo("old", "old"), pinTo("c", "c4") }, &.{}, .{ .coexist = &.{"c"} });
+    const apart = try select(a, &table, &.{ pinTo("old", "old"), pinTo("c", "c4") }, &.{}, .{ .coexist = &.{"c"} });
     try std.testing.expectEqual(null, apart.problem);
     try std.testing.expectEqualStrings("c3", apart.resolve(hashed("c3")).?.place.key());
     try std.testing.expectEqualStrings("c4", apart.resolve(hashed("c4")).?.place.key());
@@ -334,7 +321,7 @@ test "every revision reached counts, however deep it is found" {
     // b 1.0.0 is not built, yet what it asks for counts: the answer does not depend on
     // how deep each b is found.
     for ([_][]const Pin{ &.{ pinTo("x", "x"), pinTo("y", "y") }, &.{ pinTo("x", "x"), pinTo("z", "z") }, &.{ pinTo("y", "y"), pinTo("x", "x") } }) |roots| {
-        const graph = try select(a, table.loader(), roots, &.{}, .{});
+        const graph = try select(a, &table, roots, &.{}, .{});
         try std.testing.expectEqual(null, graph.problem);
         try std.testing.expectEqualStrings("b2", graph.resolve(hashed("b1")).?.place.key());
         try std.testing.expectEqualStrings("c41", graph.resolve(hashed("c40")).?.place.key());
@@ -347,6 +334,6 @@ test "selected revisions that depend on each other are refused" {
     const x = rev("x", 1, "1.0.0", "x", &.{pinTo("y", "y")});
     const y = rev("y", 2, "1.0.0", "y", &.{pinTo("x", "x")});
     var table: Table = .{ .revisions = &.{ x, y } };
-    const graph = try select(arena.allocator(), table.loader(), &.{pinTo("x", "x")}, &.{}, .{});
+    const graph = try select(arena.allocator(), &table, &.{pinTo("x", "x")}, &.{}, .{});
     try std.testing.expect(graph.problem.? == .cycle);
 }

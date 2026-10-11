@@ -8,6 +8,7 @@ const Io = std.Io;
 const manifest = @import("manifest.zig");
 const workspace = @import("workspace.zig");
 const say = @import("say.zig");
+const aegis = @import("aegis");
 
 const Outcome = enum { pending, ok, failed, skipped };
 
@@ -30,8 +31,13 @@ const Run = struct {
     command: []const []const u8,
     members: []Member,
     permits: Io.Semaphore,
-    output: Io.Mutex = .init,
-    /// Set when a member's output could not be written.
+    /// The terminal, which members write to whole, one at a time.
+    terminal: aegis.BlockingGuarded(Terminal) = .init(.{}),
+};
+
+/// What the members share through the terminal's guard.
+const Terminal = struct {
+    /// The first write to it that failed: the run has then failed, whatever its members did.
     unwritten: ?Io.Writer.Error = null,
 };
 
@@ -50,10 +56,18 @@ pub fn run(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map
         .permits = .{ .permits = @max(width, 1) },
     };
     var group: Io.Group = .init;
-    for (0..members.len) |index| group.concurrent(io, one, .{ &state, index }) catch |err|
+    for (0..members.len) |index| group.concurrent(io, one, .{ &state, index }) catch |err| {
+        // Members not started count as failed, so those that wait on them go on.
+        for (members[index..]) |*member| {
+            member.outcome = .failed;
+            member.done.set(io);
+        }
+        try group.await(io);
         try say.fail(io, "could not start a task per member: {t}", .{err});
+    };
     try group.await(io);
-    if (state.unwritten) |err| return err;
+    // Every task has ended: the terminal's state is read without its guard.
+    if (state.terminal.teardown().unwritten) |err| return err;
     var failed: usize = 0;
     for (members) |member| if (member.outcome != .ok) {
         failed += 1;
@@ -119,10 +133,7 @@ fn one(state: *Run, index: usize) void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
     defer arena.deinit();
     const said = attempt(state, member, arena.allocator());
-    // A run whose output cannot be written has failed, whatever its members did.
-    report(state, member, said) catch |err| {
-        state.unwritten = err;
-    };
+    report(state, member, said);
 }
 
 /// What a member's run wrote, once it has an outcome.
@@ -154,10 +165,18 @@ fn attempt(state: *Run, member: *Member, a: std.mem.Allocator) Said {
 }
 
 /// A member's output, whole, under its outcome.
-fn report(state: *Run, member: *const Member, said: Said) Io.Writer.Error!void {
+fn report(state: *Run, member: *const Member, said: Said) void {
+    var guard = state.terminal.acquireUncancelable(state.io);
+    defer guard.deinit(state.io);
+    const terminal = guard.value();
+    if (terminal.unwritten != null) return;
+    write(state, member, said) catch |err| {
+        terminal.unwritten = err;
+    };
+}
+
+fn write(state: *Run, member: *const Member, said: Said) Io.Writer.Error!void {
     const io = state.io;
-    state.output.lockUncancelable(io);
-    defer state.output.unlock(io);
     switch (member.outcome) {
         .skipped => return say.note(io, "{s}: skipped, since {s} failed", .{ member.name, state.members[member.because.?].name }), // safe: a skipped member names the failure
         .ok, .failed => try say.note(io, "{s}: {t}", .{ member.name, member.outcome }),
