@@ -26,6 +26,8 @@ const Fixture = struct {
         try env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(a, &.{ try Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", a), ".zig-cache", "bay-test-packages" }));
         try env.put("HOME", try std.fs.path.join(a, &.{ root, "home" }));
         try env.put("XDG_DATA_HOME", try std.fs.path.join(a, &.{ root, "data" }));
+        // Windows keeps bay's data under LOCALAPPDATA: the fixture's too.
+        try env.put("LOCALAPPDATA", try std.fs.path.join(a, &.{ root, "local" }));
         // git reads no configuration of the person's: none of the system's, an empty global one.
         try env.put("GIT_CONFIG_NOSYSTEM", "1");
         try env.put("GIT_CONFIG_GLOBAL", try std.fs.path.join(a, &.{ root, "gitconfig" }));
@@ -337,4 +339,21 @@ test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives i
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
     try f.tmp.dir.deleteTree(f.io, "app/.zig-cache");
     try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.1") != null);
+}
+
+test "with no Zig named and none on the PATH, a new package is made by the Zig bay was built with" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // That Zig installed where bay keeps toolchains, so nothing is downloaded.
+    const data: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ "local", "bay", "data" } else &.{ "data", "bay" };
+    const home = try std.fs.path.join(f.a, try std.mem.concat(f.a, []const u8, &.{ data, &.{ "zig", @import("builtin").zig_version_string } }));
+    try f.tmp.dir.createDirPath(f.io, home);
+    try f.tmp.dir.symLink(f.io, options.zig, try std.fs.path.join(f.a, &.{ home, if (@import("builtin").os.tag == .windows) "zig.exe" else "zig" }), .{});
+    _ = f.env.swapRemove("ZIG");
+    try f.env.put("PATH", "");
+    try std.testing.expect(succeeded(try f.bay(".", &.{ "new", "fresh" })));
+    const made = try f.tmp.dir.readFileAlloc(f.io, "fresh/build.zig.zon", f.a, .limited(1 << 16));
+    try std.testing.expect(std.mem.find(u8, made, ".dev_dependencies") != null);
 }

@@ -20,11 +20,9 @@ const index_url = "https://ziglang.org/download/index.json";
 const host = @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag);
 const executable = if (builtin.os.tag == .windows) "zig.exe" else "zig";
 
-/// The zig executable of exactly `version`, installed first if it is not yet.
-/// A version already installed is used without the network.
 /// The Zig a package builds with: `ZIG` when set; else exactly the version its
 /// manifest names (`.zig_version`, else `.minimum_zig_version`), installed from
-/// ziglang.org on first use; else the one on the PATH.
+/// ziglang.org on first use; else `unpinned`.
 pub fn forPackage(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8) ![]const u8 {
     if (environ.get("ZIG")) |zig| return zig;
     const manifest_path = try std.fs.path.join(a, &.{ package, "build.zig.zon" });
@@ -33,10 +31,32 @@ pub fn forPackage(io: Io, a: std.mem.Allocator, environ: *const std.process.Envi
         error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{manifest_path}),
         error.OutOfMemory => |e| return e,
     };
-    const version = parsed.zig_version orelse parsed.minimum_zig_version orelse return "zig";
+    const version = parsed.zig_version orelse parsed.minimum_zig_version orelse return unpinned(io, a, environ);
     return path(io, a, environ, version);
 }
 
+/// The Zig for what names none, such as a package not made yet: `ZIG` when
+/// set; else the zig on the PATH; else the release bay was built with,
+/// installed as any other, so bay alone is enough to start.
+pub fn unpinned(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map) ![]const u8 {
+    if (environ.get("ZIG")) |zig| return zig;
+    if (try onPath(io, a, environ)) |zig| return zig;
+    return path(io, a, environ, builtin.zig_version_string);
+}
+
+/// The zig the PATH names, if any.
+fn onPath(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map) !?[]const u8 {
+    const list = environ.get("PATH") orelse return null;
+    var directories = std.mem.tokenizeScalar(u8, list, std.fs.path.delimiter);
+    while (directories.next()) |directory| {
+        const candidate = try std.fs.path.join(a, &.{ directory, executable });
+        if (try exists(io, candidate)) return candidate;
+    }
+    return null;
+}
+
+/// The zig executable of exactly `version`, installed first if it is not yet.
+/// A version already installed is used without the network.
 pub fn path(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, version: []const u8) ![]const u8 {
     // A version is also a directory name: only what semantic versions allow reaches the file system.
     _ = std.SemanticVersion.parse(version) catch try say.fail(io, "{s} is not a Zig version", .{version});

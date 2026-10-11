@@ -95,14 +95,13 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, giv
     if (jobs != null and !every) try say.fail(io, "--jobs is for --workspace", .{});
     // Each member runs this bay, with --locked when it was given.
     if (every) return each.run(io, a, environ, jobs, if (locked) try std.mem.concat(a, []const u8, &.{ &.{"--locked"}, args }) else args);
-    // Before a package exists, the Zig on the PATH makes it.
-    const path_zig = environ.get("ZIG") orelse "zig";
-    if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, path_zig);
-    if (std.mem.eql(u8, args[0], "new")) return newCommand(io, a, path_zig, args[1..]);
+    // Before a package exists, a Zig that names no version makes it (`toolchain.unpinned`).
+    if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, try toolchain.unpinned(io, a, environ));
+    if (std.mem.eql(u8, args[0], "new")) return newCommand(io, a, try toolchain.unpinned(io, a, environ), args[1..]);
     // Global: anywhere, as cargo install is.
     if (std.mem.eql(u8, args[0], "install") or std.mem.eql(u8, args[0], "uninstall")) {
         const here = try packageHere(io, a);
-        const zig = if (here) |package| try toolchain.forPackage(io, a, environ, package) else path_zig;
+        const zig = if (here) |package| try toolchain.forPackage(io, a, environ, package) else try toolchain.unpinned(io, a, environ);
         const context: install.Context = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = here };
         return if (std.mem.eql(u8, args[0], "install")) install.command(context, args[1..]) else install.uninstall(context, args[1..]);
     }

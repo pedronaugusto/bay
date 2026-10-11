@@ -8,6 +8,26 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     b.step("run", "Run bay").dependOn(&b.addRunArtifact(exe).step);
     tests(b, b, target, optimize, b.step("test", "Run the tests"));
+    dist(b);
+}
+
+/// The programs a release carries, one per host bay runs on, built ReleaseSafe
+/// and stripped: `zig-out/dist/bay-<arch>-<os>`, static on Linux. With one, bay
+/// needs no Zig installed first; it installs the Zig each package names.
+fn dist(b: *std.Build) void {
+    const step = b.step("dist", "Build the release programs for every host into zig-out/dist");
+    const hosts = [_][]const u8{ "x86_64-linux-musl", "aarch64-linux-musl", "x86_64-macos", "aarch64-macos", "x86_64-windows-gnu", "aarch64-windows-gnu" };
+    for (hosts) |triple| {
+        const query = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch unreachable; // safe: the triples above parse
+        const target = b.resolveTargetQuery(query);
+        const module = program(b, b, target, .ReleaseSafe);
+        // Safety checks stay; the debug information a person has no use for does not.
+        module.strip = true;
+        const exe = b.addExecutable(.{ .name = "bay", .root_module = module });
+        const os = @tagName(target.result.os.tag);
+        const name = b.fmt("bay-{s}-{s}{s}", .{ @tagName(target.result.cpu.arch), os, target.result.exeFileExt() });
+        step.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "dist" } }, .dest_sub_path = name, .pdb_dir = .disabled }).step);
+    }
 }
 
 /// bay's development: the same tests under preflight's gate.

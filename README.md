@@ -23,17 +23,30 @@ Requires Zig 0.17.0. Work in progress.
 
 ## Install
 
-From a clone, with Zig 0.17.0 on the `PATH`:
+Each release carries the program for every host: `bay-x86_64-linux`,
+`bay-aarch64-linux`, `bay-x86_64-macos`, `bay-aarch64-macos`, `bay-x86_64-windows.exe`
+and `bay-aarch64-windows.exe`. Put the one for yours on the `PATH` as `bay`:
+
+```sh
+curl -fL -o ~/.local/bin/bay https://github.com/pedronaugusto/bay/releases/latest/download/bay-aarch64-macos
+chmod +x ~/.local/bin/bay
+```
+
+No Zig is needed first. bay builds each package with the Zig it names, installing it
+on first use, and starts a new package with the Zig on the `PATH`, or else the release
+bay was built with.
+
+From source, with Zig 0.17.0:
 
 ```sh
 zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/bay install
 ```
 
-bay installs itself into `~/.local/bin`; put that on the `PATH`. Installed from a URL
+bay installs itself into `~/.local/bin`. Installed from a URL
 (`bay install git+https://github.com/pedronaugusto/bay#v0.1.0`), it updates with
-`bay install --update bay`. From then on each package builds with the Zig it names,
-and the Zig on the `PATH` only starts new packages.
+`bay install --update bay`. `zig build dist` builds the release programs into
+`zig-out/dist`.
 
 ## A first package
 
