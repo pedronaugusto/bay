@@ -435,13 +435,15 @@ fn removeCommand(env: Env, args: []const []const u8) !u8 {
 /// directory, has nothing to follow and stays; a new line is `bay add` at its tag.
 fn update(env: Env, names: []const []const u8) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
+    // Each name given must be a dependency, in either list.
+    for (names) |name| {
+        if (!among(parsed.normal, name) and !among(parsed.dev, name)) try say.fail(env.io, "{s} is not a dependency", .{name});
+    }
     var text = try env.readManifest();
-    var found: usize = 0;
     for ([_]manifest.Kind{ .normal, .dev }) |kind| {
         const dependencies = if (kind == .normal) parsed.normal else parsed.dev;
         for (dependencies) |dependency| {
             if (names.len != 0 and !contains(names, dependency.name)) continue;
-            found += 1;
             const remote = switch (dependency.source) {
                 .remote => |remote| remote,
                 .path => continue,
@@ -457,9 +459,13 @@ fn update(env: Env, names: []const []const u8) !u8 {
             try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
         }
     }
-    if (names.len != 0 and found < names.len) try say.fail(env.io, "not every name given is a dependency", .{});
     try writeManifest(env, text);
     return tidy(env);
+}
+
+fn among(dependencies: []const manifest.Dependency, name: []const u8) bool {
+    for (dependencies) |dependency| if (std.mem.eql(u8, dependency.name, name)) return true;
+    return false;
 }
 
 /// `url` (`git+<repo>#<ref>`) at the newest release on its line when the ref is
