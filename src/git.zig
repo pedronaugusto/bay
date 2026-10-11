@@ -110,14 +110,16 @@ fn checkout(io: Io, a: std.mem.Allocator, repository: []const u8, commit: []cons
     defer out.close(io);
     var reader = try Objects.open(io, a, repository);
     // A tree that fails to write ends git with it; one written lets git end as asked.
-    write(io, listing, out, reader) catch |err| {
+    write(io, a, listing, out, reader) catch |err| {
         reader.child.kill(io);
         return err;
     };
     try reader.finish();
 }
 
-fn write(io: Io, listing: []const u8, out: Io.Dir, reader: *Objects) !void {
+fn write(io: Io, a: std.mem.Allocator, listing: []const u8, out: Io.Dir, reader: *Objects) !void {
+    const Link = struct { path: []const u8, target: []const u8 };
+    var links: std.ArrayList(Link) = .empty;
     var entries = std.mem.tokenizeScalar(u8, listing, 0);
     while (entries.next()) |entry| {
         // `<mode> <type> <object>\t<path>`
@@ -128,15 +130,35 @@ fn write(io: Io, listing: []const u8, out: Io.Dir, reader: *Objects) !void {
         const object = fields.next() orelse return error.UnexpectedGitOutput;
         const path = entry[tab + 1 ..];
         if (std.mem.eql(u8, mode, "160000")) continue;
+        if (!contained(path)) try say.fail(io, "the commit names a file outside its own tree, which no package may: {s}", .{path});
         const data = try reader.blob(object);
-        if (std.fs.path.dirname(path)) |parent| try out.createDirPath(io, parent);
         if (std.mem.eql(u8, mode, "120000")) {
-            try out.symLink(io, data, path, .{});
-        } else {
-            const executable = std.mem.eql(u8, mode, "100755");
-            try out.writeFile(io, .{ .sub_path = path, .data = data, .flags = .{ .permissions = if (executable) .executable_file else .default_file } });
+            try links.append(a, .{ .path = path, .target = data });
+            continue;
         }
+        if (std.fs.path.dirname(path)) |parent| try out.createDirPath(io, parent);
+        const executable = std.mem.eql(u8, mode, "100755");
+        try out.writeFile(io, .{ .sub_path = path, .data = data, .flags = .{ .permissions = if (executable) .executable_file else .default_file } });
     }
+    // Links last, so no file is ever written through one.
+    for (links.items) |link| {
+        if (std.fs.path.dirname(link.path)) |parent| try out.createDirPath(io, parent);
+        try out.symLink(io, link.target, link.path, .{});
+    }
+}
+
+/// Whether a path a tree names stays inside the tree: relative, with no empty,
+/// `.` or `..` part, no `.git`, and nothing a Windows path reads as a drive or
+/// separator. git's own checkout refuses the same.
+fn contained(path: []const u8) bool {
+    if (path.len == 0) return false;
+    var names = std.mem.splitScalar(u8, path, '/');
+    while (names.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+        if (std.ascii.eqlIgnoreCase(part, ".git")) return false;
+        if (std.mem.findAny(u8, part, "\\:") != null) return false;
+    }
+    return true;
 }
 
 /// Blobs read through one `git cat-file --batch`, a request and its answer at a time.
@@ -212,4 +234,11 @@ test "a pinned git URL's repository, ref and commit" {
     try std.testing.expectEqualStrings("main", asked.fragment.?);
     try std.testing.expect(handles("git+ssh://git@example.org/a"));
     try std.testing.expect(!handles("git+https://example.org/a"));
+}
+
+test "a tree's path stays inside the tree" {
+    try std.testing.expect(contained("src/root.zig"));
+    try std.testing.expect(contained("a/.gitignore"));
+    for ([_][]const u8{ "", "/etc/passwd", "../x", "a/../../x", "a//b", "./a", ".git/hooks/pre-commit", "a/.GIT/config", "C:x", "a\\b" }) |path|
+        try std.testing.expect(!contained(path));
 }
