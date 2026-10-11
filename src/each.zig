@@ -32,6 +32,8 @@ const Run = struct {
     members: []Member,
     permits: Io.Semaphore,
     output: Io.Mutex = .init,
+    /// Set when a member's output could not be written.
+    unwritten: ?Io.Writer.Error = null,
 };
 
 pub fn run(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, jobs: ?usize, command: []const []const u8) !u8 {
@@ -51,7 +53,8 @@ pub fn run(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map
     var group: Io.Group = .init;
     for (0..members.len) |index| group.concurrent(io, one, .{ &state, index }) catch |err|
         try say.fail(io, "could not start a task per member: {t}", .{err});
-    group.await(io) catch |err| return err;
+    try group.await(io);
+    if (state.unwritten) |err| return err;
     var failed: usize = 0;
     for (members) |member| if (member.outcome != .ok) {
         failed += 1;
@@ -114,56 +117,55 @@ fn one(state: *Run, index: usize) void {
     const io = state.io;
     const member = &state.members[index];
     defer member.done.set(io);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
+    defer arena.deinit();
+    const said = attempt(state, member, arena.allocator());
+    // A run whose output cannot be written has failed, whatever its members did.
+    report(state, member, said) catch |err| {
+        state.unwritten = err;
+    };
+}
+
+/// What a member's run wrote, once it has an outcome.
+const Said = struct { stdout: []const u8 = "", stderr: []const u8 = "" };
+
+fn attempt(state: *Run, member: *Member, a: std.mem.Allocator) Said {
+    const io = state.io;
     for (member.needs) |need| {
         state.members[need].done.waitUncancelable(io);
         if (state.members[need].outcome != .ok) {
             member.outcome = .skipped;
             member.because = if (state.members[need].outcome == .failed) need else state.members[need].because;
-            report(state, member, "", "");
-            return;
+            return .{};
         }
     }
     state.permits.waitUncancelable(io);
     defer state.permits.post(io);
-    var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const argv = std.mem.concat(a, []const u8, &.{ &.{state.bay}, state.command }) catch {
-        member.outcome = .failed;
-        return report(state, member, "", "out of memory");
-    };
+    member.outcome = .failed;
+    const argv = std.mem.concat(a, []const u8, &.{ &.{state.bay}, state.command }) catch return .{ .stderr = "bay: out of memory\n" };
     const result = std.process.run(a, io, .{
         .argv = argv,
         .cwd = .{ .path = member.directory },
         .environ_map = state.environ,
         .stdout_limit = .limited(64 << 20),
         .stderr_limit = .limited(64 << 20),
-    }) catch |err| {
-        member.outcome = .failed;
-        return report(state, member, "", @errorName(err));
-    };
-    member.outcome = if (result.term == .exited and result.term.exited == 0) .ok else .failed;
-    report(state, member, result.stdout, result.stderr);
+    }) catch |err| return .{ .stderr = a.print("bay: could not run bay: {t}\n", .{err}) catch "bay: could not run bay\n" };
+    if (result.term == .exited and result.term.exited == 0) member.outcome = .ok;
+    return .{ .stdout = result.stdout, .stderr = result.stderr };
 }
 
 /// A member's output, whole, under its outcome.
-fn report(state: *Run, member: *const Member, stdout: []const u8, stderr: []const u8) void {
+fn report(state: *Run, member: *const Member, said: Said) Io.Writer.Error!void {
     const io = state.io;
     state.output.lockUncancelable(io);
     defer state.output.unlock(io);
-    const said = switch (member.outcome) {
-        .ok => "ok",
-        .failed => "failed",
-        .skipped => "skipped",
-        .pending => unreachable, // a member is reported once it has an outcome
-    };
-    if (member.outcome == .skipped) {
-        say.note(io, "{s}: skipped, since {s} failed", .{ member.name, state.members[member.because.?].name }) catch {}; // safe: a skipped member names the failure
-        return;
+    switch (member.outcome) {
+        .skipped => return say.note(io, "{s}: skipped, since {s} failed", .{ member.name, state.members[member.because.?].name }), // safe: a skipped member names the failure
+        .ok, .failed => try say.note(io, "{s}: {t}", .{ member.name, member.outcome }),
+        .pending => unreachable, // safe: a member is reported once it has an outcome
     }
-    say.note(io, "{s}: {s}", .{ member.name, said }) catch {};
-    say.out(io, "{s}", .{stdout}) catch {};
-    say.relay(io, stderr) catch {};
+    try say.out(io, "{s}", .{said.stdout});
+    try say.relay(io, said.stderr);
 }
 
 test "members are ordered by what they ship with, and a ring is found" {
