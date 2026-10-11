@@ -64,6 +64,7 @@ bay new <name>             a new package in a new directory: zig init, then the
 bay init                   the same for the package here, adding only what is missing
 bay build | test | run     zig build, zig build test, zig build run
 bay <step> [args]          the step from the package's build, or else its development build
+bay dev [args]             zig build in the development build, as given
 bay add [--dev] [--lazy] [--name <name>] <url or directory>
                            pin a dependency through zig fetch; a name pinned in the
                            other list moves to this one
@@ -74,7 +75,9 @@ bay fetch                  fetch every dependency of both kinds
 ```
 
 `bay init` at a package's root changes only what is missing; inside a package
-but not at its root it refuses. `ZIG` names the zig executable (default: `zig`).
+but not at its root it refuses. `ZIG` names the zig executable (default: `zig`). bay sets `BAY` to its own path
+for everything it runs, so a tool that builds another checkout of the package
+runs the same bay.
 
 ## License
 

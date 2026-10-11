@@ -11,6 +11,7 @@ const usage =
     \\  bay build [args]           zig build: the package's install step
     \\  bay <step> [args]          the step from the package's build, or else from its
     \\                             development build, which has the dev dependencies
+    \\  bay dev [args]             zig build in the development build, as given
     \\  bay add [--dev] [--lazy] [--name <name>] <url or directory>
     \\                             fetch and pin a dependency; --dev for development only
     \\  bay remove [--dev] <name>  drop a dependency
@@ -35,17 +36,21 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     // A reported failure has said what went wrong; it ends the run without a trace.
-    const code = dispatch(io, a, init.environ_map.get("ZIG") orelse "zig", args) catch |err| switch (err) {
+    // Everything bay runs can run bay again, as the same program: a tool that builds
+    // another checkout of the package (a benchmark comparison) needs its development build.
+    try init.environ_map.put("BAY", try std.process.executablePathAlloc(io, a));
+    const code = dispatch(io, a, init.environ_map, args) catch |err| switch (err) {
         error.Reported => 1,
         else => return err,
     };
     std.process.exit(code);
 }
 
-fn dispatch(io: Io, a: std.mem.Allocator, zig: []const u8, args: []const []const u8) !u8 {
+fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, args: []const []const u8) !u8 {
+    const zig = environ.get("ZIG") orelse "zig";
     if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, zig);
     if (std.mem.eql(u8, args[0], "new")) return newCommand(io, a, zig, args[1..]);
-    const env: Env = .{ .io = io, .a = a, .zig = zig, .package = try findPackage(io, a) };
+    const env: Env = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = try findPackage(io, a) };
     const command = args[0];
     if (std.mem.eql(u8, command, "add")) return add(env, args[1..]);
     if (std.mem.eql(u8, command, "remove")) return removeCommand(env, args[1..]);
@@ -53,6 +58,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, zig: []const u8, args: []const []const
     if (std.mem.eql(u8, command, "list")) return list(env);
     if (std.mem.eql(u8, command, "fetch")) return fetch(env);
     if (std.mem.eql(u8, command, "build")) return zigBuild(env, .package, &.{}, args[1..]);
+    if (std.mem.eql(u8, command, "dev")) return zigBuild(env, .development, &.{}, args[1..]);
     return step(env, command, args[1..]);
 }
 
@@ -60,6 +66,7 @@ const Env = struct {
     io: Io,
     a: std.mem.Allocator,
     zig: []const u8,
+    environ: *const std.process.Environ.Map,
     /// The package's directory: the nearest one up from here with a build.zig.zon.
     package: []const u8,
 
@@ -109,7 +116,7 @@ fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const [
         });
     }
     try argv.appendSlice(env.a, after);
-    var child = std.process.spawn(env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package } }) catch |err|
+    var child = std.process.spawn(env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
         return fail("could not run {s}: {t}", .{ env.zig, err });
     return switch (try child.wait(env.io)) {
         .exited => |code| code,
