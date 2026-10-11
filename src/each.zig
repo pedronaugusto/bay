@@ -7,7 +7,6 @@ const std = @import("std");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const workspace = @import("workspace.zig");
-const published = @import("published.zig");
 const say = @import("say.zig");
 
 const Outcome = enum { pending, ok, failed, skipped };
@@ -79,7 +78,7 @@ fn order(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]Membe
         var needs: std.ArrayList(usize) = .empty;
         for (parsed.normal) |dependency| {
             const name = switch (dependency.source) {
-                .remote => |remote| if (published.named(remote.hash)) |hashed| hashed.name else dependency.name,
+                .remote => |remote| if (manifest.named(remote.hash)) |hashed| hashed.name else dependency.name,
                 .path => dependency.name,
             };
             for (manifests, 0..) |other, index| if (std.mem.eql(u8, other.name, name) and !std.mem.eql(u8, other.name, parsed.name)) try needs.append(a, index);

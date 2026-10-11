@@ -10,6 +10,8 @@
 - `bay tidy` in a workspace pins each member another member depends on at its release: the tag of the member's own `.version`, when its remote has one.
 - `bay --workspace [--jobs <n>] <command>`: the command in every member, each after the members it ships with and the rest at once; a failure skips what depends on it.
 - `bay update` moves a pin to a release tag to the newest release on its line.
+- `git+ssh://` and `git+file://` dependencies, fetched with the system's git to the hash Zig gives the same tree.
+- Paths in a manifest bay writes use `/` on every host.
 - The exact Zig a package names (`.zig_version`, else `.minimum_zig_version`), downloaded from ziglang.org and verified against the index's SHA-256 and Zig's minisign key.
 - `bay tree` with `--why` and `--duplicates`, `bay outdated`, `bay vendor` and `bay locate`.
 - A build runs in its own root, where Zig reads every path of it.

@@ -11,17 +11,6 @@ const remotes = @import("remote.zig");
 const fetch = @import("fetch.zig");
 const say = @import("say.zig");
 
-/// What a Zig package hash names: `<name>-<version>-<44 characters>`.
-pub const Named = struct { name: []const u8, version: std.SemanticVersion };
-
-pub fn named(hash: []const u8) ?Named {
-    const suffix = 44;
-    const dash = std.mem.findScalar(u8, hash, '-') orelse return null;
-    if (hash.len < dash + 1 + 1 + suffix or hash[hash.len - suffix - 1] != '-') return null;
-    const version = std.SemanticVersion.parse(hash[dash + 1 .. hash.len - suffix - 1]) catch return null;
-    return .{ .name = hash[0..dash], .version = version };
-}
-
 /// A manifest the workspace owns, where it is.
 pub const Owned = struct { directory: []const u8, parsed: manifest.Manifest };
 
@@ -53,7 +42,7 @@ pub fn plan(a: std.mem.Allocator, owners: []const Owned, members: []const manife
                 .remote => |remote| remote,
                 .path => continue,
             };
-            const pinned = named(remote.hash) orelse continue;
+            const pinned = manifest.named(remote.hash) orelse continue;
             const member = versions.getPtr(pinned.name) orelse continue;
             if (std.mem.eql(u8, pinned.name, owner.parsed.name)) continue;
             // Only ever up: a pin is a minimum.
@@ -86,7 +75,7 @@ const Remote = struct {
         };
         const dependency = try fetch.fetch(r.io, r.a, r.zig, r.scratch, try r.a.print("git+{s}#{s}", .{ repository, tag.name }), name) orelse
             try say.fail(r.io, "could not fetch {s} at {s}", .{ name, tag.name });
-        const released = named(dependency.source.remote.hash);
+        const released = manifest.named(dependency.source.remote.hash);
         if (released == null or released.?.version.order(version) != .eq)
             try say.fail(r.io, "{s}'s tag {s} holds a manifest of another version: a tag names the version it releases", .{ name, tag.name });
         return dependency;
@@ -99,17 +88,6 @@ fn read(io: Io, a: std.mem.Allocator, directory: []const u8) !manifest.Manifest 
         error.InvalidManifest => try say.fail(io, "{s}/build.zig.zon is not a manifest bay can read", .{directory}),
         else => |e| return e,
     };
-}
-
-test "a package hash names the package and its version" {
-    const ghostty = named("ghostty-1.3.2-dev-5UdBC-lZeAVJbemF7Fz8y5ApP0uA6wTc2uzECn3c6Z_Y").?;
-    try std.testing.expectEqualStrings("ghostty", ghostty.name);
-    try std.testing.expectEqualStrings("dev", ghostty.version.pre.?);
-    const aegis = named("aegis-0.2.1-" ++ &@as([44]u8, @splat('A'))).?;
-    try std.testing.expectEqualStrings("aegis", aegis.name);
-    try std.testing.expectEqual(1, aegis.version.patch);
-    try std.testing.expectEqual(null, named("aegis-0.2.1-short"));
-    try std.testing.expectEqual(null, named("1220" ++ &@as([64]u8, @splat('0'))));
 }
 
 test "a member pinned below its release moves up to it, in either list, never down" {

@@ -32,6 +32,18 @@ pub const Dependency = struct { name: []const u8, source: Source, lazy: bool = f
 /// list `kind`, becomes `to`.
 pub const Repin = struct { directory: []const u8, kind: Kind, from: Dependency, to: Dependency };
 
+
+/// What a Zig package hash names: `<name>-<version>-<44 characters>`.
+pub const Named = struct { name: []const u8, version: std.SemanticVersion };
+
+pub fn named(hash: []const u8) ?Named {
+    const suffix = 44;
+    const dash = std.mem.findScalar(u8, hash, '-') orelse return null;
+    if (hash.len < dash + 1 + 1 + suffix or hash[hash.len - suffix - 1] != '-') return null;
+    const version = std.SemanticVersion.parse(hash[dash + 1 .. hash.len - suffix - 1]) catch return null;
+    return .{ .name = hash[0..dash], .version = version };
+}
+
 pub const Manifest = struct {
     name: []const u8,
     /// The package's `.version`; a manifest without one is 0.0.0.
@@ -466,4 +478,16 @@ test "a path is written with / between its parts on every host" {
     try std.testing.expectEqualStrings("a\\\"b/c", try a.print("{f}", .{portable("a\"b\\c")}));
     try std.testing.expectEqualStrings("../core", try a.print("{f}", .{portable("..\\core")}));
     try std.testing.expectEqualStrings("C:/work/core", try a.print("{f}", .{portable("C:\\work\\core")}));
+}
+
+
+test "a package hash names the package and its version" {
+    const ghostty = named("ghostty-1.3.2-dev-5UdBC-lZeAVJbemF7Fz8y5ApP0uA6wTc2uzECn3c6Z_Y").?;
+    try std.testing.expectEqualStrings("ghostty", ghostty.name);
+    try std.testing.expectEqualStrings("dev", ghostty.version.pre.?);
+    const aegis = named("aegis-0.2.1-" ++ &@as([44]u8, @splat('A'))).?;
+    try std.testing.expectEqualStrings("aegis", aegis.name);
+    try std.testing.expectEqual(1, aegis.version.patch);
+    try std.testing.expectEqual(null, named("aegis-0.2.1-short"));
+    try std.testing.expectEqual(null, named("1220" ++ &@as([64]u8, @splat('0'))));
 }

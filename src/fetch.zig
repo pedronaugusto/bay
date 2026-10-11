@@ -1,14 +1,21 @@
-//! One package fetched by Zig itself: `zig fetch --save` into a scratch
-//! manifest, so its URL and hash are exactly what Zig would record.
+//! One package fetched as Zig records it: by Zig itself, `zig fetch --save`
+//! into a scratch manifest, or by git where Zig cannot reach (`git.zig`).
 const std = @import("std");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const root = @import("root.zig");
 const say = @import("say.zig");
+const git = @import("git.zig");
 
 /// The entry Zig records for `url`, named `name` or by the package's own
-/// manifest; null when the fetch failed, which Zig has reported.
+/// manifest; null when the fetch failed, which Zig has reported. A URL Zig
+/// cannot reach (`git.handles`) is fetched with git, and recorded the same way.
 pub fn fetch(io: Io, a: std.mem.Allocator, zig: []const u8, scratch: []const u8, url: []const u8, name: ?[]const u8) !?manifest.Dependency {
+    if (git.handles(url)) {
+        const fetched = try git.fetch(io, a, zig, scratch, url);
+        const given = name orelse (manifest.named(fetched.hash) orelse try say.fail(io, "{s} has no name in its hash {s}; name it with --name", .{ url, fetched.hash })).name;
+        return .{ .name = given, .source = .{ .remote = .{ .url = fetched.url, .hash = fetched.hash } } };
+    }
     try Io.Dir.cwd().deleteTree(io, scratch);
     try Io.Dir.cwd().createDirPath(io, scratch);
     var dir = try Io.Dir.cwd().openDir(io, scratch, .{});

@@ -562,4 +562,5 @@ test {
     _ = each;
     _ = toolchain;
     _ = remotes;
+    _ = @import("git.zig");
 }

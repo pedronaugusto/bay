@@ -38,5 +38,9 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
         .optimize = optimize,
         .imports = &.{.{ .name = "options", .module = options.createModule() }},
     }) });
-    step.dependOn(&b.addRunArtifact(end_to_end).step);
+    // The tests run bay, Zig and git on packages they write, none of which is an input
+    // Zig tracks: a run is never taken from the cache.
+    const run_end_to_end = b.addRunArtifact(end_to_end);
+    run_end_to_end.has_side_effects = true;
+    step.dependOn(&run_end_to_end.step);
 }

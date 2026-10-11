@@ -7,6 +7,7 @@ const Io = std.Io;
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
 const say = @import("say.zig");
+const git = @import("git.zig");
 
 /// Where bay unpacks an archived package to read it, under the package.
 pub const unpacked_directory = ".zig-cache/bay/packages";
@@ -63,6 +64,11 @@ pub const Store = struct {
     }
 
     fn fetch(store: *Store, remote: select.Place.Remote) !void {
+        if (git.handles(remote.url)) {
+            const fetched = try git.fetch(store.io, store.a, store.zig, try std.fs.path.join(store.a, &.{ store.unpacked, "git" }), remote.url);
+            if (!std.mem.eql(u8, fetched.hash, remote.hash)) try say.fail(store.io, "{s} is {s} now, but it is pinned as {s}: the pin names other content", .{ remote.url, fetched.hash, remote.hash });
+            return;
+        }
         const result = std.process.run(store.a, store.io, .{ .argv = &.{ store.zig, "fetch", remote.url }, .stdout_limit = .limited(1 << 16), .stderr_limit = .limited(1 << 20) }) catch |err|
             try say.fail(store.io, "could not run {s} fetch: {t}", .{ store.zig, err });
         if (result.term != .exited or result.term.exited != 0) {

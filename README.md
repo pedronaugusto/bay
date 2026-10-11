@@ -160,6 +160,21 @@ bay --workspace --jobs 4 build -Doptimize=ReleaseSafe
 
 It applies only where the package that declares it is the one being built.
 
+## Private repositories
+
+Zig fetches over https, anonymously. A repository it cannot reach that way is pinned
+by an ssh URL, which bay fetches with the system's git, using the keys and agent
+already set up for it:
+
+```sh
+bay add git+ssh://git@github.com/owner/private#v1.0.0
+```
+
+bay writes the commit's tree as git stores it and has Zig hash it, so the pin is the
+hash Zig gives the same commit over https, and Zig's cache keeps the package, where
+every build finds it. `git+file://` works the same for a repository on disk. Tags,
+`update` and `outdated` read such a remote through git too.
+
 ## The exact Zig
 
 bay builds each package with exactly the Zig it names: `.zig_version`, or else

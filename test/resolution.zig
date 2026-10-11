@@ -26,6 +26,13 @@ const Fixture = struct {
         try env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(a, &.{ try Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", a), ".zig-cache", "bay-test-packages" }));
         try env.put("HOME", try std.fs.path.join(a, &.{ root, "home" }));
         try env.put("XDG_DATA_HOME", try std.fs.path.join(a, &.{ root, "data" }));
+        // git reads no configuration of the person's: none of the system's, an empty global one.
+        try env.put("GIT_CONFIG_NOSYSTEM", "1");
+        try env.put("GIT_CONFIG_GLOBAL", try std.fs.path.join(a, &.{ root, "gitconfig" }));
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gitconfig", .data = "" });
+        for ([_][]const u8{ "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME" }) |name| try env.put(name, "bay test");
+        for ([_][]const u8{ "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL" }) |name| try env.put(name, "test@example.org");
+        try env.put("GIT_TERMINAL_PROMPT", "0");
         return .{ .a = a, .io = std.testing.io, .bay_path = try Io.Dir.cwd().realPathFileAlloc(std.testing.io, options.bay, a), .tmp = tmp, .root = root, .env = env };
     }
 
@@ -228,24 +235,36 @@ test "a vendored package resolves and builds with its packages in no cache and n
     try std.testing.expect(std.mem.find(u8, built.stderr, "total 3") != null);
 }
 
-test "an override replaces a package for the whole graph, with a directory or a revision" {
+/// An application on the diamond whose manifest, before its last brace, is
+/// returned, for a test to add a field to it.
+fn overridden(f: *Fixture) ![]const u8 {
+    try diamond(f);
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") }), &.{ "a", "b" }, main_ab);
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
+    return std.mem.trimEnd(u8, manifest[0..close], " ");
+}
+
+test "an override with a directory builds the local checkout wherever the graph pins the package" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var f: Fixture = try .init(arena.allocator());
     defer f.deinit();
-    try diamond(&f);
+    const manifest = try overridden(&f);
     try f.package("local", "c", "0.1.1", "", &.{}, "pub const version = \"local\"; " ++ shared);
-    const pins = try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") });
-    try f.application("app", pins, &.{ "a", "b" }, main_ab);
-    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
-    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
-    // A directory: the local checkout builds wherever the graph pins c.
-    try f.write("app", "build.zig.zon", try f.a.print("{s}, .overrides = .{{ .c = .{{ .path = \"../local\" }} }} }}\n", .{std.mem.trimEnd(u8, manifest[0..close], " ")}));
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .overrides = .{{ .c = .{{ .path = \"../local\" }} }} }}\n", .{manifest}));
     const local = try f.bay("app", &.{ "build", "run" });
     try std.testing.expect(succeeded(local));
     try std.testing.expect(std.mem.find(u8, local.stderr, "a sees local, b sees local") != null);
-    // A revision: c 0.1.0, below what b pins, because the package says so.
-    try f.write("app", "build.zig.zon", try f.a.print("{s}, .overrides = .{{ {s} }} }}\n", .{ std.mem.trimEnd(u8, manifest[0..close], " "), try f.pin("c", "c1") }));
+}
+
+test "an override with a revision builds it, below what the graph pins, because the package says so" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const manifest = try overridden(&f);
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .overrides = .{{ {s} }} }}\n", .{ manifest, try f.pin("c", "c1") }));
     const older = try f.bay("app", &.{ "build", "run" });
     try std.testing.expect(succeeded(older));
     try std.testing.expect(std.mem.find(u8, older.stderr, "a sees 0.1.0, b sees 0.1.0") != null);
@@ -275,4 +294,47 @@ test "a command runs in every workspace member after what it ships with, and a f
     // A ring of members that ship with each other cannot be ordered.
     try f.package("a", "a", "0.1.0", ".top = .{ .path = \"../top\" },", &.{}, "");
     try std.testing.expect(std.mem.find(u8, (try f.bay(".", &.{ "--workspace", "build" })).stderr, "depend on each other") != null);
+}
+
+test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives its tree, and updated along its line" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // A repository with a package in it.
+    try f.package("lib", "lib", "0.1.0", "", &.{}, "pub const version = \"0.1.0\";");
+    for ([_][]const []const u8{ &.{ "git", "init", "--quiet", "--initial-branch=main" }, &.{ "git", "add", "." }, &.{ "git", "commit", "--quiet", "-m", "0.1.0" }, &.{ "git", "tag", "v0.1.0" } }) |argv|
+        try std.testing.expect(succeeded(try f.run("lib", argv)));
+    // The same tree with no repository: what Zig hashes from a fetch over https.
+    try f.package("plain", "lib", "0.1.0", "", &.{}, "pub const version = \"0.1.0\";");
+    const expected = std.mem.trim(u8, (try f.run(".", &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "plain" }) })).stdout, "\r\n");
+    try std.testing.expect(std.mem.startsWith(u8, expected, "lib-0.1.0-"));
+
+    try f.application("app", "", &.{"lib"}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"lib {s}\\n\", .{@import(\"lib\").version}); }");
+    const url = try f.a.print("git+file://{s}{s}", .{ if (f.root[0] == '/') "" else "/", try std.mem.replaceOwned(u8, f.a, try std.fs.path.join(f.a, &.{ f.root, "lib" }), "\\", "/") });
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#v0.1.0", .{url}) })));
+    const pinned = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16));
+    try std.testing.expect(std.mem.find(u8, pinned, expected) != null);
+    try std.testing.expect(std.mem.find(u8, pinned, "?ref=v0.1.0#") != null);
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.0") != null);
+
+    // A release on the line is taken by update; a new line is not.
+    for ([_][]const u8{ "0.1.1", "0.2.0" }) |version| {
+        try f.write("lib", "src/root.zig", try f.a.print("pub const version = \"{s}\";", .{version}));
+        try f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, f.a, try f.tmp.dir.readFileAlloc(f.io, "lib/build.zig.zon", f.a, .limited(1 << 16)), if (version[2] == '1') "\"0.1.0\"" else "\"0.1.1\"", try f.a.print("\"{s}\"", .{version})));
+        for ([_][]const []const u8{ &.{ "git", "commit", "--quiet", "-am", version }, &.{ "git", "tag", try f.a.print("v{s}", .{version}) } }) |argv|
+            try std.testing.expect(succeeded(try f.run("lib", argv)));
+    }
+    try std.testing.expect(succeeded(try f.bay("app", &.{"update"})));
+    try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16)), "?ref=v0.1.1#") != null);
+
+    // With the package gone from Zig's cache, the build fetches it with git again.
+    const updated = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16));
+    const start = std.mem.find(u8, updated, "lib-0.1.1-").?;
+    const hash = updated[start .. std.mem.findScalarPos(u8, updated, start, '"').?];
+    const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
+    try f.tmp.dir.deleteTree(f.io, "app/.zig-cache");
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.1") != null);
 }

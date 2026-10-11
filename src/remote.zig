@@ -6,6 +6,7 @@ const Io = std.Io;
 const download = @import("download.zig");
 const say = @import("say.zig");
 const select = @import("select.zig");
+const git = @import("git.zig");
 
 pub const Tag = struct {
     /// The name after `refs/tags/`.
@@ -17,8 +18,10 @@ pub const Tag = struct {
 
 /// The tags of the repository `url` names, in the order the remote lists them.
 /// `url` is any form bay pins: `git+https://host/owner/repo?ref=x#commit`,
-/// `git+https://host/owner/repo#commit`, or a plain `https://` URL.
+/// `git+https://host/owner/repo#commit`, a plain `https://` URL, or one git
+/// fetches (`git.handles`), whose tags git lists.
 pub fn tags(io: Io, a: std.mem.Allocator, url: []const u8) ![]const Tag {
+    if (git.handles(url)) return git.tags(io, a, url);
     const repo = repository(url) orelse try say.fail(io, "{s} is not a git+https URL", .{url});
     const refs_url = try a.print("{s}/info/refs?service=git-upload-pack", .{repo});
     var client: std.http.Client = .{ .allocator = a, .io = io };
@@ -31,8 +34,10 @@ pub fn tags(io: Io, a: std.mem.Allocator, url: []const u8) ![]const Tag {
 }
 
 /// The repository a pinned URL names: `git+` dropped, and the query (`?ref=`)
-/// and fragment (`#commit`) after it. Null for anything but http(s) with a host.
+/// and fragment (`#commit`) after it. Null for anything but http(s) with a
+/// host, or a URL git fetches (`git.handles`).
 pub fn repository(url: []const u8) ?[]const u8 {
+    if (git.handles(url)) return git.parts(url).repository;
     const rest = if (std.mem.startsWith(u8, url, "git+")) url["git+".len..] else url;
     if (!std.mem.startsWith(u8, rest, "https://") and !std.mem.startsWith(u8, rest, "http://")) return null;
     const repo = std.mem.trimEnd(u8, rest[0 .. std.mem.findAny(u8, rest, "?#") orelse rest.len], "/");
@@ -207,7 +212,7 @@ test "a pinned URL names its repository" {
     try testing.expectEqualStrings("https://github.com/pedronaugusto/aegis", repository("git+https://github.com/pedronaugusto/aegis#5d2a92141f0298d76dc5fd602526d55a62b4e11a").?);
     try testing.expectEqualStrings("https://example.org/x.git", repository("https://example.org/x.git/").?);
     try testing.expectEqualStrings("http://example.org/x", repository("git+http://example.org/x").?);
-    try testing.expectEqual(null, repository("git+ssh://example.org/x"));
+    try testing.expectEqualStrings("ssh://example.org/x", repository("git+ssh://example.org/x#main").?);
     try testing.expectEqual(null, repository("git+https://"));
     try testing.expectEqual(null, repository("../a/directory"));
 }
