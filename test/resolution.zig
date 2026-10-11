@@ -534,5 +534,5 @@ test "an install builds what the package ships, whatever its development pins" {
     try std.testing.expect(refused(try f.bay("app", &.{"tidy"})));
     const installed = try f.bay("app", &.{ "install", "--prefix", try std.fs.path.join(f.a, &.{ f.root, "prefix" }) });
     try std.testing.expect(succeeded(installed));
-    try f.tmp.dir.access(f.io, "prefix/bin/app", .{});
+    try f.tmp.dir.access(f.io, if (@import("builtin").os.tag == .windows) "prefix/bin/app.exe" else "prefix/bin/app", .{});
 }
