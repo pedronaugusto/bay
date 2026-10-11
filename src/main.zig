@@ -4,6 +4,10 @@ const std = @import("std");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const root = @import("root.zig");
+const fetch = @import("fetch.zig");
+const install = @import("install.zig");
+const say = @import("say.zig");
+const fail = say.fail;
 
 const usage =
     \\usage: bay <command> [arguments]
@@ -18,6 +22,14 @@ const usage =
     \\  bay update [name...]       re-resolve each pinned ref (?ref=) and pin what it names now
     \\  bay list                   both lists, with their pins
     \\  bay fetch                  fetch every dependency of both kinds
+    \\
+    \\  bay install [--prefix <dir>] [--force] [<url or directory>]
+    \\                             build a package's programs (ReleaseSafe) into <dir>/bin,
+    \\                             ~/.local/bin by default; with no source, the package here
+    \\  bay install --list         what bay installed, and from where
+    \\  bay install --update [name...]
+    \\                             reinstall each from its recorded branch or tag
+    \\  bay uninstall <name>       remove what its install put in place
     \\  bay new <name>             a new package in a new directory: zig init, then the
     \\                             empty dev list and a `dev` function
     \\  bay init                   the same for the package here, adding only what is
@@ -50,13 +62,18 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, arg
     const zig = environ.get("ZIG") orelse "zig";
     if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, zig);
     if (std.mem.eql(u8, args[0], "new")) return newCommand(io, a, zig, args[1..]);
+    // Global: anywhere, as cargo install is.
+    if (std.mem.eql(u8, args[0], "install") or std.mem.eql(u8, args[0], "uninstall")) {
+        const context: install.Context = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = try packageHere(io, a) };
+        return if (std.mem.eql(u8, args[0], "install")) install.command(context, args[1..]) else install.uninstall(context, args[1..]);
+    }
     const env: Env = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = try findPackage(io, a) };
     const command = args[0];
     if (std.mem.eql(u8, command, "add")) return add(env, args[1..]);
     if (std.mem.eql(u8, command, "remove")) return removeCommand(env, args[1..]);
     if (std.mem.eql(u8, command, "update")) return update(env, args[1..]);
     if (std.mem.eql(u8, command, "list")) return list(env);
-    if (std.mem.eql(u8, command, "fetch")) return fetch(env);
+    if (std.mem.eql(u8, command, "fetch")) return fetchAll(env);
     if (std.mem.eql(u8, command, "build")) return zigBuild(env, .package, &.{}, args[1..]);
     if (std.mem.eql(u8, command, "dev")) return zigBuild(env, .development, &.{}, args[1..]);
     return step(env, command, args[1..]);
@@ -83,17 +100,17 @@ const Env = struct {
 };
 
 fn findPackage(io: Io, a: std.mem.Allocator) ![]const u8 {
+    return try packageHere(io, a) orelse fail("no build.zig.zon here or in any directory above", .{});
+}
+
+/// The nearest directory up from here with a build.zig.zon, or null outside a package.
+fn packageHere(io: Io, a: std.mem.Allocator) !?[]const u8 {
     var path: []const u8 = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
     while (true) {
         const candidate = try std.fs.path.join(a, &.{ path, "build.zig.zon" });
         if (Io.Dir.cwd().access(io, candidate, .{})) |_| return path else |_| {}
-        path = std.fs.path.dirname(path) orelse return fail("no build.zig.zon here or in any directory above", .{});
+        path = std.fs.path.dirname(path) orelse return null;
     }
-}
-
-fn fail(comptime format: []const u8, args: anytype) error{Reported} {
-    std.debug.print("bay: " ++ format ++ "\n", args);
-    return error.Reported;
 }
 
 const Where = enum { package, development };
@@ -150,7 +167,7 @@ fn hasStep(listing: []const u8, name: []const u8) bool {
     return false;
 }
 
-fn fetch(env: Env) !u8 {
+fn fetchAll(env: Env) !u8 {
     const code = try zigBuild(env, .package, &.{"--fetch=all"}, &.{});
     if (code != 0) return code;
     const parsed = try manifest.parse(env.a, try env.readManifest());
@@ -217,25 +234,7 @@ fn local(env: Env, path: []const u8, name: ?[]const u8) !manifest.Dependency {
 }
 
 fn fetched(env: Env, url: []const u8, name: ?[]const u8) !?manifest.Dependency {
-    const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
-    try Io.Dir.cwd().deleteTree(env.io, scratch);
-    try Io.Dir.cwd().createDirPath(env.io, scratch);
-    var dir = try Io.Dir.cwd().openDir(env.io, scratch, .{});
-    defer dir.close(env.io);
-    // zig fetch --save edits the manifest beside the nearest build.zig up from here: this one.
-    try dir.writeFile(env.io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
-    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(env.a) });
-    const save = if (name) |given| try std.fmt.allocPrint(env.a, "--save={s}", .{given}) else "--save";
-    var child = std.process.spawn(env.io, .{ .argv = &.{ env.zig, "fetch", save, url }, .cwd = .{ .path = scratch } }) catch |err|
-        return fail("could not run {s}: {t}", .{ env.zig, err });
-    switch (try child.wait(env.io)) {
-        .exited => |code| if (code != 0) return null,
-        else => return null,
-    }
-    const text = try dir.readFileAlloc(env.io, "build.zig.zon", env.a, .limited(1 << 20));
-    const parsed = try manifest.parse(env.a, try env.a.dupeSentinel(u8, text, 0));
-    if (parsed.normal.len != 1) return fail("zig fetch saved {d} dependencies; expected one", .{parsed.normal.len});
-    return parsed.normal[0];
+    return fetch.fetch(env.io, env.a, env.zig, try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" }), url, name);
 }
 
 fn removeCommand(env: Env, args: []const []const u8) !u8 {
@@ -272,7 +271,7 @@ fn update(env: Env, names: []const []const u8) !u8 {
                 .remote => |remote| remote,
                 .path => continue,
             };
-            const url = following(env.a, remote.url) orelse {
+            const url = manifest.following(env.a, remote.url) orelse {
                 std.debug.print("bay: {s} is pinned to an exact commit; bay add it with a branch or tag to follow one\n", .{dependency.name});
                 continue;
             };
@@ -293,16 +292,6 @@ fn update(env: Env, names: []const []const u8) !u8 {
 fn contains(names: []const []const u8, name: []const u8) bool {
     for (names) |candidate| if (std.mem.eql(u8, candidate, name)) return true;
     return false;
-}
-
-/// The URL to fetch to follow a pin: a git URL's recorded `?ref=` as its
-/// fragment, or the URL as it is for an archive. Null when a git URL names
-/// only a commit.
-fn following(a: std.mem.Allocator, url: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, url, "git+")) return url;
-    const without_commit = url[0 .. std.mem.indexOfScalar(u8, url, '#') orelse url.len];
-    const query = std.mem.indexOf(u8, without_commit, "?ref=") orelse return null;
-    return std.fmt.allocPrint(a, "{s}#{s}", .{ without_commit[0..query], without_commit[query + "?ref=".len ..] }) catch null;
 }
 
 fn list(env: Env) !u8 {
@@ -386,11 +375,11 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
 
 test "update follows a recorded ref and leaves a commit pin" {
     const a = std.testing.allocator;
-    const branch = following(a, "git+https://example.org/x?ref=main#5d2a92141f0298d76dc5fd602526d55a62b4e11a").?;
+    const branch = manifest.following(a, "git+https://example.org/x?ref=main#5d2a92141f0298d76dc5fd602526d55a62b4e11a").?;
     defer a.free(branch);
     try std.testing.expectEqualStrings("git+https://example.org/x#main", branch);
-    try std.testing.expectEqual(null, following(a, "git+https://example.org/x#5d2a92141f0298d76dc5fd602526d55a62b4e11a"));
-    try std.testing.expectEqualStrings("https://example.org/x.tar.gz", following(a, "https://example.org/x.tar.gz").?);
+    try std.testing.expectEqual(null, manifest.following(a, "git+https://example.org/x#5d2a92141f0298d76dc5fd602526d55a62b4e11a"));
+    try std.testing.expectEqualStrings("https://example.org/x.tar.gz", manifest.following(a, "https://example.org/x.tar.gz").?);
 }
 
 test "a step is found in zig build -l's listing" {

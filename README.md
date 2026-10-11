@@ -72,12 +72,30 @@ bay remove [--dev] <name>  drop a dependency
 bay update [name...]       pin what each recorded ref (?ref=) names now
 bay list                   both lists, with their pins
 bay fetch                  fetch every dependency of both kinds
+
+bay install [--prefix <dir>] [--force] [<url or directory>]
+                           build a package's programs (ReleaseSafe) into <dir>/bin,
+                           ~/.local/bin by default; with no source, the package here
+bay install --list         what bay installed, and from where
+bay install --update [name...]
+                           reinstall each from its recorded branch or tag
+bay uninstall <name>       remove what its install put in place
 ```
 
 `bay init` at a package's root changes only what is missing; inside a package
 but not at its root it refuses. `ZIG` names the zig executable (default: `zig`).
 bay sets `BAY` to its own path for everything it runs, so a tool that builds
 another checkout of the package runs the same bay.
+
+## Global installs
+
+`bay install` is to Zig what `cargo install` is to Rust. It fetches the package as
+`zig fetch` does (a `git+https` or archive URL; `#tag`, `#branch` or `#commit`),
+copies its sources, and runs `zig build install -Doptimize=ReleaseSafe` into the
+prefix, so Zig's package cache is never written to. bay records what each install
+put where in `~/.local/share/bay/installed.zon` (`$XDG_DATA_HOME/bay`): `uninstall`
+removes exactly that, and a file bay did not install is never replaced without
+`--force`. Installed programs do not need bay to run.
 
 ## License
 
