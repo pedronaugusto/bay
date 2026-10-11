@@ -90,13 +90,17 @@ fn order(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]Membe
     const members = try a.alloc(Member, directories.len);
     for (members, manifests, directories) |*member, parsed, directory| {
         var needs: std.ArrayList(usize) = .empty;
-        for (parsed.normal) |dependency| {
-            const name = switch (dependency.source) {
-                .remote => |remote| if (manifest.named(remote.hash)) |hashed| hashed.name else dependency.name,
-                .path => dependency.name,
-            };
-            for (manifests, 0..) |other, index| if (std.mem.eql(u8, other.name, name) and !std.mem.eql(u8, other.name, parsed.name)) try needs.append(a, index);
-        }
+        for (parsed.normal) |dependency| switch (dependency.source) {
+            // A path names the member itself; a pin names a package by its hash's name.
+            .path => |path| {
+                const target = try std.fs.path.resolveAlloc(a, &.{ directory, path });
+                for (directories, 0..) |other, index| if (std.mem.eql(u8, other, target) and !std.mem.eql(u8, other, directory)) try needs.append(a, index);
+            },
+            .remote => |remote| {
+                const name = (manifest.named(remote.hash) orelse continue).name;
+                for (manifests, 0..) |other, index| if (std.mem.eql(u8, other.name, name) and !std.mem.eql(u8, other.name, parsed.name)) try needs.append(a, index);
+            },
+        };
         member.* = .{ .directory = directory, .name = parsed.name, .needs = try needs.toOwnedSlice(a) };
     }
     if (try ring(a, members)) |name| try say.fail(io, "{s} and the members it ships with depend on each other: no member of a ring can go first", .{name});
