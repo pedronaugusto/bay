@@ -12,6 +12,7 @@
 - `bay update` moves a pin to a release tag to the newest release on its line.
 - `git+ssh://` and `git+file://` dependencies, fetched with the system's git to the hash Zig gives the same tree.
 - Paths in a manifest bay writes use `/` on every host.
+- `bay licenses [--dev]`: each package a build contains, with the license its files state.
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64; with no Zig named or on the `PATH`, bay starts a package with the Zig it was built with, installed as any other.
 - The exact Zig a package names (`.zig_version`, else `.minimum_zig_version`), downloaded from ziglang.org and verified against the index's SHA-256 and Zig's minisign key.
 - `bay tree` with `--why` and `--duplicates`, `bay outdated`, `bay vendor` and `bay locate`.

@@ -13,6 +13,7 @@ const remotes = @import("remote.zig");
 const graph = @import("graph.zig");
 const published = @import("published.zig");
 const each = @import("each.zig");
+const licenses = @import("licenses.zig");
 const say = @import("say.zig");
 
 const usage =
@@ -34,6 +35,8 @@ const usage =
     \\                             the resolved graph; the paths to one package; the ones
     \\                             pinned at more than one revision, and who pins each
     \\  bay outdated               dependencies with a newer release on their remote
+    \\  bay licenses [--dev]       each package a build contains, with the license it states;
+    \\                             --dev adds what only development uses
     \\  bay vendor                 every package the builds use, into zig-pkg, for building offline
     \\  bay list                   both lists, with their pins
     \\  bay locate [--dev]         the package's directory, or its development build's root,
@@ -116,6 +119,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, giv
     if (std.mem.eql(u8, command, "locate")) return locate(env, args[1..]);
     if (std.mem.eql(u8, command, "tree")) return treeCommand(env, args[1..]);
     if (std.mem.eql(u8, command, "outdated")) return graphCommand(env, .outdated);
+    if (std.mem.eql(u8, command, "licenses")) return licensesCommand(env, args[1..]);
     if (std.mem.eql(u8, command, "vendor")) return graphCommand(env, .vendor);
     if (std.mem.eql(u8, command, "fetch")) return fetchAll(env);
     if (std.mem.eql(u8, command, "build")) return zigBuild(env, .package, &.{}, args[1..]);
@@ -223,6 +227,14 @@ fn treeCommand(env: Env, args: []const []const u8) !u8 {
         } else try say.fail(env.io, "tree takes --why <name> or --duplicates", .{});
     }
     try graph.tree(try resolveHere(env, try manifest.parse(env.a, try env.readManifest())), options);
+    return 0;
+}
+
+/// `bay licenses [--dev]`.
+fn licensesCommand(env: Env, args: []const []const u8) !u8 {
+    const dev = args.len == 1 and std.mem.eql(u8, args[0], "--dev");
+    if (args.len > 1 or (args.len == 1 and !dev)) try say.fail(env.io, "licenses takes --dev or nothing", .{});
+    try licenses.list(try resolveHere(env, try manifest.parse(env.a, try env.readManifest())), dev);
     return 0;
 }
 
@@ -559,6 +571,7 @@ test {
     _ = @import("workspace.zig");
     _ = published;
     _ = each;
+    _ = licenses;
     _ = toolchain;
     _ = remotes;
     _ = @import("git.zig");

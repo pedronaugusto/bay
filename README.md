@@ -222,6 +222,7 @@ the project resolves and builds with no remote reachable.
 | `bay list` | Both lists, with their pins |
 | `bay tree [--why <name>] [--duplicates]` | The resolved graph; the paths to one package; the packages pinned at several revisions, and by whom |
 | `bay outdated` | Dependencies with a newer release on their remote |
+| `bay licenses [--dev]` | Each package a build contains, with the license its files state; `--dev` adds the development tools |
 | `bay vendor` | Every package the graph reads, into `zig-pkg` |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
 | `bay fetch` | Fetch every dependency of both kinds |
