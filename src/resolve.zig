@@ -298,6 +298,5 @@ fn refuse(a: std.mem.Allocator, io: Io, graph: select.Graph, problem: select.Pro
         },
         .incompatible => |p| try say.fail(io, "{s} asks for {s} {f}, but {s} {f} is selected, a different line (below 1.0, a new minor is a new line): move {s} to {s} {f}, or name {s} in .coexist", .{ p.by, p.name, p.wanted, p.name, p.selected, p.by, p.name, p.selected, p.name }),
         .cycle => |p| try say.fail(io, "{s} and what it depends on depend on each other: a ring of dependencies cannot be built", .{p.name}),
-        .retracted => |p| try say.fail(io, "{s} {f} is retracted by {s} {f}: pin {f} or newer", .{ p.name, p.version, p.name, p.by, p.by }),
     }
 }

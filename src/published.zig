@@ -10,6 +10,8 @@ const manifest = @import("manifest.zig");
 const remotes = @import("remote.zig");
 const fetch = @import("fetch.zig");
 const say = @import("say.zig");
+const select = @import("select.zig");
+const store = @import("store.zig");
 
 /// A manifest the workspace owns, where it is.
 pub const Owned = struct { directory: []const u8, parsed: manifest.Manifest };
@@ -58,6 +60,22 @@ pub fn plan(a: std.mem.Allocator, owners: []const Owned, members: []const manife
         };
     }
     return list.toOwnedSlice(a);
+}
+
+/// A package's newest release, and the versions its manifest retracts: as Go
+/// reads `retract` from a module's latest version, not from the build graph.
+pub const Newest = struct { version: std.SemanticVersion, tag: []const u8, retracted: []const []const u8 };
+
+/// The newest release on the remote `url` names, fetched to read what it
+/// retracts; null when the remote has no release.
+pub fn newest(io: Io, a: std.mem.Allocator, zig: []const u8, packages: *store.Store, scratch: []const u8, url: []const u8) !?Newest {
+    const repository = remotes.repository(url) orelse return null;
+    const found = remotes.newestVersion(try remotes.tags(io, a, url)) orelse return null;
+    const release = try fetch.fetch(io, a, zig, scratch, try a.print("git+{s}#{s}", .{ repository, found.tag.name }), null) orelse
+        try say.fail(io, "could not fetch {s} at {s}", .{ repository, found.tag.name });
+    const place: select.Place.Remote = .{ .url = release.source.remote.url, .hash = release.source.remote.hash };
+    const revision = try store.revisionAt(io, a, try packages.directoryOf(place), .{ .remote = place });
+    return .{ .version = found.version, .tag = found.tag.name, .retracted = revision.retracted };
 }
 
 /// Releases as the remote has them: a tag of the version, fetched by Zig.

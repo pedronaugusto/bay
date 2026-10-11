@@ -134,12 +134,13 @@ pub const Newest = struct { tag: Tag, version: std.SemanticVersion };
 /// a pre-release is newest only where there is no release. Null when no tag is
 /// a version.
 pub fn newestVersion(list: []const Tag) ?Newest {
-    return newestWhere(list, null);
+    return newestWhere(list, null, &.{});
 }
 
-/// The newest version on `line`'s line (`sameLine`), as `newestVersion` picks one.
-pub fn newestOnLine(list: []const Tag, line: std.SemanticVersion) ?Newest {
-    return newestWhere(list, line);
+/// The newest version on `line`'s line (`sameLine`), as `newestVersion` picks
+/// one, leaving out each version `retracted` names.
+pub fn newestOnLine(list: []const Tag, line: std.SemanticVersion, retracted: []const []const u8) ?Newest {
+    return newestWhere(list, line, retracted);
 }
 
 /// The tag that names `version` exactly, with or without a leading `v`.
@@ -157,17 +158,27 @@ pub fn versionOf(tag: Tag) ?std.SemanticVersion {
     return std.SemanticVersion.parse(text) catch null;
 }
 
-fn newestWhere(list: []const Tag, line: ?std.SemanticVersion) ?Newest {
+fn newestWhere(list: []const Tag, line: ?std.SemanticVersion, retracted: []const []const u8) ?Newest {
     var newest: ?Newest = null;
     var newest_release: ?Newest = null;
     for (list) |tag| {
         const version = versionOf(tag) orelse continue;
         if (line) |wanted| if (!select.sameLine(version, wanted)) continue;
+        if (isRetracted(retracted, version)) continue;
         const candidate: Newest = .{ .tag = tag, .version = version };
         if (newest == null or version.order(newest.?.version) == .gt) newest = candidate;
         if (version.pre == null and (newest_release == null or version.order(newest_release.?.version) == .gt)) newest_release = candidate;
     }
     return newest_release orelse newest;
+}
+
+/// Whether `version` is one of the versions `retracted` names.
+pub fn isRetracted(retracted: []const []const u8, version: std.SemanticVersion) bool {
+    for (retracted) |text| {
+        const named = std.SemanticVersion.parse(text) catch continue; // a malformed entry retracts nothing
+        if (named.order(version) == .eq) return true;
+    }
+    return false;
 }
 
 const testing = std.testing;
@@ -259,9 +270,11 @@ test "the newest on a line stays on it; a version's tag is found with or without
         }
     }.tag;
     const list = [_]Tag{ at("v0.2.0"), at("v0.2.3"), at("v0.3.0"), at("1.4.0"), at("v1.9.2"), at("v2.0.0") };
-    try testing.expectEqualStrings("v0.2.3", newestOnLine(&list, .{ .major = 0, .minor = 2, .patch = 0 }).?.tag.name);
-    try testing.expectEqualStrings("v1.9.2", newestOnLine(&list, .{ .major = 1, .minor = 0, .patch = 0 }).?.tag.name);
-    try testing.expectEqual(null, newestOnLine(&list, .{ .major = 0, .minor = 1, .patch = 0 }));
+    try testing.expectEqualStrings("v0.2.3", newestOnLine(&list, .{ .major = 0, .minor = 2, .patch = 0 }, &.{}).?.tag.name);
+    try testing.expectEqualStrings("v1.9.2", newestOnLine(&list, .{ .major = 1, .minor = 0, .patch = 0 }, &.{}).?.tag.name);
+    try testing.expectEqual(null, newestOnLine(&list, .{ .major = 0, .minor = 1, .patch = 0 }, &.{}));
+    // A retracted release is passed over for the newest one that is not.
+    try testing.expectEqualStrings("v0.2.0", newestOnLine(&list, .{ .major = 0, .minor = 2, .patch = 0 }, &.{"0.2.3"}).?.tag.name);
     try testing.expectEqualStrings("1.4.0", tagOf(&list, .{ .major = 1, .minor = 4, .patch = 0 }).?.name);
     try testing.expectEqual(null, tagOf(&list, .{ .major = 1, .minor = 4, .patch = 1 }));
 }

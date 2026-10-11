@@ -320,15 +320,23 @@ test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives i
     try std.testing.expect(std.mem.find(u8, pinned, "?ref=v0.1.0#") != null);
     try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.0") != null);
 
-    // A release on the line is taken by update; a new line is not.
-    for ([_][]const u8{ "0.1.1", "0.2.0" }) |version| {
+    // A release on the line is taken by update, unless the newest release retracts it;
+    // a new line is not taken.
+    var previous: []const u8 = "0.1.0";
+    for ([_][]const u8{ "0.1.1", "0.1.2", "0.2.0" }) |version| {
         try f.write("lib", "src/root.zig", try f.a.print("pub const version = \"{s}\";", .{version}));
-        try f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, f.a, try f.tmp.dir.readFileAlloc(f.io, "lib/build.zig.zon", f.a, .limited(1 << 16)), if (version[2] == '1') "\"0.1.0\"" else "\"0.1.1\"", try f.a.print("\"{s}\"", .{version})));
+        var text = try std.mem.replaceOwned(u8, f.a, try f.tmp.dir.readFileAlloc(f.io, "lib/build.zig.zon", f.a, .limited(1 << 16)), try f.a.print("\"{s}\"", .{previous}), try f.a.print("\"{s}\"", .{version}));
+        if (std.mem.eql(u8, version, "0.2.0")) text = try std.mem.replaceOwned(u8, f.a, text, ".paths", ".retracted = .{\"0.1.2\"}, .paths");
+        try f.write("lib", "build.zig.zon", text);
         for ([_][]const []const u8{ &.{ "git", "commit", "--quiet", "-am", version }, &.{ "git", "tag", try f.a.print("v{s}", .{version}) } }) |argv|
             try std.testing.expect(succeeded(try f.run("lib", argv)));
+        previous = version;
     }
     try std.testing.expect(succeeded(try f.bay("app", &.{"update"})));
     try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16)), "?ref=v0.1.1#") != null);
+    const outdated = try f.bay("app", &.{"outdated"});
+    try std.testing.expect(succeeded(outdated));
+    try std.testing.expect(std.mem.find(u8, outdated.stdout, "lib 0.1.1 -> 0.2.0 (tag v0.2.0, a new line)") != null);
 
     // With the package gone from Zig's cache, the build fetches it with git again.
     const updated = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16));
@@ -339,6 +347,9 @@ test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives i
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
     try f.tmp.dir.deleteTree(f.io, "app/.zig-cache");
     try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.1") != null);
+    // A version the newest release retracts is said to be, once a build uses it.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#v0.1.2", .{url}) })));
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "lib 0.1.2 is retracted by its release 0.2.0") != null);
 }
 
 test "with no Zig named and none on the PATH, a new package is made by the Zig bay was built with" {

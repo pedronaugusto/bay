@@ -9,6 +9,7 @@ const resolve = @import("resolve.zig");
 const store = @import("store.zig");
 const remotes = @import("remote.zig");
 const say = @import("say.zig");
+const published = @import("published.zig");
 
 pub const TreeOptions = struct {
     /// Only the paths from the package to this one: `--why <name>`.
@@ -111,25 +112,28 @@ fn duplicates(r: resolve.Resolution) !void {
     if (!any) try say.note(r.input.io, "every package is pinned at one revision", .{});
 }
 
-/// `bay outdated`: each git dependency whose remote has a release newer than
-/// the one pinned, by its tags.
+/// `bay outdated`: each package the builds use whose remote has a newer
+/// release, and each built at a version its newest release retracts.
 pub fn outdated(r: resolve.Resolution) !void {
     const a = r.input.a;
+    const scratch = try std.fs.path.join(a, &.{ r.input.package, ".zig-cache", "bay", "add" });
     var any = false;
-    for ([_][]const manifest.Dependency{ r.input.parsed.normal, r.input.parsed.dev }) |dependencies| for (dependencies) |dependency| {
-        const remote = switch (dependency.source) {
+    for (r.graph.selected.values()) |selected| {
+        const remote = switch (selected.place) {
             .remote => |remote| remote,
-            .path => continue,
+            .directory => continue,
         };
-        if (remotes.repository(remote.url) == null) continue;
-        const pinned = r.graph.read.get(remote.hash) orelse continue;
-        const newest = remotes.newestVersion(try remotes.tags(r.input.io, a, remote.url)) orelse continue;
-        if (newest.version.order(pinned.version) != .gt) continue;
+        const latest = try published.newest(r.input.io, a, r.input.zig, r.store, scratch, remote.url) orelse continue;
+        if (remotes.isRetracted(latest.retracted, selected.version)) {
+            any = true;
+            try say.out(r.input.io, "{s} {f} is retracted by its release {f}\n", .{ selected.identity.name, selected.version, latest.version });
+        }
+        if (latest.version.order(selected.version) != .gt) continue;
         any = true;
-        const line: []const u8 = if (select.sameLine(newest.version, pinned.version)) "" else ", a new line";
-        try say.out(r.input.io, "{s} {f} -> {f} (tag {s}{s})\n", .{ dependency.name, pinned.version, newest.version, newest.tag.name, line });
-    };
-    if (!any) try say.note(r.input.io, "no dependency has a newer release", .{});
+        const line: []const u8 = if (select.sameLine(latest.version, selected.version)) "" else ", a new line";
+        try say.out(r.input.io, "{s} {f} -> {f} (tag {s}{s})\n", .{ selected.identity.name, selected.version, latest.version, latest.tag, line });
+    }
+    if (!any) try say.note(r.input.io, "every package is at its newest release, and none is retracted", .{});
 }
 
 /// `bay vendor`: every package the package's graph reaches, unpacked into its

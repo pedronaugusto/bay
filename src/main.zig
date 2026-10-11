@@ -13,6 +13,7 @@ const remotes = @import("remote.zig");
 const graph = @import("graph.zig");
 const published = @import("published.zig");
 const each = @import("each.zig");
+const store = @import("store.zig");
 const licenses = @import("licenses.zig");
 const say = @import("say.zig");
 
@@ -440,12 +441,16 @@ fn update(env: Env, names: []const []const u8) !u8 {
 }
 
 /// `url` (`git+<repo>#<ref>`) at the newest release on its line when the ref is
-/// a release tag, or as it is: a branch follows itself.
+/// a release tag, leaving out what the package's newest release retracts; as it
+/// is otherwise: a branch follows itself.
 fn releaseOnLine(env: Env, url: []const u8) ![]const u8 {
     const hash = std.mem.findScalarLast(u8, url, '#') orelse return url;
     const pinned = remotes.versionOf(.{ .name = url[hash + 1 ..], .commit = "" }) orelse return url;
     const repository = remotes.repository(url) orelse return url;
-    const newest = remotes.newestOnLine(try remotes.tags(env.io, env.a, url), pinned) orelse return url;
+    const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
+    const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
+    const latest = try published.newest(env.io, env.a, env.zig, packages, scratch, url) orelse return url;
+    const newest = remotes.newestOnLine(try remotes.tags(env.io, env.a, url), pinned, latest.retracted) orelse return url;
     if (newest.version.order(pinned) != .gt) return url;
     return env.a.print("git+{s}#{s}", .{ repository, newest.tag.name });
 }
