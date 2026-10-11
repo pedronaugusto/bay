@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-12
+
 ### Added
 
 - `.dev_dependencies` beside `.dependencies`, and the development build that runs a package's `dev` function with them. The development build has the package's own dependencies too, as a crate's tests have its dependencies in Cargo: a dependency the package ships and develops with is listed once, and a name pinned differently in both lists is refused.
@@ -20,3 +22,6 @@
 - `bay install`, `install --list`, `install --update` and `uninstall`: global installs, as `cargo install` makes them, built as anything depending on the package would build it, without its development, and recorded by absolute place.
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
+
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/pedronaugusto/bay/releases/tag/v0.1.0
