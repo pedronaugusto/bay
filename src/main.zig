@@ -83,12 +83,12 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, giv
     // Global: anywhere, as cargo install is.
     if (std.mem.eql(u8, args[0], "install") or std.mem.eql(u8, args[0], "uninstall")) {
         const here = try packageHere(io, a);
-        const zig = if (here) |package| try zigFor(io, a, environ, package) else path_zig;
+        const zig = if (here) |package| try toolchain.forPackage(io, a, environ, package) else path_zig;
         const context: install.Context = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = here };
         return if (std.mem.eql(u8, args[0], "install")) install.command(context, args[1..]) else install.uninstall(context, args[1..]);
     }
     const package = try findPackage(io, a);
-    const env: Env = .{ .io = io, .a = a, .zig = try zigFor(io, a, environ, package), .environ = environ, .package = package, .locked = locked };
+    const env: Env = .{ .io = io, .a = a, .zig = try toolchain.forPackage(io, a, environ, package), .environ = environ, .package = package, .locked = locked };
     const command = args[0];
     if (std.mem.eql(u8, command, "add")) return add(env, args[1..]);
     if (std.mem.eql(u8, command, "remove")) return removeCommand(env, args[1..]);
@@ -103,21 +103,6 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, giv
     if (std.mem.eql(u8, command, "build")) return zigBuild(env, .package, &.{}, args[1..]);
     if (std.mem.eql(u8, command, "dev")) return zigBuild(env, .development, &.{}, args[1..]);
     return step(env, command, args[1..]);
-}
-
-/// The Zig a package builds with: `ZIG` when set; else exactly the version its
-/// manifest names (`.zig_version`, else `.minimum_zig_version`), installed from
-/// ziglang.org on first use; else the one on the PATH.
-pub fn zigFor(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8) ![]const u8 {
-    if (environ.get("ZIG")) |zig| return zig;
-    const path = try std.fs.path.join(a, &.{ package, "build.zig.zon" });
-    const text = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
-    const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
-        error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{path}),
-        error.OutOfMemory => |e| return e,
-    };
-    const version = parsed.zig_version orelse parsed.minimum_zig_version orelse return "zig";
-    return toolchain.path(io, a, environ, version);
 }
 
 const Env = struct {

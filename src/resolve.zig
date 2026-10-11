@@ -138,7 +138,7 @@ pub fn resolve(input: Input) !Resolution {
         .path => {},
     };
     const graph = try select.select(a, packages.loader(), &.{}, mains.items, .{ .coexist = input.parsed.coexist, .chosen = chosen.items });
-    if (graph.problem) |problem| try refuse(input.io, problem);
+    if (graph.problem) |problem| try refuse(a, input.io, graph, problem);
     var resolution: Resolution = .{ .input = input, .store = packages, .graph = graph, .places = try places(a, graph, chosen.items), .raises = &.{} };
     resolution.raises = try raises(resolution);
     return resolution;
@@ -245,10 +245,22 @@ pub fn copyTree(io: Io, a: std.mem.Allocator, from: []const u8, to: []const u8) 
     }
 }
 
+/// The revisions that pin `place`, as a person reads them.
+fn pinners(a: std.mem.Allocator, graph: select.Graph, place: select.Place) ![]const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    for (graph.read.values()) |revision| for (revision.pins) |pin| if (std.mem.eql(u8, pin.place.key(), place.key())) {
+        try names.append(a, try a.print("{s} {f}", .{ revision.identity.name, revision.version }));
+    };
+    return if (names.items.len == 0) "the package" else std.mem.join(a, ", ", names.items);
+}
+
 /// Why there is no selection, in a sentence, ending the command.
-fn refuse(io: Io, problem: select.Problem) !noreturn {
+fn refuse(a: std.mem.Allocator, io: Io, graph: select.Graph, problem: select.Problem) !noreturn {
     switch (problem) {
-        .same_version => |p| try say.fail(io, "{s} {f} is two contents, {s} and {s}: a version names one content, so the one meant is not known; pin a newer version, or give the changed one its own version", .{ p.name, p.version, p.first.key(), p.second.key() }),
+        .same_version => |p| {
+            for ([_]select.Place{ p.first, p.second }) |place| try say.note(io, "{s} {f} at {s}, pinned by {s}", .{ p.name, p.version, place.key(), try pinners(a, graph, place) });
+            try say.fail(io, "{s} {f} is two contents: a version names one, so the one meant is not known. Pin the one meant in .dependencies or .overrides, develop {s} in a workspace, or give each change its own version", .{ p.name, p.version, p.name });
+        },
         .incompatible => |p| try say.fail(io, "{s} asks for {s} {f}, but {s} {f} is selected, a different line (below 1.0, a new minor is a new line): move {s} to {s} {f}, or name {s} in .coexist", .{ p.by, p.name, p.wanted, p.name, p.selected, p.by, p.name, p.selected, p.name }),
         .cycle => |p| try say.fail(io, "{s} and what it depends on depend on each other: a ring of dependencies cannot be built", .{p.name}),
         .retracted => |p| try say.fail(io, "{s} {f} is retracted by {s} {f}: pin {f} or newer", .{ p.name, p.version, p.name, p.by, p.by }),

@@ -10,6 +10,7 @@ const dirs = @import("dirs.zig");
 const download = @import("download.zig");
 const minisign = @import("minisign.zig");
 const say = @import("say.zig");
+const manifest = @import("manifest.zig");
 
 /// The key Zig signs its builds with, as ziglang.org/download publishes it.
 const zig_key = minisign.PublicKey.parse("RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U") catch
@@ -21,6 +22,21 @@ const executable = if (builtin.os.tag == .windows) "zig.exe" else "zig";
 
 /// The zig executable of exactly `version`, installed first if it is not yet.
 /// A version already installed is used without the network.
+/// The Zig a package builds with: `ZIG` when set; else exactly the version its
+/// manifest names (`.zig_version`, else `.minimum_zig_version`), installed from
+/// ziglang.org on first use; else the one on the PATH.
+pub fn forPackage(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8) ![]const u8 {
+    if (environ.get("ZIG")) |zig| return zig;
+    const manifest_path = try std.fs.path.join(a, &.{ package, "build.zig.zon" });
+    const text = try Io.Dir.cwd().readFileAlloc(io, manifest_path, a, .limited(1 << 20));
+    const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
+        error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{manifest_path}),
+        error.OutOfMemory => |e| return e,
+    };
+    const version = parsed.zig_version orelse parsed.minimum_zig_version orelse return "zig";
+    return path(io, a, environ, version);
+}
+
 pub fn path(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, version: []const u8) ![]const u8 {
     // A version is also a directory name: only what semantic versions allow reaches the file system.
     _ = std.SemanticVersion.parse(version) catch try say.fail(io, "{s} is not a Zig version", .{version});

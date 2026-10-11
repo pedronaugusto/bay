@@ -12,6 +12,8 @@ const fetch = @import("fetch.zig");
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
 const store = @import("store.zig");
+const resolve = @import("resolve.zig");
+const toolchain = @import("toolchain.zig");
 
 pub const Record = struct {
     name: []const u8,
@@ -103,6 +105,22 @@ pub fn uninstall(c: Context, args: []const []const u8) !u8 {
 
 /// Installs one package from `source`, a URL or a directory, replacing an
 /// earlier install of the same name.
+/// The install build of the copy in `work`, as bay builds any package: with the
+/// Zig it names, its graph resolved, its pins raised to the selection in the copy
+/// and a fork wherever content differs.
+fn buildCommand(c: Context, work: []const u8, stage: []const u8, cache: []const u8) ![]const []const u8 {
+    const zig = try toolchain.forPackage(c.io, c.a, c.environ, work);
+    const manifest_path = try std.fs.path.join(c.a, &.{ work, "build.zig.zon" });
+    var text = try c.a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(c.io, manifest_path, c.a, .limited(1 << 20)), 0);
+    const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text) });
+    for (resolution.raises) |raise| text = try manifest.put(c.a, text, raise.kind, raise.to);
+    try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = manifest_path, .data = text });
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(c.a, &.{ zig, "build", "install", "-Doptimize=ReleaseSafe", "--prefix", stage, "--cache-dir", cache });
+    try argv.appendSlice(c.a, try resolution.forks(.package, work));
+    return argv.toOwnedSlice(c.a);
+}
+
 fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, prefix: []const u8, given_name: ?[]const u8, force: bool) !u8 {
     const data = try dirs.data(c.io, c.a, c.environ);
     var recorded = source;
@@ -111,10 +129,8 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, prefix: 
     else directory: {
         const dependency = try fetch.fetch(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }), source, given_name) orelse return 1;
         recorded = dependency.source.remote.url;
-        // zig fetch in a project keeps the package in the project's zig-pkg; elsewhere, in the global cache.
-        const local = try std.fs.path.join(c.a, &.{ data, "fetch", "zig-pkg", dependency.source.remote.hash });
-        if (Io.Dir.cwd().access(c.io, local, .{})) |_| break :directory local else |_| {}
-        break :directory try std.fs.path.join(c.a, &.{ try globalCache(c), "p", dependency.source.remote.hash });
+        const packages = try store.Store.init(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }));
+        break :directory try packages.directoryOf(.{ .url = dependency.source.remote.url, .hash = dependency.source.remote.hash });
     };
     const package_text = Io.Dir.cwd().readFileAlloc(c.io, try std.fs.path.join(c.a, &.{ package_dir, "build.zig.zon" }), c.a, .limited(1 << 20)) catch
         try say.fail(c.io, "{s} has no build.zig.zon", .{source});
@@ -125,8 +141,9 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, prefix: 
     try Io.Dir.cwd().deleteTree(c.io, work);
     try Io.Dir.cwd().deleteTree(c.io, stage);
     try copyTree(c, package_dir, work);
-    var child = std.process.spawn(c.io, .{ .argv = &.{ c.zig, "build", "install", "-Doptimize=ReleaseSafe", "--prefix", stage, "--cache-dir", try std.fs.path.join(c.a, &.{ data, "cache", name }) }, .cwd = .{ .path = work } }) catch |err|
-        try say.fail(c.io, "could not run {s}: {t}", .{ c.zig, err });
+    const argv = try buildCommand(c, work, stage, try std.fs.path.join(c.a, &.{ data, "cache", name }));
+    var child = std.process.spawn(c.io, .{ .argv = argv, .cwd = .{ .path = work } }) catch |err|
+        try say.fail(c.io, "could not run {s}: {t}", .{ argv[0], err });
     switch (try child.wait(c.io)) {
         .exited => |code| if (code != 0) return code,
         else => return 1,
@@ -221,11 +238,6 @@ fn listTree(c: Context, path: []const u8) ![]const []const u8 {
 fn defaultPrefix(c: Context) ![]const u8 {
     if (builtin.os.tag == .windows) return std.fs.path.join(c.a, &.{ c.environ.get("LOCALAPPDATA") orelse try say.fail(c.io, "LOCALAPPDATA is not set; give --prefix", .{}), "bay" });
     return std.fs.path.join(c.a, &.{ c.environ.get("HOME") orelse try say.fail(c.io, "HOME is not set; give --prefix", .{}), ".local" });
-}
-
-/// Zig's global package cache, as `zig env` reports it.
-fn globalCache(c: Context) ![]const u8 {
-    return store.globalCache(c.io, c.a, c.zig);
 }
 
 fn load(c: Context) !std.ArrayList(Record) {
