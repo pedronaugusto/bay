@@ -10,7 +10,6 @@
 const std = @import("std");
 const Io = std.Io;
 const say = @import("say.zig");
-const remotes = @import("remote.zig");
 
 /// Whether `url` is one bay fetches with git rather than Zig.
 pub fn handles(url: []const u8) bool {
@@ -73,23 +72,9 @@ pub fn fetch(io: Io, a: std.mem.Allocator, zig: []const u8, scratch: []const u8,
     };
 }
 
-/// The tags of the repository `url` names, as `git ls-remote` lists them.
-pub fn tags(io: Io, a: std.mem.Allocator, url: []const u8) ![]const remotes.Tag {
-    const listing = try git(io, a, null, &.{ "ls-remote", "--tags", parts(url).repository });
-    var list: std.ArrayList(remotes.Tag) = .empty;
-    var peeled: std.StringHashMapUnmanaged([]const u8) = .empty;
-    var lines = std.mem.tokenizeScalar(u8, listing, '\n');
-    while (lines.next()) |line| {
-        const tab = std.mem.findScalar(u8, line, '\t') orelse continue;
-        const ref = std.mem.trimEnd(u8, line[tab + 1 ..], "\r");
-        if (!std.mem.startsWith(u8, ref, "refs/tags/")) continue;
-        const name = ref["refs/tags/".len..];
-        if (std.mem.endsWith(u8, name, "^{}")) try peeled.put(a, name[0 .. name.len - 3], line[0..tab]) else try list.append(a, .{ .name = name, .commit = line[0..tab] });
-    }
-    for (list.items) |*tag| if (peeled.get(tag.name)) |target| {
-        tag.commit = target;
-    };
-    return list.toOwnedSlice(a);
+/// The repository's tag listing, as `git ls-remote --tags` prints it.
+pub fn tagListing(io: Io, a: std.mem.Allocator, url: []const u8) ![]const u8 {
+    return git(io, a, null, &.{ "ls-remote", "--tags", parts(url).repository });
 }
 
 fn isCommit(text: []const u8) bool {

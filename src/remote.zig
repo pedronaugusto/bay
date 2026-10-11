@@ -21,7 +21,7 @@ pub const Tag = struct {
 /// `git+https://host/owner/repo#commit`, a plain `https://` URL, or one git
 /// fetches (`git.handles`), whose tags git lists.
 pub fn tags(io: Io, a: std.mem.Allocator, url: []const u8) ![]const Tag {
-    if (git.handles(url)) return git.tags(io, a, url);
+    if (git.handles(url)) return listed(a, try git.tagListing(io, a, url));
     const repo = repository(url) orelse try say.fail(io, "{s} is not a git+https URL", .{url});
     const refs_url = try a.print("{s}/info/refs?service=git-upload-pack", .{repo});
     var client: std.http.Client = .{ .allocator = a, .io = io };
@@ -31,6 +31,26 @@ pub fn tags(io: Io, a: std.mem.Allocator, url: []const u8) ![]const Tag {
         error.OutOfMemory => |e| return e,
         error.InvalidAdvertisement => try say.fail(io, "{s} did not answer as a smart HTTP git server", .{repo}),
     };
+}
+
+/// The tags in a `git ls-remote --tags` listing: `<id>\t<ref>` per line, an
+/// annotated tag followed by `<id>\t<ref>^{}`, the commit it peels to.
+pub fn listed(a: std.mem.Allocator, listing: []const u8) ![]const Tag {
+    var list: std.ArrayList(Tag) = .empty;
+    var peeled: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer peeled.deinit(a);
+    var lines = std.mem.tokenizeScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        const tab = std.mem.findScalar(u8, line, '\t') orelse continue;
+        const ref = std.mem.trimEnd(u8, line[tab + 1 ..], "\r");
+        if (!std.mem.startsWith(u8, ref, "refs/tags/")) continue;
+        const name = ref["refs/tags/".len..];
+        if (std.mem.endsWith(u8, name, "^{}")) try peeled.put(a, name[0 .. name.len - "^{}".len], line[0..tab]) else try list.append(a, .{ .name = name, .commit = line[0..tab] });
+    }
+    for (list.items) |*tag| if (peeled.get(tag.name)) |target| {
+        tag.commit = target;
+    };
+    return list.toOwnedSlice(a);
 }
 
 /// The repository a pinned URL names: `git+` dropped, and the query (`?ref=`)
@@ -244,4 +264,17 @@ test "the newest on a line stays on it; a version's tag is found with or without
     try testing.expectEqual(null, newestOnLine(&list, .{ .major = 0, .minor = 1, .patch = 0 }));
     try testing.expectEqualStrings("1.4.0", tagOf(&list, .{ .major = 1, .minor = 4, .patch = 0 }).?.name);
     try testing.expectEqual(null, tagOf(&list, .{ .major = 1, .minor = 4, .patch = 1 }));
+}
+
+test "a git ls-remote listing gives each tag and the commit an annotated one peels to" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = "1111111111111111111111111111111111111111";
+    const b = "2222222222222222222222222222222222222222";
+    const c = "3333333333333333333333333333333333333333";
+    const list = try listed(arena.allocator(), a ++ "\trefs/tags/v0.1.0\n" ++ b ++ "\trefs/tags/v0.2.0\n" ++ c ++ "\trefs/tags/v0.2.0^{}\n");
+    try testing.expectEqual(2, list.len);
+    try testing.expectEqualStrings(a, list[0].commit);
+    try testing.expectEqualStrings("v0.2.0", list[1].name);
+    try testing.expectEqualStrings(c, list[1].commit);
 }
