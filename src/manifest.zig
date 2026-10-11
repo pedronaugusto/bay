@@ -30,9 +30,21 @@ pub const Dependency = struct { name: []const u8, source: Source, lazy: bool = f
 
 pub const Manifest = struct {
     name: []const u8,
+    /// The package's `.version`; a manifest without one is 0.0.0.
+    version: []const u8 = "0.0.0",
+    /// With the name, what the package is whatever its revision; 0 when absent.
+    fingerprint: u64 = 0,
     minimum_zig_version: ?[]const u8,
     normal: []const Dependency,
     dev: []const Dependency,
+    /// bay's: packages replaced for the whole graph when this package is the root.
+    overrides: []const Dependency = &.{},
+    /// bay's: packages whose incompatible lines may be selected side by side.
+    coexist: []const []const u8 = &.{},
+    /// bay's: the exact Zig this package builds with; else `minimum_zig_version`.
+    zig_version: ?[]const u8 = null,
+    /// bay's: versions of this package no selection may pick, read from its newest manifest.
+    retracted: []const []const u8 = &.{},
 };
 
 pub const ParseError = error{ InvalidManifest, OutOfMemory };
@@ -53,8 +65,25 @@ pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest
             if (value != .enum_literal) return error.InvalidManifest;
             manifest.name = try arena.dupe(u8, value.enum_literal.get(&zoir));
         } else if (std.mem.eql(u8, field, "minimum_zig_version")) {
-            if (value != .string_literal) return error.InvalidManifest;
-            manifest.minimum_zig_version = try arena.dupe(u8, value.string_literal);
+            manifest.minimum_zig_version = try string(arena, value);
+        } else if (std.mem.eql(u8, field, "version")) {
+            manifest.version = try string(arena, value);
+        } else if (std.mem.eql(u8, field, "zig_version")) {
+            manifest.zig_version = try string(arena, value);
+        } else if (std.mem.eql(u8, field, "fingerprint")) {
+            manifest.fingerprint = switch (value) {
+                .int_literal => |number| switch (number) {
+                    .small => |small| std.math.cast(u64, small) orelse return error.InvalidManifest,
+                    .big => |big| big.toInt(u64) catch return error.InvalidManifest,
+                },
+                else => return error.InvalidManifest,
+            };
+        } else if (std.mem.eql(u8, field, "overrides")) {
+            manifest.overrides = try dependencies(arena, &zoir, value);
+        } else if (std.mem.eql(u8, field, "coexist")) {
+            manifest.coexist = try names(arena, &zoir, value);
+        } else if (std.mem.eql(u8, field, "retracted")) {
+            manifest.retracted = try strings(arena, &zoir, value);
         } else if (std.mem.eql(u8, field, Kind.normal.field())) {
             manifest.normal = try dependencies(arena, &zoir, value);
         } else if (std.mem.eql(u8, field, Kind.dev.field())) {
@@ -63,6 +92,39 @@ pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest
     }
     if (manifest.name.len == 0) return error.InvalidManifest;
     return manifest;
+}
+
+fn string(arena: std.mem.Allocator, node: Zoir.Node) ParseError![]const u8 {
+    if (node != .string_literal) return error.InvalidManifest;
+    return arena.dupe(u8, node.string_literal);
+}
+
+/// A list of strings: `.{ "0.2.1", "0.3.0" }`.
+fn strings(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError![]const []const u8 {
+    const range = switch (node) {
+        .empty_literal => return &.{},
+        .array_literal => |range| range,
+        else => return error.InvalidManifest,
+    };
+    const list = try arena.alloc([]const u8, range.len);
+    for (list, 0..) |*item, i| item.* = try string(arena, range.at(@intCast(i)).get(zoir)); // safe: a ZON list has fewer than 2^32 items
+    return list;
+}
+
+/// A list of package names: `.{ .aegis, .glint }`.
+fn names(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError![]const []const u8 {
+    const range = switch (node) {
+        .empty_literal => return &.{},
+        .array_literal => |range| range,
+        else => return error.InvalidManifest,
+    };
+    const list = try arena.alloc([]const u8, range.len);
+    for (list, 0..) |*item, i| {
+        const entry = range.at(@intCast(i)).get(zoir); // safe: a ZON list has fewer than 2^32 items
+        if (entry != .enum_literal) return error.InvalidManifest;
+        item.* = try arena.dupe(u8, entry.enum_literal.get(zoir));
+    }
+    return list;
 }
 
 fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError![]const Dependency {
@@ -350,4 +412,29 @@ fn parseAny(_: void, smith: *std.testing.Smith) anyerror!void {
         for (list) |dependency| found = found or std.mem.eql(u8, dependency.name, added.name);
         try std.testing.expect(found);
     }
+}
+
+test "the fields resolution reads: version, fingerprint, overrides, coexist, the Zig, retractions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const text =
+        \\.{
+        \\    .name = .demo,
+        \\    .version = "0.4.1",
+        \\    .fingerprint = 0xa1b2c3d4e5f60718,
+        \\    .minimum_zig_version = "0.17.0",
+        \\    .zig_version = "0.17.0",
+        \\    .dependencies = .{},
+        \\    .overrides = .{ .aegis = .{ .path = "../aegis" } },
+        \\    .coexist = .{ .strand, .warp },
+        \\    .retracted = .{ "0.4.0" },
+        \\}
+    ;
+    const parsed = try parse(arena.allocator(), text);
+    try std.testing.expectEqualStrings("0.4.1", parsed.version);
+    try std.testing.expectEqual(0xa1b2c3d4e5f60718, parsed.fingerprint);
+    try std.testing.expectEqualStrings("0.17.0", parsed.zig_version.?);
+    try std.testing.expectEqualStrings("../aegis", parsed.overrides[0].source.path);
+    try std.testing.expectEqualStrings("warp", parsed.coexist[1]);
+    try std.testing.expectEqualStrings("0.4.0", parsed.retracted[0]);
 }

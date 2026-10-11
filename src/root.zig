@@ -4,6 +4,7 @@
 //! Zig fetches, hashes and caches it like any other package.
 const std = @import("std");
 const manifest = @import("manifest.zig");
+const select = @import("select.zig");
 
 /// Where the development root lives, relative to the package.
 pub const directory = ".zig-cache/bay";
@@ -13,7 +14,10 @@ pub const directory = ".zig-cache/bay";
 const root_name = "bay_development";
 
 /// The root's `build.zig.zon`.
-pub fn manifestText(a: std.mem.Allocator, package: manifest.Manifest) ![]u8 {
+/// The package is a path dependency of the root, or, when something in the graph pins
+/// it, that hash (`pinned`), which a fork turns into the working tree: a package
+/// appears under one hash only.
+pub fn manifestText(a: std.mem.Allocator, package: manifest.Manifest, pinned: ?select.Place.Remote) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     const w = &out.writer;
     try w.print(
@@ -27,9 +31,12 @@ pub fn manifestText(a: std.mem.Allocator, package: manifest.Manifest) ![]u8 {
     try w.print(
         \\    .paths = .{{""}},
         \\    .dependencies = .{{
-        \\        .{f} = .{{ .path = "../.." }},
         \\
-    , .{std.zig.fmtId(package.name)});
+    , .{});
+    if (pinned) |remote|
+        try w.print("        .{f} = .{{ .url = \"{f}\", .hash = \"{f}\" }},\n", .{ std.zig.fmtId(package.name), std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) })
+    else
+        try w.print("        .{f} = .{{ .path = \"../..\" }},\n", .{std.zig.fmtId(package.name)});
     // The package's own dependencies too, as Cargo gives a crate's tests its
     // dependencies: `dev` reaches a shipped one by name, and Zig shares it with
     // the package by hash. A name in both lists is one dependency, pinned once.
@@ -108,11 +115,11 @@ fn fingerprint(name: []const u8, package: []const u8) u64 {
 
 /// Writes the root under `package_dir`, touching a file only when its text changes,
 /// so an unchanged manifest leaves Zig's configure cache warm.
-pub fn write(io: std.Io, a: std.mem.Allocator, package_dir: std.Io.Dir, package: manifest.Manifest) !void {
+pub fn write(io: std.Io, a: std.mem.Allocator, package_dir: std.Io.Dir, package: manifest.Manifest, pinned: ?select.Place.Remote) !void {
     try package_dir.createDirPath(io, directory);
     var dir = try package_dir.openDir(io, directory, .{});
     defer dir.close(io);
-    try writeIfChanged(io, a, dir, "build.zig.zon", try manifestText(a, package));
+    try writeIfChanged(io, a, dir, "build.zig.zon", try manifestText(a, package, pinned));
     try writeIfChanged(io, a, dir, "build.zig", try buildText(a, package));
 }
 
@@ -134,7 +141,7 @@ test "the root depends on the package and each dev dependency" {
         .{ .name = "tool", .source = .{ .remote = .{ .url = "git+https://example.org/tool#v1", .hash = "tool-0.1.0-AAAA" } } },
         .{ .name = "local", .source = .{ .path = "../local" } },
     } };
-    const text = try manifestText(a, package);
+    const text = try manifestText(a, package, null);
     const parsed = try manifest.parse(a, try a.dupeSentinel(u8, text, 0));
     try std.testing.expectEqualStrings(root_name, parsed.name);
     try std.testing.expect(std.mem.find(u8, text, ".demo = .{ .path = \"../..\" }") != null);
@@ -156,7 +163,7 @@ test "a dev dependency cannot take the package's own name" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const package: manifest.Manifest = .{ .name = "demo", .minimum_zig_version = null, .normal = &.{}, .dev = &.{.{ .name = "demo", .source = .{ .path = "x" } }} };
-    try std.testing.expectError(error.DevDependencyNamedAsPackage, manifestText(arena.allocator(), package));
+    try std.testing.expectError(error.DevDependencyNamedAsPackage, manifestText(arena.allocator(), package, null));
 }
 
 test "the root carries the package's own dependencies, a name in both lists once" {
@@ -165,7 +172,7 @@ test "the root carries the package's own dependencies, a name in both lists once
     const a = arena.allocator();
     const shipped: manifest.Dependency = .{ .name = "fault", .source = .{ .remote = .{ .url = "git+https://example.org/fault#v1", .hash = "fault-0.1.0-AAAA" } }, .lazy = true };
     const package: manifest.Manifest = .{ .name = "demo", .minimum_zig_version = null, .normal = &.{ shipped, .{ .name = "core", .source = .{ .path = "../core" } } }, .dev = &.{shipped} };
-    const text = try manifestText(a, package);
+    const text = try manifestText(a, package, null);
     try std.testing.expectEqual(1, std.mem.count(u8, text, ".fault = "));
     try std.testing.expect(std.mem.find(u8, text, ".hash = \"fault-0.1.0-AAAA\", .lazy = true") != null);
     try std.testing.expect(std.mem.find(u8, text, ".core = .{ .path = \"../../../core\" }") != null);
@@ -174,5 +181,5 @@ test "the root carries the package's own dependencies, a name in both lists once
     // One name pinned two ways is two dependencies under one name: refused.
     const other: manifest.Dependency = .{ .name = "fault", .source = .{ .remote = .{ .url = "git+https://example.org/fault#v2", .hash = "fault-0.2.0-BBBB" } } };
     const split: manifest.Manifest = .{ .name = "demo", .minimum_zig_version = null, .normal = &.{shipped}, .dev = &.{other} };
-    try std.testing.expectError(error.PinnedTwiceDifferently, manifestText(a, split));
+    try std.testing.expectError(error.PinnedTwiceDifferently, manifestText(a, split, null));
 }

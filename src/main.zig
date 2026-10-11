@@ -6,6 +6,8 @@ const manifest = @import("manifest.zig");
 const root = @import("root.zig");
 const fetch = @import("fetch.zig");
 const install = @import("install.zig");
+const resolve = @import("resolve.zig");
+const workspace = @import("workspace.zig");
 const say = @import("say.zig");
 
 const usage =
@@ -116,14 +118,21 @@ const Where = enum { package, development };
 
 /// Runs zig build in the package, or in its development root, and returns its exit code.
 fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const []const u8) !u8 {
+    const parsed = try manifest.parse(env.a, try env.readManifest());
+    const resolution = try resolveHere(env, parsed);
+    // A build never writes the manifest: one that disagrees with the selection is refused.
+    if (resolution.raises.len != 0) {
+        for (resolution.raises) |raise| try say.note(env.io, "{s} is pinned below the selection: {s}", .{ raise.from.name, try describe(resolution, raise.to) });
+        try say.fail(env.io, "build.zig.zon disagrees with the selection; bay tidy writes it", .{});
+    }
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(env.a, &.{ env.zig, "build" });
+    try argv.appendSlice(env.a, try resolution.forks(if (where == .development) .development else .package));
     try argv.appendSlice(env.a, before);
     if (where == .development) {
-        const parsed = try manifest.parse(env.a, try env.readManifest());
         var dir = try env.dir();
         defer dir.close(env.io);
-        root.write(env.io, env.a, dir, parsed) catch |err| switch (err) {
+        root.write(env.io, env.a, dir, parsed, resolution.packagePin()) catch |err| switch (err) {
             error.DevDependencyNamedAsPackage => try say.fail(env.io, "a dev dependency is named {s}, the package's own name", .{parsed.name}),
             error.PinnedTwiceDifferently => try say.fail(env.io, "a name is pinned differently in .dependencies and .dev_dependencies: one name is one dependency", .{}),
             else => |e| return e,
@@ -142,6 +151,19 @@ fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const [
         .exited => |code| code,
         else => 1,
     };
+}
+
+/// The package's graph, resolved: a workspace's members are main modules beside it.
+fn resolveHere(env: Env, parsed: manifest.Manifest) !resolve.Resolution {
+    return resolve.resolve(.{ .io = env.io, .a = env.a, .zig = env.zig, .package = env.package, .parsed = parsed, .members = try workspace.members(env.io, env.a, env.package) });
+}
+
+/// A dependency's selected revision as a person reads it: name, version, hash.
+fn describe(resolution: resolve.Resolution, dependency: manifest.Dependency) ![]const u8 {
+    const a = resolution.input.a;
+    const hash = dependency.source.remote.hash;
+    const revision = resolution.graph.read.get(hash) orelse return a.print("{s} {s}", .{ dependency.name, hash });
+    return a.print("{s} {f} ({s})", .{ revision.identity.name, revision.version, hash });
 }
 
 /// `bay <step>`: the package's own steps are what ships and come first; a step
@@ -397,4 +419,7 @@ test {
     _ = manifest;
     _ = root;
     _ = @import("select.zig");
+    _ = @import("store.zig");
+    _ = @import("resolve.zig");
+    _ = @import("workspace.zig");
 }

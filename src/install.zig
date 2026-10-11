@@ -10,6 +10,7 @@ const Io = std.Io;
 const manifest = @import("manifest.zig");
 const fetch = @import("fetch.zig");
 const say = @import("say.zig");
+const store = @import("store.zig");
 
 pub const Record = struct {
     name: []const u8,
@@ -231,13 +232,7 @@ fn dataDirectory(c: Context) ![]const u8 {
 
 /// Zig's global package cache, as `zig env` reports it.
 fn globalCache(c: Context) ![]const u8 {
-    const result = std.process.run(c.a, c.io, .{ .argv = &.{ c.zig, "env" }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
-        try say.fail(c.io, "could not run {s} env: {t}", .{ c.zig, err });
-    const Env = struct { global_cache_dir: []const u8 };
-    var diagnostics: std.zon.parse.Diagnostics = undefined;
-    const env = std.zon.parse.fromSlice(Env, .{ .gpa = c.a, .arena = c.a, .source = try c.a.dupeSentinel(u8, result.stdout, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
-        try say.fail(c.io, "could not read {s} env", .{c.zig});
-    return env.global_cache_dir;
+    return store.globalCache(c.io, c.a, c.zig);
 }
 
 fn load(c: Context) !std.ArrayList(Record) {
