@@ -109,7 +109,15 @@ fn checkout(io: Io, a: std.mem.Allocator, repository: []const u8, commit: []cons
     var out = try Io.Dir.cwd().openDir(io, into, .{});
     defer out.close(io);
     var reader = try Objects.open(io, a, repository);
-    defer reader.close();
+    // A tree that fails to write ends git with it; one written lets git end as asked.
+    write(io, listing, out, reader) catch |err| {
+        reader.child.kill(io);
+        return err;
+    };
+    try reader.finish();
+}
+
+fn write(io: Io, listing: []const u8, out: Io.Dir, reader: *Objects) !void {
     var entries = std.mem.tokenizeScalar(u8, listing, 0);
     while (entries.next()) |entry| {
         // `<mode> <type> <object>\t<path>`
@@ -168,10 +176,12 @@ const Objects = struct {
         return data;
     }
 
-    fn close(objects: *Objects) void {
+    /// Ends git once every blob is read: it must have ended as asked.
+    fn finish(objects: *Objects) !void {
         objects.child.stdin.?.close(objects.io); // safe: stdin is piped
         objects.child.stdin = null;
-        _ = objects.child.wait(objects.io) catch {}; // the blobs are read; how git ended adds nothing
+        const term = try objects.child.wait(objects.io);
+        if (term != .exited or term.exited != 0) return error.GitFailed;
     }
 };
 
