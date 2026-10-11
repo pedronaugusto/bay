@@ -475,3 +475,21 @@ test "a package naming a Zig older than bay builds with is refused in a sentence
     try std.testing.expect(refused(refusal));
     try std.testing.expect(std.mem.find(u8, refusal.stderr, "names Zig 0.16.0; bay builds with Zig 0.17.0 or newer") != null);
 }
+
+test "a diamond on a package with a package nested by path builds one of each" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // m keeps sub inside it, by path; its two releases each carry their own sub.
+    for ([_][2][]const u8{ .{ "m1", "0.1.0" }, .{ "m2", "0.1.1" } }) |release| {
+        try f.package(try f.a.print("{s}/sub", .{release[0]}), "sub", release[1], "", &.{}, try f.a.print("pub const n = \"{s}\";", .{release[1]}));
+        try f.package(release[0], "m", release[1], ".sub = .{ .path = \"sub\" },", &.{"sub"}, "pub const sub = @import(\"sub\");");
+    }
+    try f.package("a", "a", "0.1.0", try f.pin("m", "m1"), &.{"m"}, "pub const m = @import(\"m\");");
+    try f.package("b", "b", "0.1.0", try f.pin("m", "m2"), &.{"m"}, "pub const m = @import(\"m\");");
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") }), &.{ "a", "b" }, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"a sub {s} b sub {s}\\n\", .{ @import(\"a\").m.sub.n, @import(\"b\").m.sub.n }); }");
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "a sub 0.1.1 b sub 0.1.1") != null);
+}

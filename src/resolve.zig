@@ -159,26 +159,28 @@ pub fn resolve(input: Input) !Resolution {
 
 /// The one place of each package: the selected revision's, or the highest hash pinned for a main module.
 /// Between equal versions of a main module, the hash the root names stands for it.
-/// What Zig cannot build as one graph, refused in a sentence: a package that is
-/// a directory somewhere and pinned at another place elsewhere (Zig makes the
-/// directory a package of its own beside the pinned one; `.overrides` makes one
-/// of them), and a package two of whose lines coexist while one needs a fork
+/// What Zig cannot build as one graph, refused in a sentence: a package that the
+/// built graph has as a directory somewhere and at another place elsewhere (Zig
+/// makes the directory a package of its own beside the other; `.overrides` makes
+/// one of them), and a package two of whose lines coexist while one needs a fork
 /// (Zig matches a fork by what a package is, not by its line).
 fn materializable(r: Resolution) !void {
     const a = r.input.a;
     const io = r.input.io;
     var seen: std.array_hash_map.String(select.Place) = .empty;
-    for (r.graph.read.keys(), r.graph.read.values()) |place, revision| {
-        const key = r.graph.keys.get(place).?; // safe: every place read has its key
+    for (try builtPins(a, r.graph)) |pin| {
+        const key = r.graph.keys.get(pin.place.key()) orelse continue;
         if (r.graph.mains.contains(key)) continue;
         const entry = try seen.getOrPut(a, key);
         if (!entry.found_existing) {
-            entry.value_ptr.* = revision.place;
+            entry.value_ptr.* = pin.place;
             continue;
         }
-        if (revision.place != .directory and entry.value_ptr.* != .directory) continue;
-        for ([_]select.Place{ entry.value_ptr.*, revision.place }) |each| try say.note(io, "{s} at {s}, pinned by {s}", .{ revision.identity.name, each.key(), try pinners(a, r.graph, each) });
-        try say.fail(io, "{s} is a directory in one place and pinned at another elsewhere, which Zig builds as two packages: name the one meant in .overrides", .{revision.identity.name});
+        if (std.mem.eql(u8, entry.value_ptr.key(), pin.place.key())) continue;
+        if (pin.place != .directory and entry.value_ptr.* != .directory) continue;
+        const name = r.graph.read.get(pin.place.key()).?.identity.name; // safe: every place pinned in the graph was read
+        for ([_]select.Place{ entry.value_ptr.*, pin.place }) |each| try say.note(io, "{s} at {s}, pinned by {s}", .{ name, each.key(), try pinners(a, r.graph, each) });
+        try say.fail(io, "{s} is a directory in one place and pinned at another elsewhere, which Zig builds as two packages: name the one meant in .overrides", .{name});
     }
     var lines: std.array_hash_map.String(usize) = .empty;
     for (r.graph.selected.values()) |revision| (try lines.getOrPutValue(a, revision.identity.name, 0)).value_ptr.* += 1;
@@ -189,13 +191,23 @@ fn materializable(r: Resolution) !void {
     }
 }
 
+/// Every pin of what is built: the main modules' and the selected revisions'.
+fn builtPins(a: std.mem.Allocator, graph: select.Graph) ![]const select.Pin {
+    var list: std.ArrayList(select.Pin) = .empty;
+    for ([_][]const select.Revision{ graph.mains.values(), graph.selected.values() }) |revisions| for (revisions) |revision| try list.appendSlice(a, revision.pins);
+    return list.items;
+}
+
 fn places(a: std.mem.Allocator, graph: select.Graph, chosen: []const []const u8) !std.array_hash_map.String(select.Place) {
     var result: std.array_hash_map.String(select.Place) = .empty;
     for (graph.selected.keys(), graph.selected.values()) |key, revision| try result.put(a, key, revision.place);
     var best: std.array_hash_map.String(select.Revision) = .empty;
-    for (graph.read.keys(), graph.read.values()) |place, revision| {
-        const key = graph.keys.get(place).?; // safe: every place read has its key
-        if (!graph.mains.contains(key) or revision.place != .remote) continue;
+    // A main module's one hash: the highest revision of it the built graph pins.
+    for (try builtPins(a, graph)) |pin| {
+        if (pin.place != .remote) continue;
+        const revision = graph.read.get(pin.place.key()) orelse continue;
+        const key = graph.keys.get(pin.place.key()).?; // safe: every place read has its key
+        if (!graph.mains.contains(key)) continue;
         const entry = try best.getOrPut(a, key);
         const replace = !entry.found_existing or switch (revision.version.order(entry.value_ptr.version)) {
             .gt => true,

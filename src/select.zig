@@ -66,8 +66,8 @@ pub const Problem = union(enum) {
 };
 
 pub const Graph = struct {
-    /// The selected revision of each package (of each compatible line, for one
-    /// that may coexist), by selection key, in the order first reached.
+    /// The selected revision of each package a build uses (of each compatible line,
+    /// for one that may coexist), by selection key.
     selected: std.array_hash_map.String(Revision),
     /// The main modules, by identity key.
     mains: std.array_hash_map.String(Revision),
@@ -131,11 +131,23 @@ pub fn select(a: Allocator, loader: anytype, roots: []const Pin, mains: []const 
         };
         try top.value_ptr.append(a, revision);
     }
-    for (tops.keys(), tops.values()) |selection, candidates| {
-        try graph.selected.put(a, selection, decide(candidates.items, options.chosen) orelse {
-            graph.problem = .{ .same_version = .{ .name = candidates.items[0].identity.name, .version = candidates.items[0].version, .first = candidates.items[0].place, .second = candidates.items[1].place } };
+    // The highest version counts every revision reached; what is decided and
+    // checked is what is built: what the main modules and roots pin, through the
+    // revisions selected. A package only an unbuilt revision reaches is built by
+    // nothing, so nothing about it can stop a build.
+    var queue: std.ArrayList(Pin) = .empty;
+    for (mains) |main| try queue.appendSlice(a, main.pins);
+    try queue.appendSlice(a, roots);
+    while (queue.pop()) |pin| {
+        const selection = graph.keys.get(pin.place.key()) orelse continue;
+        if (graph.mains.contains(selection) or graph.selected.contains(selection)) continue;
+        const candidates = tops.get(selection).?.items; // safe: every package read that is no main module has its top
+        const chosen = decide(candidates, options.chosen) orelse {
+            graph.problem = .{ .same_version = .{ .name = candidates[0].identity.name, .version = candidates[0].version, .first = candidates[0].place, .second = candidates[1].place } };
             return graph;
-        });
+        };
+        try graph.selected.put(a, selection, chosen);
+        for (chosen.pins) |next| if (!next.dev) try queue.append(a, next);
     }
     graph.problem = try compatible(graph) orelse try acyclic(a, graph);
     return graph;
@@ -336,4 +348,23 @@ test "selected revisions that depend on each other are refused" {
     var table: Table = .{ .revisions = &.{ x, y } };
     const graph = try select(arena.allocator(), &table, &.{pinTo("x", "x")}, &.{}, .{});
     try std.testing.expect(graph.problem.? == .cycle);
+}
+
+test "a package only an unbuilt revision reaches stops nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // b 1.0.0 loses to b 1.1.0; only it pins legacy, which asks for an older line of d.
+    const b1 = rev("b", 2, "1.0.0", "b1", &.{pinTo("legacy", "legacy")});
+    const b2 = rev("b", 2, "1.1.0", "b2", &.{});
+    const legacy = rev("legacy", 6, "0.1.0", "legacy", &.{pinTo("d", "d3")});
+    const d3 = rev("d", 8, "0.3.0", "d3", &.{});
+    const d4 = rev("d", 8, "0.4.0", "d4", &.{});
+    const e = rev("e", 9, "1.0.0", "e", &.{pinTo("d", "d4")});
+    const x = rev("x", 3, "1.0.0", "x", &.{pinTo("b", "b1")});
+    var table: Table = .{ .revisions = &.{ b1, b2, legacy, d3, d4, e, x } };
+    const graph = try select(a, &table, &.{ pinTo("x", "x"), pinTo("b", "b2"), pinTo("e", "e") }, &.{}, .{});
+    try std.testing.expectEqual(null, graph.problem);
+    try std.testing.expect(!graph.selected.contains(try (Identity{ .name = "legacy", .fingerprint = 6 }).key(a)));
+    try std.testing.expectEqualStrings("d4", graph.resolve(hashed("d3")).?.place.key());
 }
