@@ -1,63 +1,58 @@
 # bay
 
-bay is a package manager on top of Zig's. Zig fetches, hashes and builds; bay
-decides what to fetch, and writes the packages Zig builds. It adds what a Zig
-manifest has no words for: development dependencies, one version of each
-package when several are asked for, packages developed together, and the exact
-Zig a package builds with. Every package stays plain Zig: `zig build` works
-without bay, from each manifest's own pins.
+Development dependencies, one version of each package, and the exact Zig, on top
+of Zig's own package manager.
 
-Work in progress. Requires Zig 0.17.0.
+Zig fetches, hashes, caches and builds. bay decides what Zig fetches and writes the
+packages Zig builds, adding what a Zig manifest has no words for:
+
+- **Development dependencies**: test frameworks, linters and CI tools a package is
+  developed with, kept out of what it ships.
+- **One version of each package**: when two dependencies pin different revisions
+  of a third, bay selects one, so a type that crosses between them is one type.
+- **Workspaces**: several packages developed together, each built from its local
+  checkout.
+- **The exact Zig**: the version a package names, downloaded and verified.
+
+A package developed with bay is still a plain Zig package. Anyone without bay builds
+it with `zig build` from its manifest, as before.
+
+Requires Zig 0.17.0. Work in progress.
 
 ## Install
 
-From a clone, with Zig 0.17.0 on the PATH:
+From a clone, with Zig 0.17.0 on the `PATH`:
 
-```
+```sh
 zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/bay install
 ```
 
-bay installs itself into `~/.local/bin` (put it on the PATH) and records what it
-put there. Installed from a URL instead (`bay install git+https://...#v0.1.0`), it
-updates with `bay install --update bay`. From then on bay
-fetches the exact Zig each package names; the one on the PATH only starts a new
-package.
+bay installs itself into `~/.local/bin`; put that on the `PATH`. Installed from a URL
+(`bay install git+https://github.com/pedronaugusto/bay#v0.1.0`), it updates with
+`bay install --update bay`. From then on each package builds with the Zig it names,
+and the Zig on the `PATH` only starts new packages.
 
-## Getting started
+## A first package
 
-A new package:
-
-```
+```sh
 bay new example && cd example
-bay add git+https://github.com/owner/library#v1.2.0     # a dependency it ships
-bay add --dev git+https://github.com/owner/checker      # a tool it is developed with
-bay test                                                 # its tests, as zig build test runs them
-bay tree                                                 # what it builds with
+bay add git+https://github.com/owner/library#v1.2.0   # a dependency it ships
+bay add --dev git+https://github.com/owner/checker    # a tool it is developed with
+bay test                                               # zig build test, with both
+bay tree                                               # what it builds with
 ```
 
-An existing package: `bay init` at its root adds the empty `.dev_dependencies`
-and a `dev` function and changes nothing else; `zig build` keeps working. Move a
-tool from `.dependencies` with `bay remove <name>` and `bay add --dev <url>`, and
-its steps from `build` into `dev`. A project that depends on yours never runs
-bay: it sees `build` and `.dependencies`, as before.
-
-Developing several packages together: put a `bay.work` above them naming each
-(see Workspaces), and every build uses the local checkouts. `bay tidy` keeps
-their pins on one version of each.
-
-In CI: install bay, then `bay --locked tidy` fails if a manifest is not what the
-selection says, and `bay --locked <step>` runs the step without changing
-anything. `bay vendor` keeps every package in the project for a build with no
-network.
+An existing package adopts bay with `bay init` at its root, which adds an empty
+`.dev_dependencies` and a `dev` function and changes nothing else. Move a tool out of
+`.dependencies` with `bay remove <name>` and `bay add --dev <url>`, and its steps
+from `build` into `dev`. Projects that depend on yours never see the difference.
 
 ## Development dependencies
 
-A Zig manifest has one list of dependencies. A test tool listed there is part of
-the package's graph for everyone who depends on it, and when the tool is itself
-developed with the package, the graph has a cycle. bay adds `.dev_dependencies`
-beside `.dependencies`. Zig ignores the field, so a package that depends on yours
-never sees it.
+`.dev_dependencies` sits beside `.dependencies`, with the same entries. Zig ignores
+it, so a package that depends on yours never fetches what is in it, and a tool that
+is itself developed with your package forms no cycle.
 
 ```zig
 .{
@@ -76,7 +71,7 @@ never sees it.
 }
 ```
 
-`build.zig` keeps `build` for what the package ships, and adds `dev` for its
+`build.zig` keeps `build` for what the package ships and adds `dev` for its
 development:
 
 ```zig
@@ -85,116 +80,144 @@ pub fn build(b: *std.Build) void {
 }
 
 pub fn dev(b: *std.Build, tools: type) void {
-    // tools.checker is the checker's build.zig.
+    // tools.checker is the checker's build.zig; the package is a dependency here.
     tools.checker.addChecks(b, b.dependency("example", .{}));
 }
 ```
 
-`bay <step>` runs a step of the package's own build, or else of its development
-build: a package bay writes under `.zig-cache/bay` whose dependencies are this
-package, its dependencies and its dev dependencies, and whose build calls `dev`.
-In `dev`, the package is `b.dependency("<its name>", ...)` and a dependency it
-ships is `b.dependency("<that name>", ...)`, the same package Zig gives the
-package. One a package ships and also develops with is listed once.
+`bay <step>` runs the step from the package's own build, or, when it has none by
+that name, from its development build. In `dev`, the package is
+`b.dependency("example", ...)`, and a dependency it ships is reached by its own name,
+the same package Zig gives the package. A dependency that is both shipped and used in
+development is listed once, in `.dependencies`.
 
 ## One version of each package
 
-Two dependencies may pin different revisions of a third. Zig builds both, and
-when a type of one reaches the other the build fails: `expected type 'T', found
-'T'`. bay selects one, as Go's modules do (Minimal Version Selection): a pin is
-a minimum, and each package builds at the highest `.version` any manifest in the
-graph pins. Every revision the graph reaches is read, so the answer does not
-depend on the order they are found in.
+Two dependencies may pin different revisions of a third. Zig builds both, and when a
+value of one reaches the other the build fails with `expected type 'T', found 'T'`.
+bay selects one, by Go's Minimal Version Selection: a pin is a minimum, and each
+package builds at the highest `.version` pinned by the package or by a revision
+already selected. Selection runs in rounds over the whole graph, so the answer does
+not depend on the order packages are found in, and what an older revision asked for
+stops counting once a newer one is chosen.
 
-bay then gives Zig a graph in which each package appears once. A dependency whose
-own pins name other revisions is built from a copy of it with only its manifest's
-pins rewritten, which `zig build --fork` substitutes; the package's own files
-are never touched. The package's own pins must already name the selection: a
-build that disagrees stops and says so, and `bay tidy` writes them, as Go writes
-go.mod. `bay --locked <command>` never writes a manifest, for CI.
+Zig then gets a graph in which each package appears once. A dependency whose own pins
+name other revisions is built from a copy with only those pins rewritten, which
+`zig build --fork` substitutes for it; no package's files are edited. The package's
+own pins must already name the selection: a build that disagrees stops and says why,
+and `bay tidy` writes them.
 
-- The package under development always wins over every revision of itself: a
-  test tool that depends on the package links the working tree, one copy.
-- Two revisions that claim one version with different contents are refused,
-  naming who pins each, unless the package pins one of them itself. A version
-  names one content; give each change its own.
-- A different major version, or below 1.0 a different minor, is a new line. A
-  graph that asks for two lines of one package is refused, with who asks for
-  each, unless the package names it in `.coexist = .{ .name }`.
-- A package's manifest may list versions of it that no selection may pick:
-  `.retracted = .{ "0.4.0" }`.
+| Case | What bay does |
+| --- | --- |
+| The package is also a dependency of its own tools | The working tree wins over every revision of it: one copy, the one under test |
+| Two contents claim one version | Refused, naming who pins each, unless the package pins one itself |
+| Two lines of one package: a new major, or below 1.0 a new minor | Refused, naming who asks for each, unless the package lists it in `.coexist` |
+| A version a newer revision retracts | Refused, naming the retracting version |
+| Packages that depend on each other in a ring | Refused |
 
-## Workspaces and overrides
+A version names one content, so every published change gets its own `.version`.
 
-A `bay.work` in the package's directory or one above it names packages developed
-together, as Go's go.work does:
+## Workspaces
+
+A `bay.work` in the package's directory, or any directory above it, names packages
+developed together:
 
 ```zig
 .{ .members = .{ "aegis", "shakedown", "relic" } }
 ```
 
-Each member is built from its directory wherever the graph pins it, so a change
-in one is tested against the others before it is published. `bay tidy` keeps
-every member's pins on the one version selected.
+Every member is built from its directory wherever the graph pins it, so a change in
+one is built and tested against the others before it is published anywhere.
+`bay tidy` keeps every member's pins on the one version selected.
 
-`.overrides` in the package's manifest replaces a package for the whole graph,
-with a revision or a directory, as Go's `replace` and Cargo's `[patch]` do. It
-applies only where the package is the one being built.
+## Overrides
 
-## The Zig a package builds with
+`.overrides` replaces a package for the whole graph, with a revision or a directory:
 
-bay runs exactly the Zig a package names: `.zig_version`, else
-`.minimum_zig_version`. A version not yet installed is downloaded from
-ziglang.org, checked against the index's SHA-256 and Zig's minisign key, and kept
-in bay's data directory. `ZIG` names another one by hand.
+```zig
+.overrides = .{
+    .library = .{ .path = "../library" },
+},
+```
+
+It applies only where the package that declares it is the one being built.
+
+## The exact Zig
+
+bay builds each package with exactly the Zig it names: `.zig_version`, or else
+`.minimum_zig_version`. A version not yet on the machine is downloaded from
+ziglang.org, checked against the release index's SHA-256 and Zig's minisign key, and
+kept in bay's data directory. Setting `ZIG` names another Zig by hand.
+
+## In CI
+
+```sh
+bay --locked tidy     # fails if a manifest is not what the selection says
+bay --locked test     # runs the step; nothing is written
+```
+
+`--locked` refuses any change to a manifest. `bay vendor` keeps every package the
+graph reads in the project's `zig-pkg`, where Zig and bay look before the network, so
+the project resolves and builds with no remote reachable.
 
 ## Commands
 
-```
-bay new <name>             a new package in a new directory: zig init, then the
-                           empty dev list and a `dev` function
-bay init                   the same for the package here, adding only what is missing
-bay build [args]           zig build: the package's install step
-bay <step> [args]          the step from the package's build, or else its development build
-bay dev [args]             zig build in the development build, as given
-bay add [--dev] [--lazy] [--name <name>] <url or directory>
-                           pin a dependency through zig fetch in that list alone
-bay remove [--dev] <name>  drop a dependency
-bay update [name...]       pin what each recorded ref (?ref=) names now
-bay tidy                   pin each package at the version selection picks
-bay list                   both lists, with their pins
-bay tree [--why <name>] [--duplicates]
-                           the resolved graph; the paths to one package; the ones
-                           pinned at more than one revision, and who pins each
-bay outdated               dependencies with a newer release on their remote
-bay vendor                 every package the graph reads, into zig-pkg, to build offline
-bay locate [--dev]         the package's directory, or its development build's root
-bay fetch                  fetch every dependency of both kinds
+| Command | Does |
+| --- | --- |
+| `bay new <name>` | A new package in a new directory: `zig init`, then the empty dev list and a `dev` function |
+| `bay init` | The same for the package here, adding only what is missing |
+| `bay build [args]` | `zig build` of the package |
+| `bay <step> [args]` | The step from the package's build, or else its development build |
+| `bay dev [args]` | `zig build` in the development build, as given |
+| `bay add [--dev] [--lazy] [--name <name>] <url or dir>` | Pin a dependency through `zig fetch`, in that list only |
+| `bay remove [--dev] <name>` | Drop a dependency |
+| `bay update [name...]` | Pin what each recorded ref (`?ref=`) names now |
+| `bay tidy` | Pin each package at the version selection picks |
+| `bay list` | Both lists, with their pins |
+| `bay tree [--why <name>] [--duplicates]` | The resolved graph; the paths to one package; the packages pinned at several revisions, and by whom |
+| `bay outdated` | Dependencies with a newer release on their remote |
+| `bay vendor` | Every package the graph reads, into `zig-pkg` |
+| `bay locate [--dev]` | The package's directory, or its development build's root |
+| `bay fetch` | Fetch every dependency of both kinds |
+| `bay install [--prefix <dir>] [--force] [<url or dir>]` | Build a package's programs (ReleaseSafe) into `<dir>/bin`, `~/.local/bin` by default; with no source, the package here |
+| `bay install --list` | What bay installed, and from where |
+| `bay install --update [name...]` | Reinstall each from its recorded branch or tag |
+| `bay uninstall <name>` | Remove exactly what its install put in place |
 
-bay install [--prefix <dir>] [--force] [<url or directory>]
-                           build a package's programs (ReleaseSafe) into <dir>/bin,
-                           ~/.local/bin by default; with no source, the package here
-bay install --list         what bay installed, and from where
-bay install --update [name...]
-                           reinstall each from its recorded branch or tag
-bay uninstall <name>       remove what its install put in place
-```
+`bay --locked <command>` refuses to write a manifest. `add`, `remove` and `update`
+tidy after they write.
 
-`add`, `remove` and `update` tidy after they write. A build runs in its own
-root: the package's directory, or the development build's, which `bay locate
---dev` names to a tool reading the configured build. bay sets `BAY` to its own
-path for everything it runs, so a tool that builds another checkout of the
-package runs the same bay.
+## Manifest fields
+
+All are ignored by Zig.
+
+| Field | Meaning |
+| --- | --- |
+| `.dev_dependencies` | Dependencies of the package's development only |
+| `.overrides` | Packages replaced for the whole graph when this package is built |
+| `.coexist = .{ .name }` | Packages whose incompatible lines may be selected side by side |
+| `.retracted = .{ "0.4.0" }` | Versions of this package no selection may pick |
+| `.zig_version` | The exact Zig to build with; `.minimum_zig_version` when absent |
 
 ## Global installs
 
-`bay install` is to Zig what `cargo install` is to Rust. It fetches the package as
-`zig fetch` does (a `git+https` or archive URL; `#tag`, `#branch` or `#commit`),
-copies its sources, and builds them as bay builds any package, into the prefix,
-so Zig's package cache is never written to. bay records what each install put
-where in `~/.local/share/bay/installed.zon` (`$XDG_DATA_HOME/bay`): `uninstall`
+`bay install` fetches a package as `zig fetch` does (a `git+https` or archive URL, at
+a `#tag`, `#branch` or `#commit`), copies its sources and builds them as bay builds
+any package, so Zig's package cache is never written to. bay records what each install
+put where in `~/.local/share/bay/installed.zon` (`$XDG_DATA_HOME/bay`): `uninstall`
 removes exactly that, and a file bay did not install is never replaced without
-`--force`. Installed programs do not need bay to run.
+`--force`. Installed programs run without bay.
+
+## How it works
+
+The development build is a package bay writes under `.zig-cache/bay`. It depends on
+the package, the package's dependencies and its dev dependencies, and its `build`
+calls the package's `dev` with a `tools` type whose declarations are the dev
+dependencies' build scripts. A build runs in its own root, the package's directory or
+the development build's, which `bay locate --dev` names for a tool that reads a
+configured build. Copies for rewritten pins live under `.zig-cache/bay/forks`, and an
+archive bay must read is unpacked under `.zig-cache/bay/packages`. bay sets `BAY` to
+its own path for everything it runs.
 
 ## License
 
