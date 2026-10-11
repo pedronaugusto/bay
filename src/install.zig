@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const fetch = @import("fetch.zig");
+const dirs = @import("dirs.zig");
 const say = @import("say.zig");
 
 pub const Record = struct {
@@ -102,7 +103,7 @@ pub fn uninstall(c: Context, args: []const []const u8) !u8 {
 /// Installs one package from `source`, a URL or a directory, replacing an
 /// earlier install of the same name.
 fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, prefix: []const u8, given_name: ?[]const u8, force: bool) !u8 {
-    const data = try dataDirectory(c);
+    const data = try dirs.data(c.io, c.a, c.environ);
     var recorded = source;
     const package_dir = if (std.mem.find(u8, source, "://") == null)
         try Io.Dir.cwd().realPathFileAlloc(c.io, source, c.a)
@@ -221,14 +222,6 @@ fn defaultPrefix(c: Context) ![]const u8 {
     return std.fs.path.join(c.a, &.{ c.environ.get("HOME") orelse try say.fail(c.io, "HOME is not set; give --prefix", .{}), ".local" });
 }
 
-/// Where bay keeps its records and build copies: `$XDG_DATA_HOME/bay`,
-/// `~/.local/share/bay`, or `%LOCALAPPDATA%\bay\data`.
-fn dataDirectory(c: Context) ![]const u8 {
-    if (builtin.os.tag == .windows) return std.fs.path.join(c.a, &.{ c.environ.get("LOCALAPPDATA") orelse try say.fail(c.io, "LOCALAPPDATA is not set", .{}), "bay", "data" });
-    if (c.environ.get("XDG_DATA_HOME")) |data| return std.fs.path.join(c.a, &.{ data, "bay" });
-    return std.fs.path.join(c.a, &.{ c.environ.get("HOME") orelse try say.fail(c.io, "HOME is not set", .{}), ".local", "share", "bay" });
-}
-
 /// Zig's global package cache, as `zig env` reports it.
 fn globalCache(c: Context) ![]const u8 {
     const result = std.process.run(c.a, c.io, .{ .argv = &.{ c.zig, "env" }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
@@ -241,7 +234,7 @@ fn globalCache(c: Context) ![]const u8 {
 }
 
 fn load(c: Context) !std.ArrayList(Record) {
-    const path = try std.fs.path.join(c.a, &.{ try dataDirectory(c), "installed.zon" });
+    const path = try std.fs.path.join(c.a, &.{ try dirs.data(c.io, c.a, c.environ), "installed.zon" });
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     const text = Io.Dir.cwd().readFileAlloc(c.io, path, c.a, .limited(1 << 24)) catch |err| switch (err) {
         error.FileNotFound => return .empty,
@@ -255,7 +248,7 @@ fn load(c: Context) !std.ArrayList(Record) {
 }
 
 fn save(c: Context, records: []const Record) !void {
-    const data = try dataDirectory(c);
+    const data = try dirs.data(c.io, c.a, c.environ);
     try Io.Dir.cwd().createDirPath(c.io, data);
     var out: Io.Writer.Allocating = .init(c.a);
     try std.zon.stringify.serialize(Records{ .installs = records }, .{}, &out.writer);
