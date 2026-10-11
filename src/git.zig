@@ -142,7 +142,12 @@ fn write(io: Io, a: std.mem.Allocator, listing: []const u8, out: Io.Dir, reader:
     }
     // Links last, so no file is ever written through one.
     for (links.items) |link| {
-        if (std.fs.path.dirname(link.path)) |parent| try out.createDirPath(io, parent);
+        if (std.fs.path.dirname(link.path)) |parent| {
+            // A folder on the way that is an earlier link (`A` where the file system
+            // takes `a` for it) would carry this one outside the tree.
+            if (try throughLink(io, out, parent)) try say.fail(io, "the commit names a link inside another link, which would leave its tree: {s}", .{link.path});
+            try out.createDirPath(io, parent);
+        }
         // Windows makes a link to a directory apart from one to a file: what it reaches in the tree says which.
         const reached = try std.fs.path.join(a, &.{ std.fs.path.dirname(link.path) orelse ".", link.target });
         const to_directory = if (out.statFile(io, reached, .{})) |stat| stat.kind == .directory else |err| switch (err) {
@@ -247,4 +252,30 @@ test "a tree's path stays inside the tree" {
     try std.testing.expect(contained("a/.gitignore"));
     for ([_][]const u8{ "", "/etc/passwd", "../x", "a/../../x", "a//b", "./a", ".git/hooks/pre-commit", "a/.GIT/config", "C:x", "a\\b" }) |path|
         try std.testing.expect(!contained(path));
+}
+
+/// Whether a folder on `path`, as `dir` resolves it, is a link.
+fn throughLink(io: Io, dir: Io.Dir, path: []const u8) !bool {
+    var end: usize = 0;
+    while (end < path.len) {
+        end = std.mem.findScalarPos(u8, path, end + 1, '/') orelse path.len;
+        const stat = dir.statFile(io, path[0..end], .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return false, // what is not there yet is made as a folder
+            else => |e| return e,
+        };
+        if (stat.kind == .sym_link) return true;
+    }
+    return false;
+}
+
+test "a folder that is a link is found on a path" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "real/inner");
+    try tmp.dir.symLink(io, "real", "link", .{ .is_directory = true });
+    try std.testing.expect(try throughLink(io, tmp.dir, "link"));
+    try std.testing.expect(try throughLink(io, tmp.dir, "link/inner"));
+    try std.testing.expect(!try throughLink(io, tmp.dir, "real/inner"));
+    try std.testing.expect(!try throughLink(io, tmp.dir, "missing/inner"));
 }

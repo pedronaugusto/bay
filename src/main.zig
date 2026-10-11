@@ -284,7 +284,7 @@ fn tidy(env: Env) !u8 {
     if (others.len != 0) {
         // Releases first: what they pin is then part of the selection.
         const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
-        const syncs = try published.syncs(env.io, env.a, env.zig, scratch, &.{env.package}, try std.mem.concat(env.a, []const u8, &.{ &.{env.package}, others }));
+        const syncs = try published.syncs(env.io, env.a, env.zig, try store.Store.init(env.io, env.a, env.zig, env.package), scratch, &.{env.package}, try std.mem.concat(env.a, []const u8, &.{ &.{env.package}, others }));
         try repin(env, syncs, "pinned at its release", null);
     }
     const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
