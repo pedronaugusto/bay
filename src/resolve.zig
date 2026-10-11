@@ -224,7 +224,7 @@ fn writeFork(input: Input, packages: *store.Store, remote: select.Place.Remote, 
     return directory;
 }
 
-fn copyTree(io: Io, a: std.mem.Allocator, from: []const u8, to: []const u8) !void {
+pub fn copyTree(io: Io, a: std.mem.Allocator, from: []const u8, to: []const u8) !void {
     try Io.Dir.cwd().createDirPath(io, to);
     var source = try Io.Dir.cwd().openDir(io, from, .{ .iterate = true });
     defer source.close(io);

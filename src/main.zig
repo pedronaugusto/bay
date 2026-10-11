@@ -8,6 +8,9 @@ const fetch = @import("fetch.zig");
 const install = @import("install.zig");
 const resolve = @import("resolve.zig");
 const workspace = @import("workspace.zig");
+const toolchain = @import("toolchain.zig");
+const remotes = @import("remote.zig");
+const graph = @import("graph.zig");
 const say = @import("say.zig");
 
 const usage =
@@ -23,6 +26,11 @@ const usage =
     \\  bay update [name...]       re-resolve each pinned ref (?ref=) and pin what it names now
     \\  bay tidy                   pin each package at the version selection picks: the
     \\                             highest any manifest in the graph asks for (Go's MVS)
+    \\  bay tree [--why <name>] [--duplicates]
+    \\                             the resolved graph; the paths to one package; the ones
+    \\                             pinned at more than one revision, and who pins each
+    \\  bay outdated               dependencies with a newer release on their remote
+    \\  bay vendor                 every package the builds use, into zig-pkg, for building offline
     \\  bay list                   both lists, with their pins
     \\  bay locate [--dev]         the package's directory, or its development build's root,
     \\                             which is the directory Zig runs in and reads the build's paths from
@@ -68,15 +76,19 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, giv
     const locked = given.len != 0 and std.mem.eql(u8, given[0], "--locked");
     const args = if (locked) given[1..] else given;
     if (args.len == 0) try say.fail(io, "--locked comes before a command", .{});
-    const zig = environ.get("ZIG") orelse "zig";
-    if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, zig);
-    if (std.mem.eql(u8, args[0], "new")) return newCommand(io, a, zig, args[1..]);
+    // Before a package exists, the Zig on the PATH makes it.
+    const path_zig = environ.get("ZIG") orelse "zig";
+    if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, path_zig);
+    if (std.mem.eql(u8, args[0], "new")) return newCommand(io, a, path_zig, args[1..]);
     // Global: anywhere, as cargo install is.
     if (std.mem.eql(u8, args[0], "install") or std.mem.eql(u8, args[0], "uninstall")) {
-        const context: install.Context = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = try packageHere(io, a) };
+        const here = try packageHere(io, a);
+        const zig = if (here) |package| try zigFor(io, a, environ, package) else path_zig;
+        const context: install.Context = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = here };
         return if (std.mem.eql(u8, args[0], "install")) install.command(context, args[1..]) else install.uninstall(context, args[1..]);
     }
-    const env: Env = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = try findPackage(io, a), .locked = locked };
+    const package = try findPackage(io, a);
+    const env: Env = .{ .io = io, .a = a, .zig = try zigFor(io, a, environ, package), .environ = environ, .package = package, .locked = locked };
     const command = args[0];
     if (std.mem.eql(u8, command, "add")) return add(env, args[1..]);
     if (std.mem.eql(u8, command, "remove")) return removeCommand(env, args[1..]);
@@ -84,10 +96,28 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, giv
     if (std.mem.eql(u8, command, "list")) return list(env);
     if (std.mem.eql(u8, command, "tidy")) return tidy(env);
     if (std.mem.eql(u8, command, "locate")) return locate(env, args[1..]);
+    if (std.mem.eql(u8, command, "tree")) return treeCommand(env, args[1..]);
+    if (std.mem.eql(u8, command, "outdated")) return graphCommand(env, .outdated);
+    if (std.mem.eql(u8, command, "vendor")) return graphCommand(env, .vendor);
     if (std.mem.eql(u8, command, "fetch")) return fetchAll(env);
     if (std.mem.eql(u8, command, "build")) return zigBuild(env, .package, &.{}, args[1..]);
     if (std.mem.eql(u8, command, "dev")) return zigBuild(env, .development, &.{}, args[1..]);
     return step(env, command, args[1..]);
+}
+
+/// The Zig a package builds with: `ZIG` when set; else exactly the version its
+/// manifest names (`.zig_version`, else `.minimum_zig_version`), installed from
+/// ziglang.org on first use; else the one on the PATH.
+pub fn zigFor(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8) ![]const u8 {
+    if (environ.get("ZIG")) |zig| return zig;
+    const path = try std.fs.path.join(a, &.{ package, "build.zig.zon" });
+    const text = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+    const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
+        error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{path}),
+        error.OutOfMemory => |e| return e,
+    };
+    const version = parsed.zig_version orelse parsed.minimum_zig_version orelse return "zig";
+    return toolchain.path(io, a, environ, version);
 }
 
 const Env = struct {
@@ -176,6 +206,30 @@ fn locate(env: Env, args: []const []const u8) !u8 {
     if (args.len > 1 or (args.len == 1 and !dev)) try say.fail(env.io, "locate takes --dev or nothing", .{});
     const directory = if (dev) try std.fs.path.join(env.a, &.{ env.package, root.directory }) else env.package;
     try say.out(env.io, "{s}\n", .{directory});
+    return 0;
+}
+
+/// `bay tree [--why <name>] [--duplicates]`.
+fn treeCommand(env: Env, args: []const []const u8) !u8 {
+    var options: graph.TreeOptions = .{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--duplicates")) options.duplicates = true else if (std.mem.eql(u8, args[i], "--why") and i + 1 < args.len) {
+            i += 1;
+            options.why = args[i];
+        } else try say.fail(env.io, "tree takes --why <name> or --duplicates", .{});
+    }
+    try graph.tree(try resolveHere(env, try manifest.parse(env.a, try env.readManifest())), options);
+    return 0;
+}
+
+/// `bay outdated` and `bay vendor`, over the resolved graph.
+fn graphCommand(env: Env, comptime which: enum { outdated, vendor }) !u8 {
+    const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
+    switch (which) {
+        .outdated => try graph.outdated(resolution),
+        .vendor => try graph.vendor(resolution),
+    }
     return 0;
 }
 
@@ -469,4 +523,6 @@ test {
     _ = @import("store.zig");
     _ = @import("resolve.zig");
     _ = @import("workspace.zig");
+    _ = toolchain;
+    _ = remotes;
 }
