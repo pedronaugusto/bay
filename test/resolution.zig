@@ -359,6 +359,12 @@ test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives i
     try f.tmp.dir.deleteTree(f.io, "app/zig-pkg");
     // A step, too: bay resolves and fetches before Zig lists the steps.
     try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"run"})).stderr, "lib 0.1.1") != null);
+    // Zig's copies gone and bay's own kept, as a CI that caches only .zig-cache has it:
+    // bay puts the package back where Zig looks.
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
+    try f.tmp.dir.deleteTree(f.io, "app/zig-pkg");
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.1") != null);
     // A version the newest release retracts is said to be, once a build uses it.
     try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#v0.1.2", .{url}) })));
     try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "lib 0.1.2 is retracted by its release 0.2.0") != null);

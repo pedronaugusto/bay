@@ -48,6 +48,9 @@ pub const Store = struct {
     /// The directory of a pinned package: unpacked already, unpacked from Zig's
     /// archive, or fetched by Zig first.
     pub fn directoryOf(store: *Store, remote: select.Place.Remote) ![]const u8 {
+        // Zig never fetches what only git reaches: such a package must be where Zig
+        // looks, the project's zig-pkg or Zig's cache, not only in bay's copy.
+        if (git.handles(remote.url) and !try store.withZig(remote.hash)) try store.fetch(remote);
         if (store.found.get(remote.hash)) |directory| return directory;
         const directory = try store.search(remote.hash) orelse
             try store.unpack(remote.hash) orelse fetched: {
@@ -72,6 +75,23 @@ pub const Store = struct {
         }
         const hash = std.mem.trim(u8, result.stdout, " \r\n");
         if (!std.mem.eql(u8, hash, remote.hash)) try say.fail(store.io, "{s} is {s} now, but it is pinned as {s}: the pin names other content", .{ remote.url, hash, remote.hash });
+    }
+
+    /// Whether Zig finds the package `hash` without fetching it: unpacked in the
+    /// project's zig-pkg, or kept in Zig's cache.
+    fn withZig(store: *Store, hash: []const u8) !bool {
+        const places = [_][]const u8{
+            try std.fs.path.join(store.a, &.{ store.directories[0], hash }),
+            try std.fs.path.join(store.a, &.{ store.global, "p", hash }),
+            try std.fs.path.join(store.a, &.{ store.global, "p", try store.a.print("{s}.tar.gz", .{hash}) }),
+        };
+        for (places) |place| {
+            if (Io.Dir.cwd().access(store.io, place, .{})) |_| return true else |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            }
+        }
+        return false;
     }
 
     fn search(store: *Store, hash: []const u8) !?[]const u8 {
