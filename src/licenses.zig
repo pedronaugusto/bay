@@ -4,7 +4,6 @@
 //! `SPDX-License-Identifier` line when one is there, else the license's text.
 const std = @import("std");
 const Io = std.Io;
-const manifest = @import("manifest.zig");
 const select = @import("select.zig");
 const resolve = @import("resolve.zig");
 const store = @import("store.zig");
