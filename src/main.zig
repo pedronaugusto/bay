@@ -396,4 +396,5 @@ test "a step is found in zig build -l's listing" {
 test {
     _ = manifest;
     _ = root;
+    _ = @import("select.zig");
 }

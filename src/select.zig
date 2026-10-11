@@ -1,0 +1,320 @@
+//! Minimal Version Selection, Go modules' algorithm, over Zig packages.
+//!
+//! A pin is a minimum. Every revision reachable from the roots is read, and
+//! for each package (its name and fingerprint) the revision selected is the
+//! highest `.version` any of them pins: the same answer whatever order they are
+//! read in. A main module (the package under development, a workspace member, a
+//! local override) always wins over every revision of itself. Compatibility is
+//! then checked over what was selected only: a pin from a selected revision must
+//! ask for the same major version (below 1.0, the same minor) as the selection,
+//! unless the package is one the root lets coexist, whose compatible lines are
+//! then selected apart.
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Version = std.SemanticVersion;
+
+/// What a package is, whatever revision: its name and its fingerprint.
+pub const Identity = struct {
+    name: []const u8,
+    fingerprint: u64,
+
+    fn key(identity: Identity, a: Allocator) Allocator.Error![]const u8 {
+        return a.print("{s}#{x}", .{ identity.name, identity.fingerprint });
+    }
+};
+
+/// Where a revision is: pinned by hash, or a directory.
+pub const Place = union(enum) {
+    remote: Remote,
+    directory: []const u8,
+
+    pub const Remote = struct { url: []const u8, hash: []const u8 };
+
+    /// The hash, or the directory: one key per place.
+    pub fn key(place: Place) []const u8 {
+        return switch (place) {
+            .remote => |remote| remote.hash,
+            .directory => |directory| directory,
+        };
+    }
+};
+
+/// One entry of a manifest's `.dependencies`.
+pub const Pin = struct { key: []const u8, lazy: bool = false, place: Place };
+
+/// A revision read: what it is, where, and what it pins.
+pub const Revision = struct {
+    identity: Identity,
+    version: Version,
+    place: Place,
+    pins: []const Pin,
+};
+
+/// Reads the revision at a place: a fetch and a parse, or a test's table.
+pub const Loader = struct {
+    context: *anyopaque,
+    loadFn: *const fn (context: *anyopaque, place: Place) anyerror!Revision,
+
+    fn load(loader: Loader, place: Place) anyerror!Revision {
+        return loader.loadFn(loader.context, place);
+    }
+};
+
+/// Why there is no selection.
+pub const Problem = union(enum) {
+    /// Two contents claim one version of a package: which is meant is not known.
+    same_version: struct { name: []const u8, version: Version, first: Place, second: Place },
+    /// A selected revision asks for a version incompatible with the one selected.
+    incompatible: struct { name: []const u8, selected: Version, wanted: Version, by: []const u8 },
+    /// Selected revisions depend on each other in a ring.
+    cycle: struct { name: []const u8 },
+};
+
+pub const Graph = struct {
+    /// The selected revision of each package (of each compatible line, for one
+    /// that may coexist), by selection key, in the order first reached.
+    selected: std.array_hash_map.String(Revision),
+    /// The main modules, by identity key.
+    mains: std.array_hash_map.String(Revision),
+    /// Every revision read, by place key.
+    read: std.array_hash_map.String(Revision),
+    /// The selection key of every place read.
+    keys: std.array_hash_map.String([]const u8),
+    problem: ?Problem,
+
+    /// The revision a pin resolves to: the main module or the selection.
+    pub fn resolve(graph: Graph, place: Place) ?Revision {
+        const selection = graph.keys.get(place.key()) orelse return null;
+        return graph.mains.get(selection) orelse graph.selected.get(selection);
+    }
+};
+
+/// Selects from everything reachable from `roots` and the mains' own pins.
+/// `coexist` names packages whose incompatible lines may each be selected.
+pub fn select(a: Allocator, loader: Loader, roots: []const Pin, mains: []const Revision, coexist: []const []const u8) !Graph {
+    var graph: Graph = .{ .selected = .empty, .mains = .empty, .read = .empty, .keys = .empty, .problem = null };
+    var queue: std.ArrayList(Place) = .empty;
+    for (mains) |main| {
+        const identity = try main.identity.key(a);
+        try graph.mains.put(a, identity, main);
+        try graph.read.put(a, main.place.key(), main);
+        try graph.keys.put(a, main.place.key(), identity);
+        for (main.pins) |pin| try queue.append(a, pin.place);
+    }
+    for (roots) |pin| try queue.append(a, pin.place);
+    // Ties at the selected version, by selection key: refused unless a higher one replaces them.
+    var ties: std.array_hash_map.String(Place) = .empty;
+    var next: usize = 0;
+    while (next < queue.items.len) : (next += 1) {
+        const place = queue.items[next];
+        if (graph.read.contains(place.key())) continue;
+        const revision = try loader.load(place);
+        const identity = try revision.identity.key(a);
+        const selection = if (graph.mains.contains(identity)) identity else try selectionKey(a, revision, identity, coexist);
+        try graph.read.put(a, place.key(), revision);
+        try graph.keys.put(a, place.key(), selection);
+        // A main module stands for every revision of itself; their pins are not its own.
+        if (graph.mains.contains(identity)) continue;
+        for (revision.pins) |pin| try queue.append(a, pin.place);
+        const entry = try graph.selected.getOrPut(a, selection);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = revision;
+            continue;
+        }
+        switch (revision.version.order(entry.value_ptr.version)) {
+            .gt => {
+                entry.value_ptr.* = revision;
+                _ = ties.swapRemove(selection);
+            },
+            .eq => if (!std.mem.eql(u8, revision.place.key(), entry.value_ptr.place.key())) try ties.put(a, selection, revision.place),
+            .lt => {},
+        }
+    }
+    if (ties.count() != 0) {
+        const selection = ties.keys()[0];
+        const first = graph.selected.get(selection).?; // safe: a tie is recorded against a selection
+        graph.problem = .{ .same_version = .{ .name = first.identity.name, .version = first.version, .first = first.place, .second = ties.values()[0] } };
+        return graph;
+    }
+    graph.problem = try compatible(graph) orelse try acyclic(a, graph);
+    return graph;
+}
+
+/// A package's selection key: its identity, and its compatible line when it may coexist.
+fn selectionKey(a: Allocator, revision: Revision, identity: []const u8, coexist: []const []const u8) Allocator.Error![]const u8 {
+    for (coexist) |name| if (std.mem.eql(u8, name, revision.identity.name)) {
+        const line = revision.version;
+        return if (line.major == 0) a.print("{s}@0.{d}", .{ identity, line.minor }) else a.print("{s}@{d}", .{ identity, line.major });
+    };
+    return identity;
+}
+
+/// Whether two versions are on one compatible line: one major, or below 1.0 one minor.
+pub fn sameLine(x: Version, y: Version) bool {
+    if (x.major != y.major) return false;
+    return x.major != 0 or x.minor == y.minor;
+}
+
+fn compatible(graph: Graph) Allocator.Error!?Problem {
+    for ([_][]const Revision{ graph.mains.values(), graph.selected.values() }) |revisions| for (revisions) |revision| {
+        for (revision.pins) |pin| {
+            const wanted = graph.read.get(pin.place.key()) orelse continue;
+            const selection = graph.keys.get(pin.place.key()).?; // safe: every place read has its key
+            if (graph.mains.contains(selection)) continue;
+            const selected = graph.selected.get(selection).?; // safe: a non-main key is selected
+            if (!sameLine(selected.version, wanted.version)) return .{ .incompatible = .{ .name = selected.identity.name, .selected = selected.version, .wanted = wanted.version, .by = revision.identity.name } };
+        }
+    };
+    return null;
+}
+
+/// Refuses a ring among the selected revisions, as Cargo refuses one among
+/// dependencies: a main module ends a path, since it is built from its directory.
+fn acyclic(a: Allocator, graph: Graph) Allocator.Error!?Problem {
+    const State = enum { open, done };
+    var states: std.array_hash_map.String(State) = .empty;
+    var stack: std.ArrayList(struct { key: []const u8, pin: usize }) = .empty;
+    for (graph.selected.keys()) |start| {
+        if (states.contains(start)) continue;
+        try states.put(a, start, .open);
+        try stack.append(a, .{ .key = start, .pin = 0 });
+        while (stack.items.len != 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const pins = graph.selected.get(top.key).?.pins; // safe: only selected keys are pushed
+            if (top.pin == pins.len) {
+                try states.put(a, top.key, .done);
+                _ = stack.pop();
+                continue;
+            }
+            const pin = pins[top.pin];
+            top.pin += 1;
+            const target = graph.keys.get(pin.place.key()) orelse continue;
+            if (graph.mains.contains(target)) continue;
+            if (states.get(target)) |state| switch (state) {
+                .open => return .{ .cycle = .{ .name = graph.selected.get(target).?.identity.name } }, // safe: open keys are selected
+                .done => continue,
+            };
+            try states.put(a, target, .open);
+            try stack.append(a, .{ .key = target, .pin = 0 });
+        }
+    }
+    return null;
+}
+
+// Tests: a table of revisions by place key stands for the network.
+
+const Table = struct {
+    revisions: []const Revision,
+    loads: usize = 0,
+
+    fn load(context: *anyopaque, place: Place) anyerror!Revision {
+        const table: *Table = @ptrCast(@alignCast(context)); // safe: tests pass a *Table
+        table.loads += 1;
+        for (table.revisions) |revision| if (std.mem.eql(u8, revision.place.key(), place.key())) return revision;
+        return error.NotFound;
+    }
+
+    fn loader(table: *Table) Loader {
+        return .{ .context = table, .loadFn = load };
+    }
+};
+
+fn hashed(hash: []const u8) Place {
+    return .{ .remote = .{ .url = "git+https://example.org", .hash = hash } };
+}
+
+fn rev(name: []const u8, fingerprint: u64, version: []const u8, hash: []const u8, pins: []const Pin) Revision {
+    return .{ .identity = .{ .name = name, .fingerprint = fingerprint }, .version = Version.parse(version) catch unreachable, .place = hashed(hash), .pins = pins }; // unreachable: test versions are valid
+}
+
+fn pinTo(name: []const u8, hash: []const u8) Pin {
+    return .{ .key = name, .place = hashed(hash) };
+}
+
+test "the highest version pinned anywhere is selected, whatever the order" {
+    const c1 = rev("c", 7, "0.1.0", "c1", &.{});
+    const c2 = rev("c", 7, "0.1.1", "c2", &.{});
+    const a_ = rev("a", 1, "1.0.0", "a", &.{pinTo("c", "c1")});
+    const b = rev("b", 2, "1.0.0", "b", &.{pinTo("c", "c2")});
+    for ([_][]const Pin{ &.{ pinTo("a", "a"), pinTo("b", "b") }, &.{ pinTo("b", "b"), pinTo("a", "a") } }) |roots| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var table: Table = .{ .revisions = &.{ c1, c2, a_, b } };
+        const graph = try select(arena.allocator(), table.loader(), roots, &.{}, &.{});
+        try std.testing.expectEqual(null, graph.problem);
+        try std.testing.expectEqualStrings("c2", graph.resolve(hashed("c1")).?.place.key());
+        try std.testing.expectEqual(3, graph.selected.count());
+    }
+}
+
+test "a main module stands for every revision of itself, and its pins are its own" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const aegis_old = rev("aegis", 9, "0.4.0", "aegis-old", &.{pinTo("never", "never")});
+    const shakedown = rev("shakedown", 3, "0.2.0", "sd", &.{pinTo("aegis", "aegis-old")});
+    const working: Revision = .{ .identity = .{ .name = "aegis", .fingerprint = 9 }, .version = try Version.parse("0.5.0"), .place = .{ .directory = "/work/aegis" }, .pins = &.{} };
+    var table: Table = .{ .revisions = &.{ aegis_old, shakedown } };
+    const graph = try select(a, table.loader(), &.{pinTo("shakedown", "sd")}, &.{working}, &.{});
+    try std.testing.expectEqual(null, graph.problem);
+    try std.testing.expectEqualStrings("/work/aegis", graph.resolve(hashed("aegis-old")).?.place.key());
+    // The old revision is read to learn what it is, never followed.
+    try std.testing.expect(!graph.read.contains("never"));
+}
+
+test "two contents at the selected version are refused; a higher version settles them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const x = rev("c", 7, "0.1.0", "x", &.{});
+    const y = rev("c", 7, "0.1.0", "y", &.{});
+    const z = rev("c", 7, "0.1.2", "z", &.{});
+    var table: Table = .{ .revisions = &.{ x, y, z } };
+    const tied = try select(a, table.loader(), &.{ pinTo("c", "x"), pinTo("c", "y") }, &.{}, &.{});
+    try std.testing.expect(tied.problem.? == .same_version);
+    const settled = try select(a, table.loader(), &.{ pinTo("c", "x"), pinTo("c", "y"), pinTo("c", "z") }, &.{}, &.{});
+    try std.testing.expectEqual(null, settled.problem);
+}
+
+test "an incompatible line is refused unless the package may coexist" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c3 = rev("c", 7, "0.3.0", "c3", &.{});
+    const c4 = rev("c", 7, "0.4.0", "c4", &.{});
+    const old = rev("old", 1, "1.0.0", "old", &.{pinTo("c", "c3")});
+    var table: Table = .{ .revisions = &.{ c3, c4, old } };
+    const refused = try select(a, table.loader(), &.{ pinTo("old", "old"), pinTo("c", "c4") }, &.{}, &.{});
+    try std.testing.expect(refused.problem.? == .incompatible);
+    try std.testing.expectEqualStrings("old", refused.problem.?.incompatible.by);
+    const apart = try select(a, table.loader(), &.{ pinTo("old", "old"), pinTo("c", "c4") }, &.{}, &.{"c"});
+    try std.testing.expectEqual(null, apart.problem);
+    try std.testing.expectEqualStrings("c3", apart.resolve(hashed("c3")).?.place.key());
+    try std.testing.expectEqualStrings("c4", apart.resolve(hashed("c4")).?.place.key());
+}
+
+test "a requirement of an older revision still counts, and an older line it reaches is not checked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const b1 = rev("b", 2, "1.0.0", "b1", &.{pinTo("c", "c-old-line")});
+    const b2 = rev("b", 2, "1.1.0", "b2", &.{pinTo("c", "c5")});
+    const old_line = rev("c", 7, "0.4.0", "c-old-line", &.{});
+    const c5 = rev("c", 7, "0.5.0", "c5", &.{});
+    const a_ = rev("a", 1, "1.0.0", "a", &.{pinTo("b", "b1")});
+    var table: Table = .{ .revisions = &.{ b1, b2, old_line, c5, a_ } };
+    const graph = try select(a, table.loader(), &.{ pinTo("a", "a"), pinTo("b", "b2") }, &.{}, &.{});
+    try std.testing.expectEqual(null, graph.problem);
+    try std.testing.expectEqualStrings("b2", graph.resolve(hashed("b1")).?.place.key());
+    try std.testing.expectEqualStrings("c5", graph.resolve(hashed("c-old-line")).?.place.key());
+}
+
+test "selected revisions that depend on each other are refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const x = rev("x", 1, "1.0.0", "x", &.{pinTo("y", "y")});
+    const y = rev("y", 2, "1.0.0", "y", &.{pinTo("x", "x")});
+    var table: Table = .{ .revisions = &.{ x, y } };
+    const graph = try select(arena.allocator(), table.loader(), &.{pinTo("x", "x")}, &.{}, &.{});
+    try std.testing.expect(graph.problem.? == .cycle);
+}
