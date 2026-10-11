@@ -461,3 +461,17 @@ test "a workspace is one graph: its tidy settles in one pass, development pins i
     const settled = try f.bay(".", &.{ "--locked", "--workspace", "tidy" });
     try std.testing.expect(succeeded(settled));
 }
+
+test "a package naming a Zig older than bay builds with is refused in a sentence" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("old", "old", "0.1.0", "", &.{}, "");
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "old/build.zig.zon", f.a, .limited(1 << 16));
+    try f.write("old", "build.zig.zon", try std.mem.replaceOwned(u8, f.a, manifest, "\"0.17.0\"", "\"0.16.0\""));
+    _ = f.env.swapRemove("ZIG");
+    const refusal = try f.bay("old", &.{"build"});
+    try std.testing.expect(refused(refusal));
+    try std.testing.expect(std.mem.find(u8, refusal.stderr, "names Zig 0.16.0; bay builds with Zig 0.17.0 or newer") != null);
+}

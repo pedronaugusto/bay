@@ -20,6 +20,9 @@ const index_url = "https://ziglang.org/download/index.json";
 const host = @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag);
 const executable = if (builtin.os.tag == .windows) "zig.exe" else "zig";
 
+/// The oldest Zig bay builds with.
+const oldest: std.SemanticVersion = .{ .major = 0, .minor = 17, .patch = 0 };
+
 /// The Zig a package builds with: `ZIG` when set; else exactly the version its
 /// manifest names (`.zig_version`, else `.minimum_zig_version`), installed from
 /// ziglang.org on first use; else `unpinned`.
@@ -32,6 +35,9 @@ pub fn forPackage(io: Io, a: std.mem.Allocator, environ: *const std.process.Envi
         error.OutOfMemory => |e| return e,
     };
     const version = parsed.zig_version orelse parsed.minimum_zig_version orelse return unpinned(io, a, environ);
+    // bay resolves through what Zig 0.17 added: --fork, archived packages, the project's zig-pkg.
+    const named = std.SemanticVersion.parse(version) catch try say.fail(io, "{s}: {s} is not a Zig version", .{ manifest_path, version });
+    if (named.order(oldest) == .lt) try say.fail(io, "{s} names Zig {s}; bay builds with Zig {f} or newer: raise .minimum_zig_version", .{ manifest_path, version, oldest });
     return path(io, a, environ, version);
 }
 
