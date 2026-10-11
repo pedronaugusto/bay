@@ -64,8 +64,11 @@ const Fixture = struct {
     fn pin(f: *Fixture, key: []const u8, dir: []const u8) ![]const u8 {
         const absolute = try std.fs.path.join(f.a, &.{ f.root, dir });
         const fetched = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", absolute }, .environ_map = &f.env });
-        try std.testing.expect(fetched.term == .exited and fetched.term.exited == 0);
-        return f.a.print(".{s} = .{{ .url = \"file://{s}\", .hash = \"{s}\" }},", .{ key, absolute, std.mem.trim(u8, fetched.stdout, "\r\n") });
+        try std.testing.expect(succeeded(fetched));
+        // A file URL's path starts with `/` and has `/` between its parts: `file:///D:/a` on Windows.
+        const path = try f.a.dupe(u8, absolute);
+        std.mem.replaceScalar(u8, path, '\\', '/');
+        return f.a.print(".{s} = .{{ .url = \"file://{s}{s}\", .hash = \"{s}\" }},", .{ key, if (path[0] == '/') "" else "/", path, std.mem.trim(u8, fetched.stdout, "\r\n") });
     }
 
     fn run(f: *Fixture, dir: []const u8, argv: []const []const u8) !std.process.RunResult {
@@ -196,7 +199,7 @@ test "a dev tool built on the package links the package under development" {
     try std.testing.expect(std.mem.find(u8, checked.stderr, "under test 0.2.0 working, the tool sees 0.2.0 working, 1") != null);
 }
 
-test "a vendored package resolves and builds with no cache and no network" {
+test "a vendored package resolves and builds with its packages in no cache and no remote" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var f: Fixture = try .init(arena.allocator());
@@ -205,8 +208,20 @@ test "a vendored package resolves and builds with no cache and no network" {
     try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") }), &.{ "a", "b" }, main_ab);
     try std.testing.expect(succeeded(try f.bay("app", &.{"vendor"})));
     try f.tmp.dir.deleteTree(f.io, "app/.zig-cache");
-    try f.env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(f.a, &.{ f.root, "empty" }));
-    // No network: the fixtures' URLs are files that are no longer there.
+    // The cache keeps what Zig compiled, which is no package: each package vendored
+    // is taken out of it, extracted or archived.
+    const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
+    var vendored = try f.tmp.dir.openDir(f.io, "app/zig-pkg", .{ .iterate = true });
+    defer vendored.close(f.io);
+    var count: usize = 0;
+    var entries = vendored.iterate();
+    while (try entries.next(f.io)) |entry| {
+        count += 1;
+        try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, entry.name }));
+        try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{entry.name}) }));
+    }
+    try std.testing.expect(count >= 3);
+    // No remote: the fixtures' URLs are files that are no longer there.
     for ([_][]const u8{ "a", "b", "c1", "c2" }) |dir| try f.tmp.dir.deleteTree(f.io, dir);
     const built = try f.bay("app", &.{ "build", "run" });
     try std.testing.expect(succeeded(built));

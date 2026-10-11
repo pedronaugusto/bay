@@ -202,6 +202,21 @@ pub fn remove(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind, name: []
     return format(gpa, try splice(a, source, range, ""));
 }
 
+/// A path as a manifest holds it: escaped as a ZON string, with `/` between its
+/// parts on every host, so a manifest written on Windows reads the same elsewhere.
+pub fn portable(path: []const u8) std.fmt.Alt([]const u8, writePortable) {
+    return .{ .data = path };
+}
+
+fn writePortable(path: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    var parts = std.mem.splitScalar(u8, path, '\\');
+    var first = true;
+    while (parts.next()) |part| : (first = false) {
+        if (!first) try w.writeByte('/');
+        try w.print("{f}", .{std.zig.fmtString(part)});
+    }
+}
+
 fn entryText(dependency: Dependency) std.fmt.Alt(Dependency, writeEntry) {
     return .{ .data = dependency };
 }
@@ -210,7 +225,7 @@ fn writeEntry(dependency: Dependency, w: *std.Io.Writer) std.Io.Writer.Error!voi
     try w.writeAll(".{\n");
     switch (dependency.source) {
         .remote => |remote| try w.print(".url = \"{f}\",\n.hash = \"{f}\",\n", .{ std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) }),
-        .path => |path| try w.print(".path = \"{f}\",\n", .{std.zig.fmtString(path)}),
+        .path => |path| try w.print(".path = \"{f}\",\n", .{portable(path)}),
     }
     if (dependency.lazy) try w.writeAll(".lazy = true,\n");
     try w.writeAll("}");
@@ -441,4 +456,14 @@ test "the fields resolution reads: version, fingerprint, overrides, coexist, the
     try std.testing.expectEqualStrings("../aegis", parsed.overrides[0].source.path);
     try std.testing.expectEqualStrings("warp", parsed.coexist[1]);
     try std.testing.expectEqualStrings("0.4.0", parsed.retracted[0]);
+}
+
+test "a path is written with / between its parts on every host" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A quote is still escaped as ZON escapes it.
+    try std.testing.expectEqualStrings("a\\\"b/c", try a.print("{f}", .{portable("a\"b\\c")}));
+    try std.testing.expectEqualStrings("../core", try a.print("{f}", .{portable("..\\core")}));
+    try std.testing.expectEqualStrings("C:/work/core", try a.print("{f}", .{portable("C:\\work\\core")}));
 }

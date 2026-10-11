@@ -45,22 +45,22 @@ pub fn manifestText(a: std.mem.Allocator, package: manifest.Manifest, pinned: ?s
             if (!sameSource(dev.source, dependency.source)) return error.PinnedTwiceDifferently;
             continue;
         }
-        try entry(a, w, dependency);
+        try entry(w, dependency);
     }
     for (package.dev) |dependency| {
         if (std.mem.eql(u8, dependency.name, package.name)) return error.DevDependencyNamedAsPackage;
-        try entry(a, w, dependency);
+        try entry(w, dependency);
     }
     try w.writeAll("    },\n}\n");
     return out.toOwnedSlice();
 }
 
-fn entry(a: std.mem.Allocator, w: *std.Io.Writer, dependency: manifest.Dependency) !void {
+fn entry(w: *std.Io.Writer, dependency: manifest.Dependency) !void {
     const lazy = if (dependency.lazy) ", .lazy = true" else "";
     switch (dependency.source) {
         .remote => |remote| try w.print("        .{f} = .{{ .url = \"{f}\", .hash = \"{f}\"{s} }},\n", .{ std.zig.fmtId(dependency.name), std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash), lazy }),
         // A relative path is relative to the package; the root sits two directories below it.
-        .path => |path| try w.print("        .{f} = .{{ .path = \"{f}\"{s} }},\n", .{ std.zig.fmtId(dependency.name), std.zig.fmtString(if (std.fs.path.isAbsolute(path)) path else try std.fs.path.join(a, &.{ "..", "..", path })), lazy }),
+        .path => |path| try w.print("        .{f} = .{{ .path = \"{s}{f}\"{s} }},\n", .{ std.zig.fmtId(dependency.name), if (std.fs.path.isAbsolute(path)) "" else "../../", manifest.portable(path), lazy }),
     }
 }
 
