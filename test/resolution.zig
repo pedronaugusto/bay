@@ -1,0 +1,213 @@
+//! bay end to end over real packages: the diamond Zig alone cannot build, a
+//! tie the root decides, tidy, the package under development linked by its own
+//! tools, and a vendored project built with no cache and no network. Each test
+//! works in a directory of its own, with a Zig cache, HOME and data directory of
+//! its own, and the Zig that builds bay, so nothing is downloaded.
+const std = @import("std");
+const Io = std.Io;
+const options = @import("options");
+
+const Fixture = struct {
+    a: std.mem.Allocator,
+    io: Io,
+    /// bay, by its absolute path: the tests run it from the fixture's directories.
+    bay_path: []const u8,
+    tmp: std.testing.TmpDir,
+    root: []const u8,
+    env: std.process.Environ.Map,
+
+    fn init(a: std.mem.Allocator) !Fixture {
+        var tmp = std.testing.tmpDir(.{});
+        const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+        var env = try std.testing.environ.createMap(a);
+        try env.put("ZIG", options.zig);
+        // One cache for every run, apart from the person's: packages are kept by content, so tests share it safely.
+        try env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(a, &.{ try Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", a), ".zig-cache", "bay-test-packages" }));
+        try env.put("HOME", try std.fs.path.join(a, &.{ root, "home" }));
+        try env.put("XDG_DATA_HOME", try std.fs.path.join(a, &.{ root, "data" }));
+        return .{ .a = a, .io = std.testing.io, .bay_path = try Io.Dir.cwd().realPathFileAlloc(std.testing.io, options.bay, a), .tmp = tmp, .root = root, .env = env };
+    }
+
+    fn deinit(f: *Fixture) void {
+        f.tmp.cleanup();
+    }
+
+    /// A package with one module, `name`, whose root is `source`, importing each dependency's module.
+    fn package(f: *Fixture, dir: []const u8, name: []const u8, version: []const u8, dependencies: []const u8, imports: []const []const u8, source: []const u8) !void {
+        try f.tmp.dir.createDirPath(f.io, try std.fs.path.join(f.a, &.{ dir, "src" }));
+        try f.write(dir, "build.zig.zon", try f.a.print(".{{ .name = .{s}, .version = \"{s}\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .paths = .{{\"\"}}, .dependencies = .{{ {s} }} }}\n", .{ name, version, fingerprint(name), dependencies }));
+        var build: Io.Writer.Allocating = .init(f.a);
+        try build.writer.print("const std = @import(\"std\");\npub fn build(b: *std.Build) void {{\n    const target = b.standardTargetOptions(.{{}});\n    const optimize = b.standardOptimizeOption(.{{}});\n    {s} = b.addModule(\"{s}\", .{{ .root_source_file = b.path(\"src/root.zig\"), .target = target, .optimize = optimize }});\n", .{ if (imports.len == 0) "_" else "const m", name });
+        for (imports) |import| try build.writer.print("    m.addImport(\"{s}\", b.dependency(\"{s}\", .{{ .target = target, .optimize = optimize }}).module(\"{s}\"));\n", .{ import, import, import });
+        try build.writer.writeAll("}\n");
+        try f.write(dir, "build.zig", build.written());
+        try f.write(dir, "src/root.zig", source);
+    }
+
+    /// An application that runs `main`, importing each dependency's module.
+    fn application(f: *Fixture, dir: []const u8, dependencies: []const u8, imports: []const []const u8, main: []const u8) !void {
+        try f.package(dir, "app", "0.1.0", dependencies, &.{}, "");
+        var build: Io.Writer.Allocating = .init(f.a);
+        try build.writer.writeAll("const std = @import(\"std\");\npub fn build(b: *std.Build) void {\n    const target = b.standardTargetOptions(.{});\n    const optimize = b.standardOptimizeOption(.{});\n    const m = b.createModule(.{ .root_source_file = b.path(\"src/main.zig\"), .target = target, .optimize = optimize });\n");
+        for (imports) |import| try build.writer.print("    m.addImport(\"{s}\", b.dependency(\"{s}\", .{{ .target = target, .optimize = optimize }}).module(\"{s}\"));\n", .{ import, import, import });
+        try build.writer.writeAll("    const exe = b.addExecutable(.{ .name = \"app\", .root_module = m });\n    b.installArtifact(exe);\n    b.step(\"run\", \"Run\").dependOn(&b.addRunArtifact(exe).step);\n}\n");
+        try f.write(dir, "build.zig", build.written());
+        try f.write(dir, "src/main.zig", main);
+    }
+
+    fn write(f: *Fixture, dir: []const u8, name: []const u8, data: []const u8) !void {
+        try f.tmp.dir.writeFile(f.io, .{ .sub_path = try std.fs.path.join(f.a, &.{ dir, name }), .data = data });
+    }
+
+    /// A dependency entry pinning the package in `dir` by the hash Zig gives it.
+    fn pin(f: *Fixture, key: []const u8, dir: []const u8) ![]const u8 {
+        const absolute = try std.fs.path.join(f.a, &.{ f.root, dir });
+        const fetched = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", absolute }, .environ_map = &f.env });
+        try std.testing.expect(fetched.term == .exited and fetched.term.exited == 0);
+        return f.a.print(".{s} = .{{ .url = \"file://{s}\", .hash = \"{s}\" }},", .{ key, absolute, std.mem.trim(u8, fetched.stdout, "\r\n") });
+    }
+
+    fn run(f: *Fixture, dir: []const u8, argv: []const []const u8) !std.process.RunResult {
+        return std.process.run(f.a, f.io, .{ .argv = argv, .cwd = .{ .path = try std.fs.path.join(f.a, &.{ f.root, dir }) }, .environ_map = &f.env });
+    }
+
+    fn bay(f: *Fixture, dir: []const u8, args: []const []const u8) !std.process.RunResult {
+        return f.run(dir, try std.mem.concat(f.a, []const u8, &.{ &.{f.bay_path}, args }));
+    }
+};
+
+/// A fingerprint Zig accepts for `name`: its checksum above an id.
+fn fingerprint(name: []const u8) u64 {
+    var id: u32 = @truncate(std.hash.Wyhash.hash(0, name));
+    if (id == 0 or id == std.math.maxInt(u32)) id = 1;
+    return @as(u64, std.hash.Crc32.hash(name)) << 32 | id;
+}
+
+/// A command expected to fail: its output is the point, not a finding.
+fn refused(result: std.process.RunResult) bool {
+    return !(result.term == .exited and result.term.exited == 0);
+}
+
+fn succeeded(result: std.process.RunResult) bool {
+    if (result.term == .exited and result.term.exited == 0) return true;
+    std.debug.print("{s}{s}", .{ result.stdout, result.stderr });
+    return false;
+}
+
+const shared = "pub const T = struct { x: u32 }; pub var count: u32 = 0;";
+const using_a = "const c = @import(\"c\"); pub fn make() c.T { c.count += 1; return .{ .x = 1 }; } pub const seen = c.version;";
+const using_b = "const c = @import(\"c\"); pub fn take(t: c.T) u32 { c.count += 1; return t.x + c.count; } pub const seen = c.version;";
+const main_ab = "const std = @import(\"std\"); const a = @import(\"a\"); const b = @import(\"b\"); pub fn main() void { std.debug.print(\"a sees {s}, b sees {s}, total {d}\\n\", .{ a.seen, b.seen, b.take(a.make()) }); }";
+
+/// c at 0.1.0 and 0.1.1; a pins the first, b the second.
+fn diamond(f: *Fixture) !void {
+    try f.package("c1", "c", "0.1.0", "", &.{}, "pub const version = \"0.1.0\"; " ++ shared);
+    try f.package("c2", "c", "0.1.1", "", &.{}, "pub const version = \"0.1.1\"; " ++ shared);
+    try f.package("a", "a", "0.1.0", try f.pin("c", "c1"), &.{"c"}, using_a);
+    try f.package("b", "b", "0.1.0", try f.pin("c", "c2"), &.{"c"}, using_b);
+}
+
+test "the diamond Zig cannot build builds with one c, the highest pinned" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") }), &.{ "a", "b" }, main_ab);
+    const plain = try f.run("app", &.{ options.zig, "build", "run" });
+    if (std.mem.find(u8, plain.stderr, "expected type") == null) std.debug.print("plain zig build:\n{s}\n", .{plain.stderr});
+    try std.testing.expect(std.mem.find(u8, plain.stderr, "expected type") != null);
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "a sees 0.1.1, b sees 0.1.1, total 3") != null);
+    const duplicates = try f.bay("app", &.{ "tree", "--duplicates" });
+    try std.testing.expect(succeeded(duplicates));
+    try std.testing.expect(std.mem.find(u8, duplicates.stdout, "(built), pinned by b 0.1.0") != null);
+}
+
+test "two contents at the selected version are refused, and the root's own pin decides" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    try f.package("c3", "c", "0.1.1", "", &.{}, "pub const version = \"0.1.1 again\"; " ++ shared);
+    try f.package("d", "d", "0.1.0", try f.pin("c", "c3"), &.{"c"}, "const c = @import(\"c\"); pub const seen = c.version;");
+    const pins = try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b"), try f.pin("d", "d") });
+    try f.application("app", pins, &.{ "a", "b" }, main_ab);
+    const tied = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(refused(tied));
+    try std.testing.expect(std.mem.find(u8, tied.stderr, "c 0.1.1 is two contents") != null);
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ pins, try f.pin("c", "c3") }), &.{ "a", "b" }, main_ab);
+    const decided = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(decided));
+    try std.testing.expect(std.mem.find(u8, decided.stderr, "a sees 0.1.1 again") != null);
+}
+
+test "a root pinned below the selection is refused until tidy raises it, and --locked never writes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b"), try f.pin("c", "c1") }), &.{ "a", "b", "c" }, main_ab);
+    const below = try f.bay("app", &.{"build"});
+    try std.testing.expect(refused(below));
+    try std.testing.expect(std.mem.find(u8, below.stderr, "bay tidy writes it") != null);
+    const locked = try f.bay("app", &.{ "--locked", "tidy" });
+    try std.testing.expect(refused(locked));
+    const tidied = try f.bay("app", &.{"tidy"});
+    try std.testing.expect(succeeded(tidied));
+    const text = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    try std.testing.expect(std.mem.find(u8, text, "c-0.1.1-") != null);
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "build", "run" })));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
+}
+
+test "a dev tool built on the package links the package under development" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // c under development: the tool `a` pins c 0.1.0, yet links this working tree.
+    try f.package("work", "c", "0.2.0", "", &.{}, "pub const version = \"0.2.0 working\"; " ++ shared);
+    try f.write("work", "build.zig.zon", try f.a.print(".{{ .name = .c, .version = \"0.2.0\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .paths = .{{\"\"}}, .dependencies = .{{}}, .dev_dependencies = .{{ {s} }} }}\n", .{ fingerprint("c"), try f.pin("a", "a") }));
+    try f.write("work", "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addModule("c", .{ .root_source_file = b.path("src/root.zig"), .target = b.standardTargetOptions(.{}), .optimize = b.standardOptimizeOption(.{}) });
+        \\}
+        \\pub fn dev(b: *std.Build, tools: type) void {
+        \\    _ = tools;
+        \\    const target = b.standardTargetOptions(.{});
+        \\    const optimize = b.standardOptimizeOption(.{});
+        \\    const c = b.dependency("c", .{ .target = target, .optimize = optimize }).module("c");
+        \\    const a = b.dependency("a", .{ .target = target, .optimize = optimize }).module("a");
+        \\    const check = b.addWriteFiles().add("check.zig", "const std = @import(\"std\"); const c = @import(\"c\"); const a = @import(\"a\"); pub fn main() void { const t: c.T = a.make(); std.debug.print(\"under test {s}, the tool sees {s}, {d}\\n\", .{ c.version, a.seen, t.x }); }");
+        \\    const exe = b.addExecutable(.{ .name = "check", .root_module = b.createModule(.{ .root_source_file = check, .target = target, .optimize = optimize, .imports = &.{ .{ .name = "c", .module = c }, .{ .name = "a", .module = a } } }) });
+        \\    b.step("check", "Run the tool against the package").dependOn(&b.addRunArtifact(exe).step);
+        \\}
+        \\
+    );
+    const checked = try f.bay("work", &.{"check"});
+    try std.testing.expect(succeeded(checked));
+    try std.testing.expect(std.mem.find(u8, checked.stderr, "under test 0.2.0 working, the tool sees 0.2.0 working, 1") != null);
+}
+
+test "a vendored package resolves and builds with no cache and no network" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") }), &.{ "a", "b" }, main_ab);
+    try std.testing.expect(succeeded(try f.bay("app", &.{"vendor"})));
+    try f.tmp.dir.deleteTree(f.io, "app/.zig-cache");
+    try f.env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(f.a, &.{ f.root, "empty" }));
+    // No network: the fixtures' URLs are files that are no longer there.
+    for ([_][]const u8{ "a", "b", "c1", "c2" }) |dir| try f.tmp.dir.deleteTree(f.io, dir);
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "total 3") != null);
+}
