@@ -331,7 +331,7 @@ test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives i
     // With the package gone from Zig's cache, the build fetches it with git again.
     const updated = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16));
     const start = std.mem.find(u8, updated, "lib-0.1.1-").?;
-    const hash = updated[start .. std.mem.findScalarPos(u8, updated, start, '"').?];
+    const hash = updated[start..std.mem.findScalarPos(u8, updated, start, '"').?];
     const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));

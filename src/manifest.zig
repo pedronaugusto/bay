@@ -32,7 +32,6 @@ pub const Dependency = struct { name: []const u8, source: Source, lazy: bool = f
 /// list `kind`, becomes `to`.
 pub const Repin = struct { directory: []const u8, kind: Kind, from: Dependency, to: Dependency };
 
-
 /// What a Zig package hash names: `<name>-<version>-<44 characters>`.
 pub const Named = struct { name: []const u8, version: std.SemanticVersion };
 
@@ -479,7 +478,6 @@ test "a path is written with / between its parts on every host" {
     try std.testing.expectEqualStrings("../core", try a.print("{f}", .{portable("..\\core")}));
     try std.testing.expectEqualStrings("C:/work/core", try a.print("{f}", .{portable("C:\\work\\core")}));
 }
-
 
 test "a package hash names the package and its version" {
     const ghostty = named("ghostty-1.3.2-dev-5UdBC-lZeAVJbemF7Fz8y5ApP0uA6wTc2uzECn3c6Z_Y").?;
