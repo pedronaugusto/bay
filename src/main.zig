@@ -194,7 +194,12 @@ fn add(env: Env, args: []const []const u8) !u8 {
     const where = target orelse return fail("add needs a url or directory", .{});
     const dependency = if (isDirectory(env, where)) try local(env, where, name) else try fetched(env, where, name) orelse return 1;
     var entry = dependency;
-    entry.lazy = lazy;
+    // A new pin of a dependency already in this list keeps whether it is lazy; --lazy makes it so.
+    const pinned = try manifest.parse(env.a, try env.readManifest());
+    for (if (kind == .dev) pinned.dev else pinned.normal) |existing| {
+        if (std.mem.eql(u8, existing.name, entry.name)) entry.lazy = existing.lazy;
+    }
+    if (lazy) entry.lazy = true;
     var dir = try env.dir();
     defer dir.close(env.io);
     // A name is one dependency: pinned in the other list, it moves to this one.
