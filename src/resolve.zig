@@ -162,6 +162,8 @@ fn places(a: std.mem.Allocator, graph: select.Graph, chosen: []const []const u8)
         if (replace) entry.value_ptr.* = revision;
     }
     for (best.keys(), best.values()) |key, revision| try result.put(a, key, revision.place);
+    // A main module that is a revision (an override by hash) is its own one hash.
+    for (graph.mains.keys(), graph.mains.values()) |key, main| if (main.place == .remote) try result.put(a, key, main.place);
     return result;
 }
 

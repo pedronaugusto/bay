@@ -211,3 +211,26 @@ test "a vendored package resolves and builds with no cache and no network" {
     try std.testing.expect(succeeded(built));
     try std.testing.expect(std.mem.find(u8, built.stderr, "total 3") != null);
 }
+
+test "an override replaces a package for the whole graph, with a directory or a revision" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    try f.package("local", "c", "0.1.1", "", &.{}, "pub const version = \"local\"; " ++ shared);
+    const pins = try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") });
+    try f.application("app", pins, &.{ "a", "b" }, main_ab);
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
+    // A directory: the local checkout builds wherever the graph pins c.
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .overrides = .{{ .c = .{{ .path = \"../local\" }} }} }}\n", .{std.mem.trimEnd(u8, manifest[0..close], " ")}));
+    const local = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(local));
+    try std.testing.expect(std.mem.find(u8, local.stderr, "a sees local, b sees local") != null);
+    // A revision: c 0.1.0, below what b pins, because the package says so.
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .overrides = .{{ {s} }} }}\n", .{ std.mem.trimEnd(u8, manifest[0..close], " "), try f.pin("c", "c1") }));
+    const older = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(older));
+    try std.testing.expect(std.mem.find(u8, older.stderr, "a sees 0.1.0, b sees 0.1.0") != null);
+}
