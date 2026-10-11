@@ -35,7 +35,8 @@ const usage =
     \\  bay tree [--why <name>] [--duplicates]
     \\                             the resolved graph; the paths to one package; the ones
     \\                             pinned at more than one revision, and who pins each
-    \\  bay outdated               dependencies with a newer release on their remote
+    \\  bay outdated               packages the builds use with a newer release, or at a
+    \\                             version their newest release retracts
     \\  bay licenses [--dev]       each package a build contains, with the license it states;
     \\                             --dev adds what only development uses
     \\  bay vendor                 every package the builds use, into zig-pkg, for building offline
@@ -44,7 +45,7 @@ const usage =
     \\                             which is the directory Zig runs in and reads the build's paths from
     \\  bay fetch                  fetch every dependency of both kinds
     \\
-    \\  bay install [--prefix <dir>] [--force] [<url or directory>]
+    \\  bay install [--prefix <dir>] [--name <name>] [--force] [<url or directory>]
     \\                             build a package's programs (ReleaseSafe) into <dir>/bin,
     \\                             ~/.local/bin by default; with no source, the package here
     \\  bay install --list         what bay installed, and from where
@@ -59,7 +60,8 @@ const usage =
     \\bay --locked <command> refuses to change a manifest, as CI should.
     \\bay --workspace [--jobs <n>] <command> runs it in every member of the workspace,
     \\each after the members it ships with.
-    \\Arguments after the step go to zig build. ZIG names the zig executable (default: zig).
+    \\Arguments after the step go to zig build. Each package builds with the exact Zig it
+    \\names, which bay installs; ZIG names another by hand.
     \\
 ;
 

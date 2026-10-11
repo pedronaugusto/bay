@@ -110,11 +110,10 @@ development is listed once, in `.dependencies`.
 
 Two dependencies may pin different revisions of a third. Zig builds both, and when a
 value of one reaches the other the build fails with `expected type 'T', found 'T'`.
-bay selects one, by Go's Minimal Version Selection: a pin is a minimum, and each
-package builds at the highest `.version` pinned by the package or by a revision
-already selected. Selection runs in rounds over the whole graph, so the answer does
-not depend on the order packages are found in, and what an older revision asked for
-stops counting once a newer one is chosen.
+bay selects one, by Go's Minimal Version Selection: a pin is a minimum, every revision
+the graph reaches is read, and each package builds at the highest `.version` any of
+them pins. The answer is the same whatever order or depth packages are found in, and
+it only rises as pins do.
 
 Zig then gets a graph in which each package appears once. A dependency whose own pins
 name other revisions is built from a copy with only those pins rewritten, which
@@ -127,10 +126,14 @@ and `bay tidy` writes them.
 | The package is also a dependency of its own tools | The working tree wins over every revision of it: one copy, the one under test |
 | Two contents claim one version | Refused, naming who pins each, unless the package pins one itself |
 | Two lines of one package: a new major, or below 1.0 a new minor | Refused, naming who asks for each, unless the package lists it in `.coexist` |
-| A version a newer revision retracts | Refused, naming the retracting version |
+| A package that is a directory in one place and pinned in another | Refused, naming both: Zig would build two; `.overrides` makes one |
+| A coexisting line whose own pins must be rewritten | Refused: Zig would rewrite every line |
 | Packages that depend on each other in a ring | Refused |
 
-A version names one content, so every published change gets its own `.version`.
+A version names one content, so every published change gets its own `.version`. A
+release that is bad is withdrawn with `.retracted` in a newer release's manifest, as
+Go's `retract`: `bay outdated` says when a build uses a withdrawn version, and `bay
+update` never moves to one.
 
 ## Workspaces
 
@@ -194,9 +197,10 @@ every build finds it. `git+file://` works the same for a repository on disk. Tag
 ## The exact Zig
 
 bay builds each package with exactly the Zig it names: `.zig_version`, or else
-`.minimum_zig_version`. A version not yet on the machine is downloaded from
-ziglang.org, checked against the release index's SHA-256 and Zig's minisign key, and
-kept in bay's data directory. Setting `ZIG` names another Zig by hand.
+`.minimum_zig_version`, 0.17.0 or newer. bay keeps its own copy of each version,
+downloaded from ziglang.org on first use and checked against the release index's
+SHA-256 and Zig's minisign key; the Zig on the `PATH` builds only what names no
+version. Setting `ZIG` names another Zig by hand.
 
 ## In CI
 
@@ -205,9 +209,10 @@ bay --locked tidy     # fails if a manifest is not what the selection says
 bay --locked test     # runs the step; nothing is written
 ```
 
-`--locked` refuses any change to a manifest. `bay vendor` keeps every package the
-graph reads in the project's `zig-pkg`, where Zig and bay look before the network, so
-the project resolves and builds with no remote reachable.
+`--locked` refuses any change to a manifest. `bay vendor` has Zig unpack every package
+the graph reads into the project's `zig-pkg`, which the package's build and its
+development build both read before the network, so the project resolves and builds
+with no remote reachable.
 
 ## Commands
 
@@ -224,12 +229,12 @@ the project resolves and builds with no remote reachable.
 | `bay tidy` | Pin each package at the version selection picks, and in a workspace each member at its release |
 | `bay list` | Both lists, with their pins |
 | `bay tree [--why <name>] [--duplicates]` | The resolved graph; the paths to one package; the packages pinned at several revisions, and by whom |
-| `bay outdated` | Dependencies with a newer release on their remote |
+| `bay outdated` | Packages the builds use with a newer release on their remote, or at a version their newest release retracts |
 | `bay licenses [--dev]` | Each package a build contains, with the license its files state; `--dev` adds the development tools |
 | `bay vendor` | Every package the graph reads, into `zig-pkg` |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
 | `bay fetch` | Fetch every dependency of both kinds |
-| `bay install [--prefix <dir>] [--force] [<url or dir>]` | Build a package's programs (ReleaseSafe) into `<dir>/bin`, `~/.local/bin` by default; with no source, the package here |
+| `bay install [--prefix <dir>] [--name <name>] [--force] [<url or dir>]` | Build a package's programs (ReleaseSafe) into `<dir>/bin`, `~/.local/bin` by default; with no source, the package here |
 | `bay install --list` | What bay installed, and from where |
 | `bay install --update [name...]` | Reinstall each from its recorded branch or tag |
 | `bay uninstall <name>` | Remove exactly what its install put in place |
@@ -247,7 +252,7 @@ All are ignored by Zig.
 | `.dev_dependencies` | Dependencies of the package's development only |
 | `.overrides` | Packages replaced for the whole graph when this package is built |
 | `.coexist = .{ .name }` | Packages whose incompatible lines may be selected side by side |
-| `.retracted = .{ "0.4.0" }` | Versions of this package no selection may pick |
+| `.retracted = .{ "0.4.0" }` | Versions of this package a newer release withdraws: `outdated` names them in use, `update` skips them |
 | `.zig_version` | The exact Zig to build with; `.minimum_zig_version` when absent |
 
 ## Global installs
