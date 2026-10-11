@@ -122,6 +122,9 @@ pub fn select(a: Allocator, loader: anytype, roots: []const Pin, mains: []const 
         try graph.keys.put(a, place.key(), selection);
         if (graph.mains.contains(identity)) continue;
         for (revision.pins) |pin| try frontier.append(a, pin.place);
+        // A package reached by path is part of what holds it, not a version that
+        // competes: it is built wherever a built revision reaches its directory.
+        if (place == .directory) continue;
         const top = try tops.getOrPut(a, selection);
         if (!top.found_existing) top.value_ptr.* = .empty;
         if (top.value_ptr.items.len != 0) switch (revision.version.order(top.value_ptr.items[0].version)) {
@@ -141,7 +144,15 @@ pub fn select(a: Allocator, loader: anytype, roots: []const Pin, mains: []const 
     while (queue.pop()) |pin| {
         const selection = graph.keys.get(pin.place.key()) orelse continue;
         if (graph.mains.contains(selection) or graph.selected.contains(selection)) continue;
-        const candidates = tops.get(selection).?.items; // safe: every package read that is no main module has its top
+        if (pin.place == .directory) {
+            // The directory a built revision reaches is the one built: another place
+            // of the same package in the built graph is refused when it is materialized.
+            const nested = graph.read.get(pin.place.key()).?; // safe: every place in the graph was read
+            try graph.selected.put(a, selection, nested);
+            for (nested.pins) |next| if (!next.dev) try queue.append(a, next);
+            continue;
+        }
+        const candidates = (tops.get(selection) orelse continue).items;
         const chosen = decide(candidates, options.chosen) orelse {
             graph.problem = .{ .same_version = .{ .name = candidates[0].identity.name, .version = candidates[0].version, .first = candidates[0].place, .second = candidates[1].place } };
             return graph;

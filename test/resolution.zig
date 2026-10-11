@@ -499,3 +499,21 @@ test "a diamond on a package with a package nested by path builds one of each" {
     try std.testing.expect(succeeded(built));
     try std.testing.expect(std.mem.find(u8, built.stderr, "a sub 0.1.1 b sub 0.1.1") != null);
 }
+
+test "a diamond on a package whose nested package keeps its version builds the selected one's" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // n bumps; the sub it holds by path does not: one version, a copy in each release.
+    for ([_][2][]const u8{ .{ "n1", "0.1.0" }, .{ "n2", "0.1.1" } }) |release| {
+        try f.package(try f.a.print("{s}/sub", .{release[0]}), "sub", "0.1.0", "", &.{}, "pub const n = \"same\";");
+        try f.package(release[0], "n", release[1], ".sub = .{ .path = \"sub\" },", &.{"sub"}, try f.a.print("pub const sub = @import(\"sub\"); pub const v = \"{s}\";", .{release[1]}));
+    }
+    try f.package("na", "na", "0.1.0", try f.pin("n", "n1"), &.{"n"}, "pub const n = @import(\"n\");");
+    try f.package("nb", "nb", "0.1.0", try f.pin("n", "n2"), &.{"n"}, "pub const n = @import(\"n\");");
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("na", "na"), try f.pin("nb", "nb") }), &.{ "na", "nb" }, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"{s} {s} {s}\\n\", .{ @import(\"na\").n.v, @import(\"nb\").n.v, @import(\"na\").n.sub.n }); }");
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "0.1.1 0.1.1 same") != null);
+}

@@ -53,9 +53,9 @@ pub fn plan(a: std.mem.Allocator, owners: []const Owned, members: []const manife
                 member.looked = true;
                 // A name is not what a package is: a release of another package of that name is not the member's.
                 const release = try releases.find(remote.url, pinned.name, member.version);
-                if (release) |found| if (found.fingerprint == member.fingerprint) {
-                    member.released = found.dependency;
-                };
+                if (release) |found| {
+                    if (found.fingerprint == member.fingerprint) member.released = found.dependency else try releases.foreign(pinned.name);
+                }
             }
             var to = member.released orelse continue;
             to.name = dependency.name;
@@ -76,9 +76,18 @@ pub fn newest(io: Io, a: std.mem.Allocator, zig: []const u8, packages: *store.St
     // Only a git remote has tags: an archive URL names one file and nothing newer.
     if (!std.mem.startsWith(u8, url, "git+")) return null;
     const repository = remotes.repository(url) orelse return null;
-    const found = remotes.newestVersion(try remotes.tags(io, a, url)) orelse return null;
+    // A remote that cannot be read has said why; what it retracts is then not known.
+    const listed = remotes.tags(io, a, url) catch |err| switch (err) {
+        error.Reported => return null,
+        else => |e| return e,
+    };
+    const found = remotes.newestVersion(listed) orelse return null;
     // Its name is not read; the fetch only needs one.
-    const release = try fetch.fetch(io, a, zig, scratch, try a.print("git+{s}#{s}", .{ repository, found.tag.name }), "release") orelse {
+    const fetched = fetch.fetch(io, a, zig, scratch, try a.print("git+{s}#{s}", .{ repository, found.tag.name }), "release") catch |err| switch (err) {
+        error.Reported => return null,
+        else => |e| return e,
+    };
+    const release = fetched orelse {
         try say.note(io, "{s} at {s} is not a package bay can read: what it retracts is not known", .{ repository, found.tag.name });
         return null;
     };
@@ -112,6 +121,10 @@ const Remote = struct {
             try say.fail(r.io, "{s}'s tag {s} holds a manifest of another version: a tag names the version it releases", .{ name, tag.name });
         return .{ .dependency = dependency, .fingerprint = released.identity.fingerprint };
     }
+
+    fn foreign(r: *Remote, name: []const u8) !void {
+        try say.note(r.io, "{s}'s release is another package of that name; pins to it stay", .{name});
+    }
 };
 
 fn read(io: Io, a: std.mem.Allocator, directory: []const u8) !manifest.Manifest {
@@ -138,6 +151,7 @@ test "a member pinned below its release moves up to it, in either list, never do
     }.of;
     const Releases = struct {
         asked: usize = 0,
+        foreigners: usize = 0,
         fn find(r: *@This(), url: []const u8, name: []const u8, version: std.SemanticVersion) !?Release {
             _ = url;
             r.asked += 1;
@@ -145,6 +159,10 @@ test "a member pinned below its release moves up to it, in either list, never do
             // tool 0.3.0 is released, by another package of that name.
             if (std.mem.eql(u8, name, "tool")) return .{ .dependency = pin("tool", hash("tool", "0.3.0", 'X')), .fingerprint = 99 };
             return null;
+        }
+        fn foreign(r: *@This(), name: []const u8) !void {
+            _ = name;
+            r.foreigners += 1;
         }
     };
     const core: manifest.Manifest = .{ .name = "core", .version = "0.2.0", .minimum_zig_version = null, .normal = &.{}, .dev = &.{pin("tool", hash("tool", "0.1.0", 'T'))} };
@@ -161,4 +179,5 @@ test "a member pinned below its release moves up to it, in either list, never do
     try std.testing.expectEqualStrings(hash("core", "0.2.0", 'R'), pins[1].to.source.remote.hash);
     // Each member's release is looked up once.
     try std.testing.expectEqual(2, releases.asked);
+    try std.testing.expectEqual(1, releases.foreigners);
 }
