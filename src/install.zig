@@ -103,8 +103,6 @@ pub fn uninstall(c: Context, args: []const []const u8) !u8 {
     try say.fail(c.io, "{s} is not installed; bay install --list names what is", .{args[0]});
 }
 
-/// Installs one package from `source`, a URL or a directory, replacing an
-/// earlier install of the same name.
 /// The install build of the copy in `work`, as bay builds any package: with the
 /// Zig it names, its graph resolved, its pins raised to the selection in the copy
 /// and a fork wherever content differs.
@@ -121,12 +119,17 @@ fn buildCommand(c: Context, work: []const u8, stage: []const u8, cache: []const 
     return argv.toOwnedSlice(c.a);
 }
 
-fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, prefix: []const u8, given_name: ?[]const u8, force: bool) !u8 {
+/// Installs one package from `source`, a URL or a directory, replacing an
+/// earlier install of the same name. What it records is absolute, so an
+/// `uninstall` or `--update` from anywhere names the same places.
+fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_prefix: []const u8, given_name: ?[]const u8, force: bool) !u8 {
     const data = try dirs.data(c.io, c.a, c.environ);
     var recorded = source;
-    const package_dir = if (std.mem.find(u8, source, "://") == null)
-        try Io.Dir.cwd().realPathFileAlloc(c.io, source, c.a)
-    else directory: {
+    const prefix = try std.fs.path.resolveAlloc(c.a, &.{ try Io.Dir.cwd().realPathFileAlloc(c.io, ".", c.a), given_prefix });
+    const package_dir = if (std.mem.find(u8, source, "://") == null) recorded: {
+        recorded = try Io.Dir.cwd().realPathFileAlloc(c.io, source, c.a);
+        break :recorded recorded;
+    } else directory: {
         const dependency = try fetch.fetch(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }), source, given_name) orelse return 1;
         recorded = dependency.source.remote.url;
         const packages = try store.Store.init(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }));
@@ -135,6 +138,8 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, prefix: 
     const package_text = Io.Dir.cwd().readFileAlloc(c.io, try std.fs.path.join(c.a, &.{ package_dir, "build.zig.zon" }), c.a, .limited(1 << 20)) catch
         try say.fail(c.io, "{s} has no build.zig.zon", .{source});
     const name = given_name orelse (try manifest.parse(c.a, try c.a.dupeSentinel(u8, package_text, 0))).name;
+    // The name names directories bay writes and deletes: it must be a Zig identifier, as a manifest's is.
+    if (!identifier(name)) try say.fail(c.io, "{s} is not a package name: letters, digits and _, not starting with a digit", .{name});
     // The build runs in a copy, so Zig's package cache is never written to.
     const work = try std.fs.path.join(c.a, &.{ data, "work", name });
     const stage = try std.fs.path.join(c.a, &.{ data, "stage", name });
@@ -235,4 +240,17 @@ fn save(c: Context, records: []const Record) !void {
     try std.zon.stringify.serialize(Records{ .installs = records }, .{}, &out.writer);
     try out.writer.writeByte('\n');
     try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = try std.fs.path.join(c.a, &.{ data, "installed.zon" }), .data = out.written() });
+}
+
+/// Whether `name` is a Zig identifier: what a manifest's `.name` must be.
+fn identifier(name: []const u8) bool {
+    if (name.len == 0 or std.ascii.isDigit(name[0])) return false;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    return true;
+}
+
+test "an install's name is an identifier, never a path" {
+    try std.testing.expect(identifier("bay"));
+    try std.testing.expect(identifier("zig_tool2"));
+    for ([_][]const u8{ "", "2fast", "../..", "a/b", "a-b", "a.b" }) |name| try std.testing.expect(!identifier(name));
 }

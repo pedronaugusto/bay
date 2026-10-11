@@ -582,17 +582,25 @@ test "a step is found in zig build -l's listing" {
     try std.testing.expect(!hasStep(listing, "preflight"));
 }
 
+// Every file's tests, each named: one left out would never run.
 test {
-    _ = manifest;
-    _ = root;
-    _ = @import("select.zig");
-    _ = @import("store.zig");
-    _ = @import("resolve.zig");
-    _ = @import("workspace.zig");
-    _ = published;
+    _ = @import("dirs.zig");
+    _ = @import("download.zig");
     _ = each;
-    _ = licenses;
-    _ = toolchain;
-    _ = remotes;
+    _ = fetch;
     _ = @import("git.zig");
+    _ = graph;
+    _ = install;
+    _ = licenses;
+    _ = manifest;
+    _ = @import("minisign.zig");
+    _ = published;
+    _ = remotes;
+    _ = resolve;
+    _ = root;
+    _ = say;
+    _ = @import("select.zig");
+    _ = store;
+    _ = toolchain;
+    _ = workspace;
 }
