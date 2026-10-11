@@ -183,3 +183,14 @@ test "the root carries the package's own dependencies, a name in both lists once
     const split: manifest.Manifest = .{ .name = "demo", .minimum_zig_version = null, .normal = &.{shipped}, .dev = &.{other} };
     try std.testing.expectError(error.PinnedTwiceDifferently, manifestText(a, split, null));
 }
+
+test "a lazy dev dependency stays lazy in the root, so Zig fetches it only when a build asks" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const emulator: manifest.Dependency = .{ .name = "emulator", .source = .{ .remote = .{ .url = "git+https://example.org/emulator#v1", .hash = "emulator-1.0.0-AAAA" } }, .lazy = true };
+    const package: manifest.Manifest = .{ .name = "demo", .minimum_zig_version = null, .normal = &.{}, .dev = &.{emulator} };
+    const parsed = try manifest.parse(a, try a.dupeSentinel(u8, try manifestText(a, package, null), 0));
+    for (parsed.normal) |dependency| if (std.mem.eql(u8, dependency.name, "emulator")) return std.testing.expect(dependency.lazy);
+    return error.TestExpectedEqual;
+}
