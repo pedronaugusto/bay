@@ -75,9 +75,9 @@ bay fetch                  fetch every dependency of both kinds
 ```
 
 `bay init` at a package's root changes only what is missing; inside a package
-but not at its root it refuses. `ZIG` names the zig executable (default: `zig`). bay sets `BAY` to its own path
-for everything it runs, so a tool that builds another checkout of the package
-runs the same bay.
+but not at its root it refuses. `ZIG` names the zig executable (default: `zig`).
+bay sets `BAY` to its own path for everything it runs, so a tool that builds
+another checkout of the package runs the same bay.
 
 ## License
 
