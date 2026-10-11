@@ -33,18 +33,15 @@ pub const Input = struct {
     members: []const []const u8 = &.{},
 };
 
-/// A manifest entry that must change to name the one hash of its package: in
-/// the package's manifest, or a workspace member's (`directory`).
-pub const Raise = struct { directory: []const u8, kind: manifest.Kind, from: manifest.Dependency, to: manifest.Dependency };
-
 pub const Resolution = struct {
     input: Input,
     store: *store.Store,
     graph: select.Graph,
     /// The one place of each package, by selection key.
     places: std.array_hash_map.String(select.Place),
-    /// What the root manifest must change to agree with the selection.
-    raises: []const Raise,
+    /// The entries the package's manifest, or a workspace member's, must change
+    /// to name the one hash of each package.
+    raises: []const manifest.Repin,
 
     /// The hash the package itself appears under, when something pins it: the
     /// development root pins it so, with a fork to the working tree.
@@ -174,9 +171,9 @@ fn named(chosen: []const []const u8, key: []const u8) bool {
 
 /// The manifests a workspace owns, the package's first: each must pin every
 /// package at its one hash, since Zig builds a main module from its directory.
-fn raises(r: Resolution) ![]const Raise {
+fn raises(r: Resolution) ![]const manifest.Repin {
     const a = r.input.a;
-    var list: std.ArrayList(Raise) = .empty;
+    var list: std.ArrayList(manifest.Repin) = .empty;
     try raisesOf(r, &list, r.input.package, r.input.parsed);
     for (r.input.members) |member| {
         const path = try std.fs.path.join(a, &.{ member, "build.zig.zon" });
@@ -186,7 +183,7 @@ fn raises(r: Resolution) ![]const Raise {
     return list.toOwnedSlice(a);
 }
 
-fn raisesOf(r: Resolution, list: *std.ArrayList(Raise), directory: []const u8, parsed: manifest.Manifest) !void {
+fn raisesOf(r: Resolution, list: *std.ArrayList(manifest.Repin), directory: []const u8, parsed: manifest.Manifest) !void {
     for ([_]manifest.Kind{ .normal, .dev }) |kind| {
         const dependencies = if (kind == .dev) parsed.dev else parsed.normal;
         for (dependencies, try store.pins(r.input.a, directory, dependencies)) |dependency, pin| {

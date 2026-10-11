@@ -1,8 +1,9 @@
 //! bay end to end over real packages: the diamond Zig alone cannot build, a
 //! tie the root decides, tidy, the package under development linked by its own
-//! tools, and a vendored project built with no cache and no network. Each test
-//! works in a directory of its own, with a Zig cache, HOME and data directory of
-//! its own, and the Zig that builds bay, so nothing is downloaded.
+//! tools, a vendored project built with no cache and no network, overrides, and
+//! a command run across a workspace in order. Each test works in a directory of
+//! its own, with a Zig cache, HOME and data directory of its own, and the Zig
+//! that builds bay, so nothing is downloaded.
 const std = @import("std");
 const Io = std.Io;
 const options = @import("options");
@@ -233,4 +234,30 @@ test "an override replaces a package for the whole graph, with a directory or a 
     const older = try f.bay("app", &.{ "build", "run" });
     try std.testing.expect(succeeded(older));
     try std.testing.expect(std.mem.find(u8, older.stderr, "a sees 0.1.0, b sees 0.1.0") != null);
+}
+
+test "a command runs in every workspace member after what it ships with, and a failure skips its dependents" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("c", "c", "0.1.0", "", &.{}, shared);
+    try f.package("a", "a", "0.1.0", ".c = .{ .path = \"../c\" },", &.{"c"}, using_a);
+    try f.package("side", "side", "0.1.0", ".c = .{ .path = \"../c\" },", &.{"c"}, "pub const c = @import(\"c\");");
+    try f.package("top", "top", "0.1.0", ".a = .{ .path = \"../a\" },", &.{"a"}, "pub const a = @import(\"a\");");
+    // a's build no longer configures: top, which ships with a, is never run.
+    try f.write("a", "build.zig", "pub fn build(b: *@import(\"std\").Build) void { _ = b; @compileError(\"a is broken\"); }\n");
+    try f.write(".", "bay.work", ".{ .members = .{ \"top\", \"side\", \"a\", \"c\" } }\n");
+    const result = try f.bay(".", &.{ "--workspace", "--jobs", "2", "build" });
+    try std.testing.expect(refused(result));
+    try std.testing.expect(std.mem.find(u8, result.stderr, "bay: c: ok") != null);
+    try std.testing.expect(std.mem.find(u8, result.stderr, "bay: side: ok") != null);
+    try std.testing.expect(std.mem.find(u8, result.stderr, "bay: a: failed") != null);
+    try std.testing.expect(std.mem.find(u8, result.stderr, "bay: top: skipped, since a failed") != null);
+    // c went before a and side, which ship with it.
+    try std.testing.expect(std.mem.find(u8, result.stderr, "bay: c: ok").? < std.mem.find(u8, result.stderr, "bay: side: ok").?);
+    try std.testing.expect(std.mem.find(u8, result.stderr, "bay: 2 of 4 members ok") != null);
+    // A ring of members that ship with each other cannot be ordered.
+    try f.package("a", "a", "0.1.0", ".top = .{ .path = \"../top\" },", &.{}, "");
+    try std.testing.expect(std.mem.find(u8, (try f.bay(".", &.{ "--workspace", "build" })).stderr, "depend on each other") != null);
 }

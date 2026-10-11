@@ -28,6 +28,10 @@ pub const Source = union(enum) {
 
 pub const Dependency = struct { name: []const u8, source: Source, lazy: bool = false };
 
+/// One entry of the manifest in `directory` that must change: `from`, in the
+/// list `kind`, becomes `to`.
+pub const Repin = struct { directory: []const u8, kind: Kind, from: Dependency, to: Dependency };
+
 pub const Manifest = struct {
     name: []const u8,
     /// The package's `.version`; a manifest without one is 0.0.0.

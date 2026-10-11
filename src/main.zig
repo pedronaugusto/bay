@@ -11,6 +11,8 @@ const workspace = @import("workspace.zig");
 const toolchain = @import("toolchain.zig");
 const remotes = @import("remote.zig");
 const graph = @import("graph.zig");
+const published = @import("published.zig");
+const each = @import("each.zig");
 const say = @import("say.zig");
 
 const usage =
@@ -23,9 +25,11 @@ const usage =
     \\  bay add [--dev] [--lazy] [--name <name>] <url or directory>
     \\                             fetch and pin a dependency; --dev for development only
     \\  bay remove [--dev] <name>  drop a dependency
-    \\  bay update [name...]       re-resolve each pinned ref (?ref=) and pin what it names now
+    \\  bay update [name...]       pin what each recorded ref names now: a branch at its
+    \\                             head, a release tag at the newest release on its line
     \\  bay tidy                   pin each package at the version selection picks: the
-    \\                             highest any manifest in the graph asks for (Go's MVS)
+    \\                             highest any manifest in the graph asks for (Go's MVS);
+    \\                             in a workspace, each member at its release
     \\  bay tree [--why <name>] [--duplicates]
     \\                             the resolved graph; the paths to one package; the ones
     \\                             pinned at more than one revision, and who pins each
@@ -49,6 +53,8 @@ const usage =
     \\                             missing; zig init first where there is no package
     \\
     \\bay --locked <command> refuses to change a manifest, as CI should.
+    \\bay --workspace [--jobs <n>] <command> runs it in every member of the workspace,
+    \\each after the members it ships with.
     \\Arguments after the step go to zig build. ZIG names the zig executable (default: zig).
     \\
 ;
@@ -73,9 +79,22 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, given: []const []const u8) !u8 {
-    const locked = given.len != 0 and std.mem.eql(u8, given[0], "--locked");
-    const args = if (locked) given[1..] else given;
-    if (args.len == 0) try say.fail(io, "--locked comes before a command", .{});
+    var locked = false;
+    var every = false;
+    var jobs: ?usize = null;
+    var first: usize = 0;
+    while (first < given.len) : (first += 1) {
+        const flag = given[first];
+        if (std.mem.eql(u8, flag, "--locked")) locked = true else if (std.mem.eql(u8, flag, "--workspace")) every = true else if (std.mem.eql(u8, flag, "--jobs") and first + 1 < given.len) {
+            first += 1;
+            jobs = std.fmt.parseUnsigned(usize, given[first], 10) catch try say.fail(io, "--jobs takes a number", .{});
+        } else break;
+    }
+    const args = given[first..];
+    if (args.len == 0) try say.fail(io, "--locked, --workspace and --jobs come before a command", .{});
+    if (jobs != null and !every) try say.fail(io, "--jobs is for --workspace", .{});
+    // Each member runs this bay, with --locked when it was given.
+    if (every) return each.run(io, a, environ, jobs, if (locked) try std.mem.concat(a, []const u8, &.{ &.{"--locked"}, args }) else args);
     // Before a package exists, the Zig on the PATH makes it.
     const path_zig = environ.get("ZIG") orelse "zig";
     if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, path_zig);
@@ -226,24 +245,42 @@ fn writeManifest(env: Env, text: []const u8) !void {
     try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = text });
 }
 
-/// `bay tidy`: every manifest the workspace owns pins each package at its one
-/// hash, as Go writes go.mod; raised pins are named. Nothing to write is said.
+/// `bay tidy`: every manifest the workspace owns pins each member at its
+/// release and each package at its one hash, as Go writes go.mod; what moves
+/// is named, and nothing to write says nothing.
 fn tidy(env: Env) !u8 {
+    const others = try workspace.members(env.io, env.a, env.package);
+    if (others.len != 0) {
+        // Members first: what their releases pin is then part of the selection.
+        const owners = try std.mem.concat(env.a, []const u8, &.{ &.{env.package}, others });
+        const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
+        const syncs = try published.syncs(env.io, env.a, env.zig, scratch, owners, owners);
+        try repin(env, syncs, "pinned at its release", null);
+    }
     const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
-    if (resolution.raises.len == 0) return 0;
-    if (env.locked) {
-        for (resolution.raises) |raise| try say.note(env.io, "{s}: {s} would rise to {s}", .{ raise.directory, raise.from.name, try describe(resolution, raise.to) });
-        try say.fail(env.io, "--locked: the selection would change a manifest", .{});
-    }
-    var texts: std.array_hash_map.String([:0]const u8) = .empty;
-    for (resolution.raises) |raise| {
-        const entry = try texts.getOrPut(env.a, raise.directory);
-        if (!entry.found_existing) entry.value_ptr.* = try env.a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(env.io, try std.fs.path.join(env.a, &.{ raise.directory, "build.zig.zon" }), env.a, .limited(1 << 20)), 0);
-        entry.value_ptr.* = try manifest.put(env.a, entry.value_ptr.*, raise.kind, raise.to);
-        try say.note(env.io, "{s} raised to {s}{s}", .{ raise.from.name, try describe(resolution, raise.to), if (std.mem.eql(u8, raise.directory, env.package)) "" else try env.a.print(" in {s}", .{raise.directory}) });
-    }
-    for (texts.keys(), texts.values()) |directory, text| try Io.Dir.cwd().writeFile(env.io, .{ .sub_path = try std.fs.path.join(env.a, &.{ directory, "build.zig.zon" }), .data = text });
+    try repin(env, resolution.raises, "raised to", resolution);
     return 0;
+}
+
+/// Writes each entry into its manifest, saying what moved; `--locked` says
+/// what would and refuses.
+fn repin(env: Env, pins: []const manifest.Repin, verb: []const u8, resolution: ?resolve.Resolution) !void {
+    if (pins.len == 0) return;
+    var texts: std.array_hash_map.String([:0]const u8) = .empty;
+    for (pins) |pin| {
+        const to = if (resolution) |r| try describe(r, pin.to) else pin.to.source.remote.hash;
+        const where = if (std.mem.eql(u8, pin.directory, env.package)) "" else try env.a.print(" in {s}", .{pin.directory});
+        if (env.locked) {
+            try say.note(env.io, "{s} would be {s} {s}{s}", .{ pin.from.name, verb, to, where });
+            continue;
+        }
+        const entry = try texts.getOrPut(env.a, pin.directory);
+        if (!entry.found_existing) entry.value_ptr.* = try env.a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(env.io, try std.fs.path.join(env.a, &.{ pin.directory, "build.zig.zon" }), env.a, .limited(1 << 20)), 0);
+        entry.value_ptr.* = try manifest.put(env.a, entry.value_ptr.*, pin.kind, pin.to);
+        try say.note(env.io, "{s} {s} {s}{s}", .{ pin.from.name, verb, to, where });
+    }
+    if (env.locked) try say.fail(env.io, "--locked: a manifest would change", .{});
+    for (texts.keys(), texts.values()) |directory, text| try Io.Dir.cwd().writeFile(env.io, .{ .sub_path = try std.fs.path.join(env.a, &.{ directory, "build.zig.zon" }), .data = text });
 }
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.
@@ -365,8 +402,10 @@ fn removeCommand(env: Env, args: []const []const u8) !u8 {
 }
 
 /// `bay update`: each remote pin of either kind (or those named) fetched again
-/// at the ref its URL records, and pinned to what that ref names now. A pin to
-/// an exact commit, or a directory, has nothing to follow and stays.
+/// at the ref its URL records, and pinned to what that ref names now: a branch
+/// at its head, a release tag at the newest release on its line, as `cargo update`
+/// and `go get -u` move within what is compatible. A pin to an exact commit, or a
+/// directory, has nothing to follow and stays; a new line is `bay add` at its tag.
 fn update(env: Env, names: []const []const u8) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
     var text = try env.readManifest();
@@ -384,7 +423,7 @@ fn update(env: Env, names: []const []const u8) !u8 {
                 try say.note(env.io, "{s} is pinned to an exact commit; bay add it with a branch or tag to follow one", .{dependency.name});
                 continue;
             };
-            var next = try fetched(env, url, dependency.name) orelse return 1;
+            var next = try fetched(env, try releaseOnLine(env, url), dependency.name) orelse return 1;
             next.lazy = dependency.lazy;
             if (std.mem.eql(u8, next.source.remote.hash, remote.hash)) continue;
             text = try manifest.put(env.a, text, kind, next);
@@ -394,6 +433,17 @@ fn update(env: Env, names: []const []const u8) !u8 {
     if (names.len != 0 and found < names.len) try say.fail(env.io, "not every name given is a dependency", .{});
     try writeManifest(env, text);
     return tidy(env);
+}
+
+/// `url` (`git+<repo>#<ref>`) at the newest release on its line when the ref is
+/// a release tag, or as it is: a branch follows itself.
+fn releaseOnLine(env: Env, url: []const u8) ![]const u8 {
+    const hash = std.mem.findScalarLast(u8, url, '#') orelse return url;
+    const pinned = remotes.versionOf(.{ .name = url[hash + 1 ..], .commit = "" }) orelse return url;
+    const repository = remotes.repository(url) orelse return url;
+    const newest = remotes.newestOnLine(try remotes.tags(env.io, env.a, url), pinned) orelse return url;
+    if (newest.version.order(pinned) != .gt) return url;
+    return env.a.print("git+{s}#{s}", .{ repository, newest.tag.name });
 }
 
 fn contains(names: []const []const u8, name: []const u8) bool {
@@ -508,6 +558,8 @@ test {
     _ = @import("store.zig");
     _ = @import("resolve.zig");
     _ = @import("workspace.zig");
+    _ = published;
+    _ = each;
     _ = toolchain;
     _ = remotes;
 }

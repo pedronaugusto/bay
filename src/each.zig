@@ -1,0 +1,181 @@
+//! `bay --workspace [--jobs <n>] <command> [arguments]`: the command in every
+//! member of the workspace, each after the members it ships with (its normal
+//! dependencies), and members with nothing between them at once, as `go test
+//! ./...` runs packages. A member that fails skips the members that depend on
+//! it, and the rest go on. Each member's output is printed whole when it ends.
+const std = @import("std");
+const Io = std.Io;
+const manifest = @import("manifest.zig");
+const workspace = @import("workspace.zig");
+const published = @import("published.zig");
+const say = @import("say.zig");
+
+const Outcome = enum { pending, ok, failed, skipped };
+
+const Member = struct {
+    directory: []const u8,
+    name: []const u8,
+    /// Indices of the members it depends on.
+    needs: []const usize,
+    done: Io.Event = .unset,
+    outcome: Outcome = .pending,
+    /// The member that failed, for one skipped.
+    because: ?usize = null,
+};
+
+const Run = struct {
+    io: Io,
+    environ: *const std.process.Environ.Map,
+    /// The bay to run in each member: this one.
+    bay: []const u8,
+    command: []const []const u8,
+    members: []Member,
+    permits: Io.Semaphore,
+    output: Io.Mutex = .init,
+};
+
+pub fn run(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, jobs: ?usize, command: []const []const u8) !u8 {
+    if (command.len == 0) try say.fail(io, "--workspace needs a command to run in each member", .{});
+    const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
+    const directories = try workspace.all(io, a, here) orelse try say.fail(io, "no {s} here or in any directory above", .{workspace.file_name});
+    const members = try order(io, a, directories);
+    const width = jobs orelse std.Thread.getCpuCount() catch 1;
+    var state: Run = .{
+        .io = io,
+        .environ = environ,
+        .bay = environ.get("BAY").?, // safe: main sets BAY before any command
+        .command = command,
+        .members = members,
+        .permits = .{ .permits = @max(width, 1) },
+    };
+    var group: Io.Group = .init;
+    for (0..members.len) |index| group.concurrent(io, one, .{ &state, index }) catch |err|
+        try say.fail(io, "could not start a task per member: {t}", .{err});
+    group.await(io) catch |err| return err;
+    var failed: usize = 0;
+    for (members) |member| if (member.outcome != .ok) {
+        failed += 1;
+    };
+    try say.note(io, "{d} of {d} members ok", .{ members.len - failed, members.len });
+    return if (failed == 0) 0 else 1;
+}
+
+/// The members with what each depends on among them; a ring is refused, since
+/// no member of it could go first.
+fn order(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]Member {
+    const manifests = try a.alloc(manifest.Manifest, directories.len);
+    for (manifests, directories) |*parsed, directory| {
+        const text = try Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .limited(1 << 20));
+        parsed.* = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
+            error.InvalidManifest => try say.fail(io, "{s}/build.zig.zon is not a manifest bay can read", .{directory}),
+            else => |e| return e,
+        };
+    }
+    const members = try a.alloc(Member, directories.len);
+    for (members, manifests, directories) |*member, parsed, directory| {
+        var needs: std.ArrayList(usize) = .empty;
+        for (parsed.normal) |dependency| {
+            const name = switch (dependency.source) {
+                .remote => |remote| if (published.named(remote.hash)) |hashed| hashed.name else dependency.name,
+                .path => dependency.name,
+            };
+            for (manifests, 0..) |other, index| if (std.mem.eql(u8, other.name, name) and !std.mem.eql(u8, other.name, parsed.name)) try needs.append(a, index);
+        }
+        member.* = .{ .directory = directory, .name = parsed.name, .needs = try needs.toOwnedSlice(a) };
+    }
+    if (try ring(a, members)) |name| try say.fail(io, "{s} and the members it ships with depend on each other: no member of a ring can go first", .{name});
+    return members;
+}
+
+/// A member on a ring of normal dependencies, or null.
+fn ring(a: std.mem.Allocator, members: []const Member) !?[]const u8 {
+    const State = enum { new, open, closed };
+    const states = try a.alloc(State, members.len);
+    @memset(states, .new);
+    const Visit = struct {
+        fn visit(all: []const Member, marks: []State, index: usize) ?usize {
+            switch (marks[index]) {
+                .closed => return null,
+                .open => return index,
+                .new => {},
+            }
+            marks[index] = .open;
+            for (all[index].needs) |need| if (visit(all, marks, need)) |found| return found;
+            marks[index] = .closed;
+            return null;
+        }
+    };
+    for (0..members.len) |index| if (Visit.visit(members, states, index)) |found| return members[found].name;
+    return null;
+}
+
+/// One member: after what it needs, and within the permits.
+fn one(state: *Run, index: usize) void {
+    const io = state.io;
+    const member = &state.members[index];
+    defer member.done.set(io);
+    for (member.needs) |need| {
+        state.members[need].done.waitUncancelable(io);
+        if (state.members[need].outcome != .ok) {
+            member.outcome = .skipped;
+            member.because = if (state.members[need].outcome == .failed) need else state.members[need].because;
+            report(state, member, "", "");
+            return;
+        }
+    }
+    state.permits.waitUncancelable(io);
+    defer state.permits.post(io);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const argv = std.mem.concat(a, []const u8, &.{ &.{state.bay}, state.command }) catch {
+        member.outcome = .failed;
+        return report(state, member, "", "out of memory");
+    };
+    const result = std.process.run(a, io, .{
+        .argv = argv,
+        .cwd = .{ .path = member.directory },
+        .environ_map = state.environ,
+        .stdout_limit = .limited(64 << 20),
+        .stderr_limit = .limited(64 << 20),
+    }) catch |err| {
+        member.outcome = .failed;
+        return report(state, member, "", @errorName(err));
+    };
+    member.outcome = if (result.term == .exited and result.term.exited == 0) .ok else .failed;
+    report(state, member, result.stdout, result.stderr);
+}
+
+/// A member's output, whole, under its outcome.
+fn report(state: *Run, member: *const Member, stdout: []const u8, stderr: []const u8) void {
+    const io = state.io;
+    state.output.lockUncancelable(io);
+    defer state.output.unlock(io);
+    const said = switch (member.outcome) {
+        .ok => "ok",
+        .failed => "failed",
+        .skipped => "skipped",
+        .pending => unreachable, // a member is reported once it has an outcome
+    };
+    if (member.outcome == .skipped) {
+        say.note(io, "{s}: skipped, since {s} failed", .{ member.name, state.members[member.because.?].name }) catch {}; // safe: a skipped member names the failure
+        return;
+    }
+    say.note(io, "{s}: {s}", .{ member.name, said }) catch {};
+    say.out(io, "{s}", .{stdout}) catch {};
+    say.relay(io, stderr) catch {};
+}
+
+test "members are ordered by what they ship with, and a ring is found" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var members = [_]Member{
+        .{ .directory = "a", .name = "a", .needs = &.{} },
+        .{ .directory = "b", .name = "b", .needs = &.{0} },
+        .{ .directory = "c", .name = "c", .needs = &.{ 0, 1 } },
+    };
+    try std.testing.expectEqual(null, try ring(a, &members));
+    members[0].needs = &.{2};
+    try std.testing.expect(try ring(a, &members) != null);
+}

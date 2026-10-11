@@ -5,6 +5,7 @@ const std = @import("std");
 const Io = std.Io;
 const download = @import("download.zig");
 const say = @import("say.zig");
+const select = @import("select.zig");
 
 pub const Tag = struct {
     /// The name after `refs/tags/`.
@@ -108,11 +109,35 @@ pub const Newest = struct { tag: Tag, version: std.SemanticVersion };
 /// a pre-release is newest only where there is no release. Null when no tag is
 /// a version.
 pub fn newestVersion(list: []const Tag) ?Newest {
+    return newestWhere(list, null);
+}
+
+/// The newest version on `line`'s line (`sameLine`), as `newestVersion` picks one.
+pub fn newestOnLine(list: []const Tag, line: std.SemanticVersion) ?Newest {
+    return newestWhere(list, line);
+}
+
+/// The tag that names `version` exactly, with or without a leading `v`.
+pub fn tagOf(list: []const Tag, version: std.SemanticVersion) ?Tag {
+    for (list) |tag| {
+        const named = versionOf(tag) orelse continue;
+        if (named.order(version) == .eq) return tag;
+    }
+    return null;
+}
+
+/// The version a tag names: `v1.2.0` or `1.2.0`; null for any other tag.
+pub fn versionOf(tag: Tag) ?std.SemanticVersion {
+    const text = if (std.mem.startsWith(u8, tag.name, "v")) tag.name[1..] else tag.name;
+    return std.SemanticVersion.parse(text) catch null;
+}
+
+fn newestWhere(list: []const Tag, line: ?std.SemanticVersion) ?Newest {
     var newest: ?Newest = null;
     var newest_release: ?Newest = null;
     for (list) |tag| {
-        const text = if (std.mem.startsWith(u8, tag.name, "v")) tag.name[1..] else tag.name;
-        const version = std.SemanticVersion.parse(text) catch continue;
+        const version = versionOf(tag) orelse continue;
+        if (line) |wanted| if (!select.sameLine(version, wanted)) continue;
         const candidate: Newest = .{ .tag = tag, .version = version };
         if (newest == null or version.order(newest.?.version) == .gt) newest = candidate;
         if (version.pre == null and (newest_release == null or version.order(newest_release.?.version) == .gt)) newest_release = candidate;
@@ -200,4 +225,18 @@ test "the newest version is the highest release, a pre-release only when there i
     try testing.expectEqualStrings("v1.0.0-rc.10", newestVersion(&pre).?.tag.name);
     try testing.expectEqual(null, newestVersion(&[_]Tag{ at("latest"), at("0.1") }));
     try testing.expectEqual(null, newestVersion(&.{}));
+}
+
+test "the newest on a line stays on it; a version's tag is found with or without v" {
+    const at = struct {
+        fn tag(name: []const u8) Tag {
+            return .{ .name = name, .commit = &@as([40]u8, @splat('0')) };
+        }
+    }.tag;
+    const list = [_]Tag{ at("v0.2.0"), at("v0.2.3"), at("v0.3.0"), at("1.4.0"), at("v1.9.2"), at("v2.0.0") };
+    try testing.expectEqualStrings("v0.2.3", newestOnLine(&list, .{ .major = 0, .minor = 2, .patch = 0 }).?.tag.name);
+    try testing.expectEqualStrings("v1.9.2", newestOnLine(&list, .{ .major = 1, .minor = 0, .patch = 0 }).?.tag.name);
+    try testing.expectEqual(null, newestOnLine(&list, .{ .major = 0, .minor = 1, .patch = 0 }));
+    try testing.expectEqualStrings("1.4.0", tagOf(&list, .{ .major = 1, .minor = 4, .patch = 0 }).?.name);
+    try testing.expectEqual(null, tagOf(&list, .{ .major = 1, .minor = 4, .patch = 1 }));
 }

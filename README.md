@@ -1,7 +1,9 @@
 # bay
 
-Development dependencies, one version of each package, and the exact Zig, on top
-of Zig's own package manager.
+**A package manager for Zig, built on Zig's own.** bay selects one version of every
+package across the whole graph, keeps development tools out of what a package ships,
+develops many packages together as one workspace, and builds each with the exact Zig
+it names.
 
 Zig fetches, hashes, caches and builds. bay decides what Zig fetches and writes the
 packages Zig builds, adding what a Zig manifest has no words for:
@@ -11,7 +13,7 @@ packages Zig builds, adding what a Zig manifest has no words for:
 - **One version of each package**: when two dependencies pin different revisions
   of a third, bay selects one, so a type that crosses between them is one type.
 - **Workspaces**: several packages developed together, each built from its local
-  checkout.
+  checkout, run in dependency order, and pinned at each other's releases.
 - **The exact Zig**: the version a package names, downloaded and verified.
 
 A package developed with bay is still a plain Zig package. Anyone without bay builds
@@ -128,7 +130,23 @@ developed together:
 
 Every member is built from its directory wherever the graph pins it, so a change in
 one is built and tested against the others before it is published anywhere.
-`bay tidy` keeps every member's pins on the one version selected.
+
+A member's pins are what everyone outside the workspace builds with, so `bay tidy`
+pins each member another member depends on at its release: the tag of the member's
+own `.version` (`v1.4.0` or `1.4.0`) on its remote. A member whose version has no tag
+yet has unreleased work, and pins to it stay. Pins of every other package go to the
+one version selected.
+
+`bay --workspace <command>` runs a command in every member, each after the members it
+ships with, and members with nothing between them at once (`--jobs <n>` at most; one
+per CPU by default). A member that fails skips the members that depend on it, and the
+rest go on. Releasing a workspace is then one command per member in order: once a
+member is tagged, `bay tidy` in the next pins that release.
+
+```sh
+bay --workspace test
+bay --workspace --jobs 4 build -Doptimize=ReleaseSafe
+```
 
 ## Overrides
 
@@ -171,8 +189,8 @@ the project resolves and builds with no remote reachable.
 | `bay dev [args]` | `zig build` in the development build, as given |
 | `bay add [--dev] [--lazy] [--name <name>] <url or dir>` | Pin a dependency through `zig fetch`, in that list only |
 | `bay remove [--dev] <name>` | Drop a dependency |
-| `bay update [name...]` | Pin what each recorded ref (`?ref=`) names now |
-| `bay tidy` | Pin each package at the version selection picks |
+| `bay update [name...]` | Pin what each recorded ref names now: a branch at its head, a release tag at the newest release on its line |
+| `bay tidy` | Pin each package at the version selection picks, and in a workspace each member at its release |
 | `bay list` | Both lists, with their pins |
 | `bay tree [--why <name>] [--duplicates]` | The resolved graph; the paths to one package; the packages pinned at several revisions, and by whom |
 | `bay outdated` | Dependencies with a newer release on their remote |
@@ -185,7 +203,8 @@ the project resolves and builds with no remote reachable.
 | `bay uninstall <name>` | Remove exactly what its install put in place |
 
 `bay --locked <command>` refuses to write a manifest. `add`, `remove` and `update`
-tidy after they write.
+tidy after they write. `bay --workspace [--jobs <n>] <command>` runs the command in
+every member of the workspace, in dependency order.
 
 ## Manifest fields
 

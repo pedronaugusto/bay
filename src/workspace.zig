@@ -16,7 +16,16 @@ pub const file_name = "bay.work";
 /// The other members of the workspace holding `package`, as absolute
 /// directories; none outside a workspace.
 pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []const u8 {
-    const found = try find(io, a, package) orelse return &.{};
+    const every = try all(io, a, package) orelse return &.{};
+    var list: std.ArrayList([]const u8) = .empty;
+    for (every) |member| if (!std.mem.eql(u8, member, package)) try list.append(a, member);
+    return list.toOwnedSlice(a);
+}
+
+/// Every member of the workspace found from `from` up, as absolute directories
+/// in the order `bay.work` lists them; null outside a workspace.
+pub fn all(io: Io, a: std.mem.Allocator, from: []const u8) !?[]const []const u8 {
+    const found = try find(io, a, from) orelse return null;
     const Work = struct { members: []const []const u8 };
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     const work = std.zon.parse.fromSlice(Work, .{ .gpa = a, .arena = a, .source = found.text, .diagnostics = &diagnostics }) catch |err| switch (err) {
@@ -27,7 +36,6 @@ pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []con
     var list: std.ArrayList([]const u8) = .empty;
     for (work.members) |member| {
         const absolute = try std.fs.path.resolveAlloc(a, &.{ directory, member });
-        if (std.mem.eql(u8, absolute, package)) continue;
         const manifest_path = try std.fs.path.join(a, &.{ absolute, "build.zig.zon" });
         Io.Dir.cwd().access(io, manifest_path, .{}) catch |err| switch (err) {
             error.FileNotFound => try say.fail(io, "{s} names {s}, which has no build.zig.zon", .{ found.path, member }),
@@ -35,7 +43,7 @@ pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []con
         };
         try list.append(a, absolute);
     }
-    return list.toOwnedSlice(a);
+    return try list.toOwnedSlice(a);
 }
 
 const Found = struct { path: []const u8, text: [:0]const u8 };
