@@ -169,12 +169,23 @@ const Where = enum { package, development };
 /// Runs zig build in the package, or in its development root, and returns its exit code.
 fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const []const u8) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
+    return built(env, parsed, try buildable(env, parsed), where, before, after);
+}
+
+/// The package's graph resolved, and every package in it fetched, for a build;
+/// a build never writes the manifest, so one that disagrees with the selection
+/// is refused.
+fn buildable(env: Env, parsed: manifest.Manifest) !resolve.Resolution {
     const resolution = try resolveHere(env, parsed);
-    // A build never writes the manifest: one that disagrees with the selection is refused.
     if (resolution.raises.len != 0) {
         for (resolution.raises) |raise| try say.note(env.io, "{s} is pinned below the selection: {s}", .{ raise.from.name, try describe(resolution, raise.to) });
         try say.fail(env.io, "build.zig.zon disagrees with the selection; bay tidy writes it", .{});
     }
+    return resolution;
+}
+
+/// Runs zig build over a resolved graph.
+fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where, before: []const []const u8, after: []const []const u8) !u8 {
     // Zig runs in the build's root, so it reads every path, a fork's too, from one place:
     // the package, or its development root.
     const build_root = if (where == .development) try std.fs.path.join(env.a, &.{ env.package, root.directory }) else env.package;
@@ -304,16 +315,22 @@ fn describe(resolution: resolve.Resolution, dependency: manifest.Dependency) ![]
 /// `bay <step>`: the package's own steps are what ships and come first; a step
 /// the package does not have is the development build's.
 fn step(env: Env, name: []const u8, args: []const []const u8) !u8 {
-    const listed = std.process.run(env.a, env.io, .{ .argv = &.{ env.zig, "build", "-l" }, .cwd = .{ .path = env.package }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+    // Resolved first: the listing configures the build, and Zig must find every
+    // package there, a fork's and a git-fetched one's too, as the build will.
+    const parsed = try manifest.parse(env.a, try env.readManifest());
+    const resolution = try buildable(env, parsed);
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(env.a, &.{ env.zig, "build", "-l" });
+    try argv.appendSlice(env.a, try resolution.forks(.package, env.package));
+    const listed = std.process.run(env.a, env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
     if (listed.term != .exited or listed.term.exited != 0) {
         try say.relay(env.io, listed.stderr);
         return 1;
     }
-    if (hasStep(listed.stdout, name)) return zigBuild(env, .package, &.{name}, args);
-    const parsed = try manifest.parse(env.a, try env.readManifest());
+    if (hasStep(listed.stdout, name)) return built(env, parsed, resolution, .package, &.{name}, args);
     if (parsed.dev.len == 0) try say.fail(env.io, "the package has no step '{s}' and no dev dependencies", .{name});
-    return zigBuild(env, .development, &.{name}, args);
+    return built(env, parsed, resolution, .development, &.{name}, args);
 }
 
 /// Whether `zig build -l` lists `name`: each step is a line of two spaces, the name, then spaces.
