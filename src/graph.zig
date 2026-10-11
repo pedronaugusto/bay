@@ -9,6 +9,7 @@ const resolve = @import("resolve.zig");
 const store = @import("store.zig");
 const remotes = @import("remote.zig");
 const say = @import("say.zig");
+const root = @import("root.zig");
 const published = @import("published.zig");
 
 pub const TreeOptions = struct {
@@ -136,30 +137,38 @@ pub fn outdated(r: resolve.Resolution) !void {
     if (!any) try say.note(r.input.io, "every package is at its newest release, and none is retracted", .{});
 }
 
-/// `bay vendor`: every package the package's graph reaches, unpacked into its
-/// `zig-pkg`, where Zig 0.17 and bay look before any network: what is built, and
-/// every revision selection reads to choose it, so the project resolves and builds
-/// with no remote reachable.
+/// `bay vendor`: every package the graph reaches, what is built and every
+/// revision selection reads to choose it, unpacked by Zig itself into the
+/// project's `zig-pkg`, which both its builds use and Zig reads before any
+/// network: the project resolves and builds with no remote reachable.
 pub fn vendor(r: resolve.Resolution) !void {
     const a = r.input.a;
-    const destination = try std.fs.path.join(a, &.{ r.input.package, "zig-pkg" });
+    const io = r.input.io;
+    var dependencies: Io.Writer.Allocating = .init(a);
     var count: usize = 0;
     for (r.graph.read.values()) |revision| {
         const remote = switch (revision.place) {
             .remote => |remote| remote,
             .directory => continue,
         };
-        const target = try std.fs.path.join(a, &.{ destination, remote.hash });
-        if (Io.Dir.cwd().access(r.input.io, target, .{})) |_| continue else |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| return e,
-        }
-        const source = try r.store.directoryOf(remote);
-        const partial = try a.print("{s}.partial", .{target});
-        try Io.Dir.cwd().deleteTree(r.input.io, partial);
-        try resolve.copyTree(r.input.io, a, source, partial);
-        try Io.Dir.cwd().rename(partial, Io.Dir.cwd(), target, r.input.io);
+        // Zig fetches what only git reaches from its cache, where resolution put it.
+        _ = try r.store.directoryOf(remote);
+        try dependencies.writer.print(".p{d} = .{{ .url = \"{f}\", .hash = \"{f}\" }}, ", .{ count, std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) });
         count += 1;
     }
-    try say.note(r.input.io, "{d} packages vendored into {s}", .{ count, destination });
+    const scratch = try std.fs.path.join(a, &.{ r.input.package, ".zig-cache", "bay", "vendor" });
+    try Io.Dir.cwd().deleteTree(io, scratch);
+    try Io.Dir.cwd().createDirPath(io, scratch);
+    var dir = try Io.Dir.cwd().openDir(io, scratch, .{});
+    defer dir.close(io);
+    try dir.writeFile(io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
+    try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(a, "bay_vendor", dependencies.written()) });
+    const destination = try std.fs.path.join(a, &.{ r.input.package, "zig-pkg" });
+    const result = std.process.run(a, io, .{ .argv = &.{ r.input.zig, "build", "--fetch=all", "--pkg-dir", destination }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
+        try say.fail(io, "could not run {s}: {t}", .{ r.input.zig, err });
+    if (result.term != .exited or result.term.exited != 0) {
+        try say.relay(io, result.stderr);
+        try say.fail(io, "Zig could not unpack the packages into {s}", .{destination});
+    }
+    try say.note(io, "{d} packages vendored into {s}", .{ count, destination });
 }

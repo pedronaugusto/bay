@@ -206,6 +206,8 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
             "--build-file", try std.fs.path.join(env.a, &.{ build_root, "build.zig" }),
             "--cache-dir",  try std.fs.path.join(env.a, &.{ env.package, ".zig-cache" }),
             "--prefix",     try std.fs.path.join(env.a, &.{ env.package, "zig-out" }),
+            // One package directory for both builds: what the package build or `bay vendor` put there.
+            "--pkg-dir",    try std.fs.path.join(env.a, &.{ env.package, "zig-pkg" }),
         });
     }
     try argv.appendSlice(env.a, after);

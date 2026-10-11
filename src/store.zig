@@ -25,13 +25,12 @@ pub const Store = struct {
     /// Package directories by hash, once found.
     found: std.array_hash_map.String([]const u8) = .empty,
 
-    /// The store for a package: its own `zig-pkg`, its development root's, bay's unpacked copies.
+    /// The store for a package: its `zig-pkg`, which both its builds use, and bay's unpacked copies.
     pub fn init(io: Io, a: std.mem.Allocator, zig: []const u8, package: []const u8) !*Store {
         const store = try a.create(Store);
         const unpacked = try std.fs.path.join(a, &.{ package, unpacked_directory });
         store.* = .{ .io = io, .a = a, .zig = zig, .global = try globalCache(io, a, zig), .unpacked = unpacked, .directories = try a.dupe([]const u8, &.{
             try std.fs.path.join(a, &.{ package, "zig-pkg" }),
-            try std.fs.path.join(a, &.{ package, ".zig-cache", "bay", "zig-pkg" }),
             unpacked,
         }) };
         return store;
@@ -116,6 +115,7 @@ pub const Store = struct {
         if (diagnostics.errors.items.len != 0) try say.fail(io, "{s} did not unpack: {d} entries failed", .{ archive_path, diagnostics.errors.items.len });
         // An archive holding one directory holds the package in it.
         const root = if (diagnostics.root_dir.len != 0) try std.fs.path.join(store.a, &.{ partial, diagnostics.root_dir }) else partial;
+        try markExecutables(io, store.a, root);
         try Io.Dir.cwd().rename(root, Io.Dir.cwd(), destination, io);
         if (root.len != partial.len) try Io.Dir.cwd().deleteTree(io, partial);
         return destination;
@@ -169,4 +169,41 @@ pub fn globalCache(io: Io, a: std.mem.Allocator, zig: []const u8) ![]const u8 {
     const env = std.zon.parse.fromSlice(Env, .{ .gpa = a, .arena = a, .source = try a.dupeSentinel(u8, result.stdout, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
         try say.fail(io, "could not read {s} env", .{zig});
     return env.global_cache_dir;
+}
+
+/// Gives each file in `path` that starts as a program does (`#!`, ELF, Mach-O)
+/// the executable bit, as Zig 0.17 does when it unpacks a package: an archive's
+/// own modes are ignored by both, so what bay copies from here is what Zig unpacks.
+fn markExecutables(io: Io, a: std.mem.Allocator, path: []const u8) !void {
+    if (!Io.File.Permissions.has_executable_bit) return;
+    var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(a);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const file = try dir.openFile(io, entry.path, .{});
+        defer file.close(io);
+        var header: [4]u8 = undefined;
+        const length = try file.readPositional(io, &.{&header}, 0);
+        if (startsAsProgram(header[0..length])) try file.setPermissions(io, .executable_file);
+    }
+}
+
+fn startsAsProgram(header: []const u8) bool {
+    if (std.mem.startsWith(u8, header, "#!")) return true;
+    if (std.mem.startsWith(u8, header, std.elf.MAGIC)) return true;
+    if (header.len < 4) return false;
+    const magic = std.mem.readInt(u32, header[0..4], @import("builtin").cpu.arch.endian());
+    return switch (magic) {
+        std.macho.MH_MAGIC, std.macho.MH_MAGIC_64, std.macho.FAT_MAGIC, std.macho.FAT_MAGIC_64, std.macho.MH_CIGAM, std.macho.MH_CIGAM_64, std.macho.FAT_CIGAM, std.macho.FAT_CIGAM_64 => true,
+        else => false,
+    };
+}
+
+test "a file is a program by its first bytes, as Zig takes it" {
+    try std.testing.expect(startsAsProgram("#!/bin/sh"));
+    try std.testing.expect(startsAsProgram("\x7fELF"));
+    try std.testing.expect(!startsAsProgram("pub "));
+    try std.testing.expect(!startsAsProgram("#"));
 }

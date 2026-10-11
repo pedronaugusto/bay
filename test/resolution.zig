@@ -214,7 +214,15 @@ test "a vendored package resolves and builds with its packages in no cache and n
     var f: Fixture = try .init(arena.allocator());
     defer f.deinit();
     try diamond(&f);
-    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") }), &.{ "a", "b" }, main_ab);
+    // A development tool too: the development build reads the same zig-pkg.
+    try f.package("tl", "tl", "0.1.0", "", &.{}, "pub const tool = true;");
+    const pins = try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b") });
+    try f.application("app", pins, &.{ "a", "b" }, main_ab);
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .dev_dependencies = .{{ {s} }} }}\n", .{ std.mem.trimEnd(u8, manifest[0..close], " "), try f.pin("tl", "tl") }));
+    const build = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig", f.a, .limited(1 << 20));
+    try f.write("app", "build.zig", try f.a.print("{s}pub fn dev(b: *std.Build, tools: type) void {{\n    _ = tools;\n    _ = b.step(\"tool\", \"\");\n}}\n", .{build}));
     try std.testing.expect(succeeded(try f.bay("app", &.{"vendor"})));
     try f.tmp.dir.deleteTree(f.io, "app/.zig-cache");
     // The cache keeps what Zig compiled, which is no package: each package vendored
@@ -231,10 +239,12 @@ test "a vendored package resolves and builds with its packages in no cache and n
     }
     try std.testing.expect(count >= 3);
     // No remote: the fixtures' URLs are files that are no longer there.
-    for ([_][]const u8{ "a", "b", "c1", "c2" }) |dir| try f.tmp.dir.deleteTree(f.io, dir);
+    for ([_][]const u8{ "a", "b", "c1", "c2", "tl" }) |dir| try f.tmp.dir.deleteTree(f.io, dir);
     const built = try f.bay("app", &.{ "build", "run" });
     try std.testing.expect(succeeded(built));
     try std.testing.expect(std.mem.find(u8, built.stderr, "total 3") != null);
+    // The development build, with its tool, configures from zig-pkg alone.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "dev", "-l" })));
 }
 
 /// An application on the diamond whose manifest, before its last brace, is

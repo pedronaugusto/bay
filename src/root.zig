@@ -99,9 +99,10 @@ pub fn buildText(a: std.mem.Allocator, package: manifest.Manifest) ![]u8 {
     return out.toOwnedSlice();
 }
 
-/// A manifest with no dependencies, for `zig fetch --save` to write one into.
-pub fn scratchManifest(a: std.mem.Allocator) ![]u8 {
-    return a.print(".{{ .name = .bay_add, .version = \"0.0.0\", .fingerprint = 0x{x}, .paths = .{{\"\"}}, .dependencies = .{{}} }}\n", .{fingerprint("bay_add", "bay_add")});
+/// A manifest of its own for a scratch package bay has Zig work in, named
+/// `name`, with `dependencies` (each `.<key> = .{ ... },`) in it.
+pub fn scratchManifest(a: std.mem.Allocator, name: []const u8, dependencies: []const u8) ![]u8 {
+    return a.print(".{{ .name = .{s}, .version = \"0.0.0\", .fingerprint = 0x{x}, .paths = .{{\"\"}}, .dependencies = .{{ {s} }} }}\n", .{ name, fingerprint(name, name), dependencies });
 }
 
 /// A fingerprint Zig accepts for `name`: the checksum of the name above an id.

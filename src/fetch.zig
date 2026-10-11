@@ -22,7 +22,7 @@ pub fn fetch(io: Io, a: std.mem.Allocator, zig: []const u8, scratch: []const u8,
     defer dir.close(io);
     // zig fetch --save edits the manifest beside the nearest build.zig up from here: this one.
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
-    try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(a) });
+    try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(a, "bay_add", "") });
     const save = if (name) |given| try a.print("--save={s}", .{given}) else "--save";
     var child = std.process.spawn(io, .{ .argv = &.{ zig, "fetch", save, url }, .cwd = .{ .path = scratch } }) catch |err|
         try say.fail(io, "could not run {s}: {t}", .{ zig, err });
