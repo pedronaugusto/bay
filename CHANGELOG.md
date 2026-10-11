@@ -13,7 +13,7 @@
 - `bay update` follows a recorded ref: a branch to its head, a release tag to the newest release on its line.
 - `git+ssh://` and `git+file://` dependencies, fetched with the system's git to the hash Zig gives the same tree; a tree's paths stay inside it.
 - The exact Zig a package names (`.zig_version`, else `.minimum_zig_version`, 0.17.0 or newer), downloaded from ziglang.org and verified against the index's SHA-256 and Zig's minisign key. With no Zig named or on the `PATH`, bay starts a package with the Zig it was built with, installed as any other.
-- `bay tree` with `--why` and `--duplicates`, `bay outdated`, `bay licenses [--dev]` and `bay locate`.
+- `bay tree` with `--why` and `--duplicates`, `bay outdated`, `bay licenses [--dev]`, `bay locate` and `bay version`.
 - `bay vendor`: Zig unpacks every package the graph reads into the project's `zig-pkg`, which both builds read, so a project resolves and builds with no remote reachable.
 - `bay <step>` resolves and fetches before it looks for the step; a build runs in its own root, where Zig reads every path of it.
 - `bay new`, `init`, `add`, `remove`, `update`, `list`, `fetch`, and `bay dev`; bay sets `BAY` to itself for what it runs.

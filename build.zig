@@ -1,4 +1,5 @@
 const std = @import("std");
+const zon = @import("build.zig.zon");
 
 /// The bay program, and its tests: std and aegis.
 pub fn build(b: *std.Build) void {
@@ -43,7 +44,12 @@ pub fn dev(b: *std.Build, tools: type) void {
 /// bay's root module from `package`'s sources, built in `b`, with aegis.
 fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
     const aegis = package.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
-    return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "aegis", .module = aegis }} });
+    const release = b.addOptions();
+    release.addOption([]const u8, "version", zon.version);
+    return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "aegis", .module = aegis },
+        .{ .name = "release", .module = release.createModule() },
+    } });
 }
 
 /// The unit tests, and bay end to end over real packages, run with the Zig that builds it.
@@ -53,6 +59,7 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
     const options = b.addOptions();
     options.addOptionPath("bay", exe.getEmittedBin());
     options.addOption([]const u8, "zig", b.graph.zig_exe);
+    options.addOption([]const u8, "version", zon.version);
     const end_to_end = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = package.path("test/resolution.zig"),
         .target = target,
