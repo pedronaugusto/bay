@@ -389,3 +389,44 @@ test "a member whose pins are behind builds from a copy with them rewritten, and
     const after = try f.tmp.dir.readFileAlloc(f.io, "a/build.zig.zon", f.a, .limited(1 << 16));
     try std.testing.expect(std.mem.find(u8, after, "c-0.1.1-") != null);
 }
+
+test "a package that is a directory in one place and pinned in another is refused, and an override makes it one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // The app works on c beside it, by path, while a pins c 0.1.0 by hash.
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), ".c = .{ .path = \"../c2\" }," }), &.{ "a", "c" }, "const std = @import(\"std\"); const a = @import(\"a\"); const c = @import(\"c\"); pub fn main() void { const t: c.T = a.make(); std.debug.print(\"{s} {d}\\n\", .{ a.seen, t.x }); }");
+    const refusal = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(refused(refusal));
+    try std.testing.expect(std.mem.find(u8, refusal.stderr, "c is a directory in one place and pinned at another elsewhere") != null);
+    // Pinned as a, and replaced for the whole graph by the directory: one c.
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
+    const pinned = try std.mem.replaceOwned(u8, f.a, std.mem.trimEnd(u8, manifest[0..close], " "), ".c = .{ .path = \"../c2\" },", try f.pin("c", "c1"));
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .overrides = .{{ .c = .{{ .path = \"../c2\" }} }} }}\n", .{pinned}));
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "0.1.1 1") != null);
+}
+
+test "a coexisting line that needs its pins rewritten is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("d1", "d", "0.1.0", "", &.{}, "pub const v = 1;");
+    try f.package("d2", "d", "0.1.1", "", &.{}, "pub const v = 2;");
+    try f.package("c04", "c", "0.4.0", try f.pin("d", "d1"), &.{"d"}, "pub const d = @import(\"d\");");
+    try f.package("c10", "c", "1.0.0", "", &.{}, "pub const v = 10;");
+    try f.package("old", "old", "0.1.0", try f.pin("c", "c04"), &.{"c"}, "pub const c = @import(\"c\");");
+    // c 0.4.0 pins d 0.1.0, but d 0.1.1 is selected: its copy would be a fork Zig gives every c.
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("c", "c10"), try f.pin("old", "old"), try f.pin("d", "d2") }), &.{ "c", "old", "d" }, "pub fn main() void {}");
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .coexist = .{{ .c }} }}\n", .{std.mem.trimEnd(u8, manifest[0..close], " ")}));
+    const refusal = try f.bay("app", &.{"build"});
+    try std.testing.expect(refused(refusal));
+    try std.testing.expect(std.mem.find(u8, refusal.stderr, "c 0.4.0 coexists with another line of c and needs its pins rewritten") != null);
+}

@@ -151,12 +151,43 @@ pub fn resolve(input: Input) !Resolution {
     const graph = try select.select(a, packages.loader(), &.{}, mains.items, .{ .coexist = input.parsed.coexist, .chosen = chosen.items });
     if (graph.problem) |problem| try refuse(a, input.io, graph, problem);
     var resolution: Resolution = .{ .input = input, .store = packages, .graph = graph, .places = try places(a, graph, chosen.items), .raises = &.{} };
+    try materializable(resolution);
     resolution.raises = try raises(resolution);
     return resolution;
 }
 
 /// The one place of each package: the selected revision's, or the highest hash pinned for a main module.
 /// Between equal versions of a main module, the hash the root names stands for it.
+/// What Zig cannot build as one graph, refused in a sentence: a package that is
+/// a directory somewhere and pinned at another place elsewhere (Zig makes the
+/// directory a package of its own beside the pinned one; `.overrides` makes one
+/// of them), and a package two of whose lines coexist while one needs a fork
+/// (Zig matches a fork by what a package is, not by its line).
+fn materializable(r: Resolution) !void {
+    const a = r.input.a;
+    const io = r.input.io;
+    var seen: std.array_hash_map.String(select.Place) = .empty;
+    for (r.graph.read.keys(), r.graph.read.values()) |place, revision| {
+        const key = r.graph.keys.get(place).?; // safe: every place read has its key
+        if (r.graph.mains.contains(key)) continue;
+        const entry = try seen.getOrPut(a, key);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = revision.place;
+            continue;
+        }
+        if (revision.place != .directory and entry.value_ptr.* != .directory) continue;
+        for ([_]select.Place{ entry.value_ptr.*, revision.place }) |each| try say.note(io, "{s} at {s}, pinned by {s}", .{ revision.identity.name, each.key(), try pinners(a, r.graph, each) });
+        try say.fail(io, "{s} is a directory in one place and pinned at another elsewhere, which Zig builds as two packages: name the one meant in .overrides", .{revision.identity.name});
+    }
+    var lines: std.array_hash_map.String(usize) = .empty;
+    for (r.graph.selected.values()) |revision| (try lines.getOrPutValue(a, revision.identity.name, 0)).value_ptr.* += 1;
+    for (r.graph.selected.values()) |revision| {
+        if (lines.get(revision.identity.name).? < 2) continue; // safe: every selected name was counted
+        if ((try r.rewritesOf(revision)).len == 0) continue;
+        try say.fail(io, "{s} {f} coexists with another line of {s} and needs its pins rewritten, which Zig would apply to every line: pin it where its own pins agree with the selection", .{ revision.identity.name, revision.version, revision.identity.name });
+    }
+}
+
 fn places(a: std.mem.Allocator, graph: select.Graph, chosen: []const []const u8) !std.array_hash_map.String(select.Place) {
     var result: std.array_hash_map.String(select.Place) = .empty;
     for (graph.selected.keys(), graph.selected.values()) |key, revision| try result.put(a, key, revision.place);
