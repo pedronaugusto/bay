@@ -153,9 +153,10 @@ A member's pins are what everyone outside the workspace builds with, so `bay tid
 pins each member the package depends on at its release: the tag of the member's own
 `.version` (`v1.4.0` or `1.4.0`) on its remote. A member whose version has no tag yet
 has unreleased work, and pins to it stay. Pins of every other package go to the one
-version selected. `bay tidy` writes only the package's own manifest; `bay --workspace
+version selected, and the workspace is one graph, every member's development in it:
+a tool one member develops with can raise the floor another member ships with, as in
+a Go workspace. `bay tidy` writes only the package's own manifest; `bay --workspace
 tidy` tidies every member.
-
 `bay --workspace <command>` runs a command in every member, each after the members it
 ships with, and members with nothing between them at once (`--jobs <n>` at most; one
 per CPU by default). A member that fails skips the members that depend on it, and the
