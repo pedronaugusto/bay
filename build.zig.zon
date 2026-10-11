@@ -5,4 +5,10 @@
     .fingerprint = 0xe12d5522677902bb,
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
     .dependencies = .{},
+    .dev_dependencies = .{
+        .preflight = .{
+            .url = "git+https://github.com/pedronaugusto/preflight#3bd25a2891cfcc9e30574aed14a694fcfc06f3a3",
+            .hash = "preflight-0.1.0-LX1ZwokVDAA7KMj2dEMYgd-ZOavxw2nflrXQmYBJm-Dz",
+        },
+    },
 }
