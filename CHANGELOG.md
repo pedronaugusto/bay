@@ -17,6 +17,6 @@
 - `bay vendor`: Zig unpacks every package the graph reads into the project's `zig-pkg`, which both builds read, so a project resolves and builds with no remote reachable.
 - `bay <step>` resolves and fetches before it looks for the step; a build runs in its own root, where Zig reads every path of it.
 - `bay new`, `init`, `add`, `remove`, `update`, `list`, `fetch`, and `bay dev`; bay sets `BAY` to itself for what it runs.
-- `bay install`, `install --list`, `install --update` and `uninstall`: global installs, as `cargo install` makes them, built as bay builds any package, recorded by absolute place.
+- `bay install`, `install --list`, `install --update` and `uninstall`: global installs, as `cargo install` makes them, built as anything depending on the package would build it, without its development, and recorded by absolute place.
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.

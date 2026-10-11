@@ -110,7 +110,7 @@ fn buildCommand(c: Context, work: []const u8, stage: []const u8, cache: []const 
     const zig = try toolchain.forPackage(c.io, c.a, c.environ, work);
     const manifest_path = try std.fs.path.join(c.a, &.{ work, "build.zig.zon" });
     var text = try c.a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(c.io, manifest_path, c.a, .limited(1 << 20)), 0);
-    const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text) });
+    const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text), .development = false });
     for (resolution.raises) |raise| text = try manifest.put(c.a, text, raise.kind, raise.to);
     try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = manifest_path, .data = text });
     var argv: std.ArrayList([]const u8) = .empty;

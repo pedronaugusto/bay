@@ -31,6 +31,9 @@ pub const Input = struct {
     parsed: manifest.Manifest,
     /// Other packages developed with this one (a workspace): absolute directories.
     members: []const []const u8 = &.{},
+    /// Whether the package's development takes part: not for an install, which
+    /// builds the package as anything depending on it would, as `cargo install` does.
+    development: bool = true,
 };
 
 pub const Resolution = struct {
@@ -134,7 +137,7 @@ pub fn resolve(input: Input) !Resolution {
     var mains: std.ArrayList(select.Revision) = .empty;
     // Every package under development takes part with its development, as Go
     // counts each workspace module's tests: every member resolves one graph.
-    try mains.append(a, try store.developedAt(input.io, a, input.package));
+    try mains.append(a, if (input.development) try store.developedAt(input.io, a, input.package) else try store.revisionAt(input.io, a, input.package, .{ .directory = input.package }));
     for (input.members) |member| try mains.append(a, try store.developedAt(input.io, a, member));
     for (input.parsed.overrides) |override| try mains.append(a, switch (override.source) {
         .path => |path| main: {

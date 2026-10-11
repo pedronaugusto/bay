@@ -260,8 +260,9 @@ All are ignored by Zig.
 ## Global installs
 
 `bay install` fetches a package as `zig fetch` does (a `git+https` or archive URL, at
-a `#tag`, `#branch` or `#commit`), copies its sources and builds them as bay builds
-any package, so Zig's package cache is never written to. bay records what each install
+a `#tag`, `#branch` or `#commit`), copies its sources and builds them as anything that
+depends on the package would: what it ships, without its development dependencies, as
+`cargo install` does. Zig's package cache is never written to. bay records what each install
 put where in `~/.local/share/bay/installed.zon` (`$XDG_DATA_HOME/bay`): `uninstall`
 removes exactly that, and a file bay did not install is never replaced without
 `--force`. Installed programs run without bay.

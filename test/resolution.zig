@@ -517,3 +517,22 @@ test "a diamond on a package whose nested package keeps its version builds the s
     try std.testing.expect(succeeded(built));
     try std.testing.expect(std.mem.find(u8, built.stderr, "0.1.1 0.1.1 same") != null);
 }
+
+test "an install builds what the package ships, whatever its development pins" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // Two contents of c 0.1.2 among the app's development tools: its development cannot resolve.
+    try f.package("c3", "c", "0.1.2", "", &.{}, "pub const version = \"three\"; " ++ shared);
+    try f.package("c4", "c", "0.1.2", "", &.{}, "pub const version = \"four\"; " ++ shared);
+    try f.application("app", try f.pin("c", "c2"), &.{}, "pub fn main() void {}");
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .dev_dependencies = .{{ {s} {s} }} }}\n", .{ std.mem.trimEnd(u8, manifest[0..close], " "), try f.pin("three", "c3"), try f.pin("four", "c4") }));
+    try std.testing.expect(refused(try f.bay("app", &.{"tidy"})));
+    const installed = try f.bay("app", &.{ "install", "--prefix", try std.fs.path.join(f.a, &.{ f.root, "prefix" }) });
+    try std.testing.expect(succeeded(installed));
+    try f.tmp.dir.access(f.io, "prefix/bin/app", .{});
+}
