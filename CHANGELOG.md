@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- A `check` step, in the package build and the development build: the program and the tests compiled, nothing run, as the release tier compiles a package in ReleaseSmall.
+
 ## [0.1.1] - 2026-10-12
 
 ### Fixed

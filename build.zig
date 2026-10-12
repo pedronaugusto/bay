@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{ .name = "bay", .root_module = program(b, b, target, optimize) });
     b.installArtifact(exe);
     b.step("run", "Run bay").dependOn(&b.addRunArtifact(exe).step);
-    tests(b, b, target, optimize, b.step("test", "Run the tests"));
+    tests(b, b, target, optimize, b.step("test", "Run the tests"), b.step("check", "Compile the program and the tests without running them"));
     dist(b);
 }
 
@@ -37,7 +37,8 @@ pub fn dev(b: *std.Build, tools: type) void {
     const optimize = b.standardOptimizeOption(.{});
     const package = b.dependency("bay", .{ .target = target, .optimize = optimize }).builder;
     const step = b.step("test", "Run the tests");
-    tests(b, package, target, optimize, step);
+    const check = b.step("check", "Compile the program and the tests without running them");
+    tests(b, package, target, optimize, step, check);
     tools.preflight.addCi(b, package, .{ .tests = step });
 }
 
@@ -53,9 +54,13 @@ fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget,
 }
 
 /// The unit tests, and bay end to end over real packages, run with the Zig that builds it.
-fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, step: *std.Build.Step) void {
-    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = program(b, package, target, optimize) })).step);
+/// `step` runs them; `check` only compiles them, and the program.
+fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, step: *std.Build.Step, check: *std.Build.Step) void {
+    const unit = b.addTest(.{ .root_module = program(b, package, target, optimize) });
+    step.dependOn(&b.addRunArtifact(unit).step);
+    check.dependOn(&unit.step);
     const exe = b.addExecutable(.{ .name = "bay", .root_module = program(b, package, target, optimize) });
+    check.dependOn(&exe.step);
     const options = b.addOptions();
     options.addOptionPath("bay", exe.getEmittedBin());
     options.addOption([]const u8, "zig", b.graph.zig_exe);
@@ -71,4 +76,5 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
     const run_end_to_end = b.addRunArtifact(end_to_end);
     run_end_to_end.has_side_effects = true;
     step.dependOn(&run_end_to_end.step);
+    check.dependOn(&end_to_end.step);
 }
