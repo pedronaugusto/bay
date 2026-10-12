@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-12
+
 ### Fixed
 
 - A development build runs in the package's directory, as the package build does, so a test or tool it runs reads the package's files by their path in it; it ran in `.zig-cache/bay`, where none of them is.
@@ -27,5 +29,6 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/pedronaugusto/bay/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pedronaugusto/bay/releases/tag/v0.1.0
