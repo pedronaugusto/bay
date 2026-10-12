@@ -541,6 +541,23 @@ test "a member whose pins are behind builds from a copy with them rewritten, and
     try std.testing.expect(std.mem.find(u8, after, "c-0.1.1-") != null);
 }
 
+test "a member a build reaches by path is built from that path, with no fork Zig would refuse" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("c", "c", "0.1.0", "", &.{}, "pub const version = \"0.1.0\"; " ++ shared);
+    // a is developed with c pinned by hash, so the workspace selects c at a pin...
+    try f.package("a", "a", "0.1.0", "", &.{}, "");
+    try f.write("a", "build.zig.zon", try f.a.print(".{{ .name = .a, .version = \"0.1.0\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .paths = .{{\"\"}}, .dependencies = .{{}}, .dev_dependencies = .{{ {s} }} }}\n", .{ fingerprint("a"), try f.pin("c", "c") }));
+    // ...while the app takes c by path, from the member's own directory.
+    try f.application("app", ".c = .{ .path = \"../c\" },", &.{"c"}, "const std = @import(\"std\"); const c = @import(\"c\"); pub fn main() void { std.debug.print(\"c {s}\\n\", .{c.version}); }");
+    try f.write(".", "bay.work", ".{ .members = .{ \"app\", \"a\", \"c\" } }\n");
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "c 0.1.0") != null);
+}
+
 test "a package that is a directory in one place and pinned in another is refused, and an override makes it one" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

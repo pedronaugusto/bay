@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A workspace member a build reaches only by a path, at the member's own directory, is no longer given a `--fork`: Zig refuses a fork that matches no package it fetched, so the build failed. bay forks only the packages a build fetches by hash.
+
 ## [0.1.4] - 2026-10-12
 
 ### Added

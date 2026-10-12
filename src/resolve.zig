@@ -55,8 +55,9 @@ pub const Resolution = struct {
     }
 
     /// The forks for one build, written under the package, as `--fork=` arguments
-    /// relative to it. Only packages in that build's graph get one: Zig refuses a
-    /// fork that matches nothing.
+    /// relative to it. Only packages that build fetches by hash get one: Zig
+    /// refuses a fork that matches nothing, and one it reaches only by a path
+    /// (a workspace member's own directory) is built from there already.
     /// `from` is the directory Zig runs in, which is the build's root: Zig reads a
     /// fork's path from there.
     pub fn forks(r: Resolution, build: Build) ![]const []const u8 {
@@ -71,11 +72,13 @@ pub const Resolution = struct {
         return arguments.toOwnedSlice(a);
     }
 
-    /// The selection keys in a build's graph, from the package's pins (and, for
-    /// the development root, its dev pins and the package itself).
+    /// The selection keys a build's graph fetches by hash, from the package's pins
+    /// (and, for the development root, its dev pins and the package itself). The
+    /// walk goes through every pin; a key only a path reaches is left out.
     fn reachable(r: Resolution, build: Build) ![]const []const u8 {
         const a = r.input.a;
         var seen: std.array_hash_map.String(void) = .empty;
+        var fetched: std.array_hash_map.String(void) = .empty;
         var queue: std.ArrayList(select.Pin) = .empty;
         try queue.appendSlice(a, try store.pins(a, r.input.package, r.input.parsed.normal));
         if (build == .development) {
@@ -85,12 +88,13 @@ pub const Resolution = struct {
         var next: usize = 0;
         while (next < queue.items.len) : (next += 1) {
             const key = r.graph.keys.get(queue.items[next].place.key()) orelse continue;
+            if (queue.items[next].place == .remote) try fetched.put(a, key, {});
             if ((try seen.getOrPut(a, key)).found_existing) continue;
             const revision = r.graph.mains.get(key) orelse r.graph.selected.get(key).?; // safe: a key read is main or selected
             // What Zig builds: a dependency's dev pins are never part of it.
             for (revision.pins) |pin| if (!pin.dev) try queue.append(a, pin);
         }
-        return seen.keys();
+        return fetched.keys();
     }
 
     /// The fork of one package, when its content differs from its one hash. A
