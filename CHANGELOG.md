@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-12
+
 ### Fixed
 
 - A path dependency that is no workspace member is refused while its own pins are behind the selection, as a member is: Zig builds it from its directory with its manifest's pins, which no fork rewrites, so it built stale versions without a word.
@@ -81,7 +83,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/pedronaugusto/bay/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/pedronaugusto/bay/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/pedronaugusto/bay/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/pedronaugusto/bay/compare/v0.1.3...v0.1.4
