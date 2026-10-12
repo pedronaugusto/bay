@@ -59,13 +59,14 @@ pub const Resolution = struct {
     /// fork that matches nothing.
     /// `from` is the directory Zig runs in, which is the build's root: Zig reads a
     /// fork's path from there.
-    pub fn forks(r: Resolution, build: Build, from: []const u8) ![]const []const u8 {
+    pub fn forks(r: Resolution, build: Build) ![]const []const u8 {
         const a = r.input.a;
         var arguments: std.ArrayList([]const u8) = .empty;
         for (try r.reachable(build)) |key| {
             const directory = try r.forkFor(key) orelse continue;
-            const relative = try std.fs.path.relativeAlloc(a, from, null, from, directory);
-            try arguments.append(a, try a.print("--fork={s}", .{if (relative.len == 0) "." else relative}));
+            // Absolute: Zig reads a fork against where it runs in one configure pass, and
+            // against the build's root in the pass it makes after fetching lazy packages.
+            try arguments.append(a, try a.print("--fork={s}", .{try std.fs.path.resolveAlloc(a, &.{directory})}));
         }
         return arguments.toOwnedSlice(a);
     }

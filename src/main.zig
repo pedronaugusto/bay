@@ -198,11 +198,11 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
     // Zig runs in the package's directory, as Cargo runs a crate's tests in its own:
     // what a build runs (a test, a tool) reads the package's files by their path in
     // it, as under plain `zig build`, whichever root builds it. The development root
-    // is the build's root through `--build-file`; Zig reads the forks from where it runs.
+    // is the build's root through `--build-file`.
     const build_root = if (where == .development) try std.fs.path.join(env.a, &.{ env.package, root.directory }) else env.package;
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(env.a, &.{ env.zig, "build" });
-    try argv.appendSlice(env.a, try resolution.forks(if (where == .development) .development else .package, env.package));
+    try argv.appendSlice(env.a, try resolution.forks(if (where == .development) .development else .package));
     try argv.appendSlice(env.a, before);
     if (where == .development) {
         var dir = try env.dir();
@@ -337,7 +337,7 @@ fn step(env: Env, name: []const u8, args: []const []const u8) !u8 {
     const resolution = try buildable(env, parsed);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(env.a, &.{ env.zig, "build", "-l" });
-    try argv.appendSlice(env.a, try resolution.forks(.package, env.package));
+    try argv.appendSlice(env.a, try resolution.forks(.package));
     const listed = std.process.run(env.a, env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
     if (listed.term != .exited or listed.term.exited != 0) {

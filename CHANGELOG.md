@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A fork is named to Zig by its absolute path. A relative one was read against a different directory once Zig had fetched a package from a remote and configured again, and a cold development build of a package its own tools pin failed with `FileSystemFailure`.
+
 ### Added
 
 - A `check` step, in the package build and the development build: the program and the tests compiled, nothing run, as the release tier compiles a package in ReleaseSmall.

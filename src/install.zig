@@ -115,7 +115,7 @@ fn buildCommand(c: Context, work: []const u8, stage: []const u8, cache: []const 
     try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = manifest_path, .data = text });
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(c.a, &.{ zig, "build", "install", "-Doptimize=ReleaseSafe", "--prefix", stage, "--cache-dir", cache });
-    try argv.appendSlice(c.a, try resolution.forks(.package, work));
+    try argv.appendSlice(c.a, try resolution.forks(.package));
     return argv.toOwnedSlice(c.a);
 }
 

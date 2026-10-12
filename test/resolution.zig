@@ -605,3 +605,60 @@ test "a development build runs what it builds in the package's directory, wherev
         try std.testing.expect(std.mem.find(u8, read.stderr, "read: the package's own file") != null);
     }
 }
+
+test "a development build that fetches lazy packages while it configures builds the package under development where bay forked it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // A tool that pins the package under development, and builds a lazy package of its own.
+    // Two levels of lazy packages: Zig fetches one, configures again, fetches the other
+    // and configures a third time.
+    try f.package("deeper", "deeper", "0.1.0", "", &.{}, "pub const y = 2;");
+    const deeper_pin = try f.pin("deeper", "deeper");
+    try f.package("lazy", "lazy", "0.1.0", try std.mem.concat(f.a, u8, &.{ deeper_pin[0 .. deeper_pin.len - 2], ", .lazy = true }," }), &.{}, "pub const x = 1;");
+    try f.write("lazy", "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addModule("lazy", .{ .root_source_file = b.path("src/root.zig") });
+        \\    if (b.lazyDependency("deeper", .{})) |deeper| _ = deeper.module("deeper");
+        \\}
+        \\
+    );
+    try f.package("c1", "c", "0.1.0", "", &.{}, "pub const version = \"0.1.0\";");
+    const lazy_pin = try f.pin("lazy", "lazy");
+    try f.package("tool", "tool", "0.1.0", try std.mem.concat(f.a, u8, &.{ try f.pin("c", "c1"), lazy_pin[0 .. lazy_pin.len - 2], ", .lazy = true }," }), &.{"c"}, "pub const seen = @import(\"c\").version;");
+    try f.write("tool", "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const c = b.dependency("c", .{}).module("c");
+        \\    _ = b.addModule("tool", .{ .root_source_file = b.path("src/root.zig"), .imports = &.{.{ .name = "c", .module = c }} });
+        \\    if (b.lazyDependency("lazy", .{})) |lazy| _ = lazy.module("lazy");
+        \\}
+        \\
+    );
+    try f.package("work", "c", "0.2.0", "", &.{}, "pub const version = \"0.2.0 working\";");
+    try f.write("work", "build.zig.zon", try f.a.print(".{{ .name = .c, .version = \"0.2.0\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .paths = .{{\"\"}}, .dependencies = .{{}}, .dev_dependencies = .{{ {s} }} }}\n", .{ fingerprint("c"), try f.pin("tool", "tool") }));
+    try f.write("work", "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addModule("c", .{ .root_source_file = b.path("src/root.zig") });
+        \\}
+        \\pub fn dev(b: *std.Build, tools: type) void {
+        \\    _ = tools;
+        \\    const tool = b.dependency("tool", .{}).module("tool");
+        \\    const check = b.addWriteFiles().add("check.zig", "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"the tool sees {s}\\n\", .{@import(\"tool\").seen}); }");
+        \\    const exe = b.addExecutable(.{ .name = "check", .root_module = b.createModule(.{ .root_source_file = check, .target = b.graph.host, .imports = &.{.{ .name = "tool", .module = tool }} }) });
+        \\    b.step("check", "Run the tool").dependOn(&b.addRunArtifact(exe).step);
+        \\}
+        \\
+    );
+    // Zig's cache without the lazy package: the build fetches it and configures again.
+    const hash = lazy_pin[std.mem.find(u8, lazy_pin, "lazy-0.1.0-").?..std.mem.findScalarPos(u8, lazy_pin, std.mem.find(u8, lazy_pin, "lazy-0.1.0-").?, '"').?];
+    const deeper_hash = deeper_pin[std.mem.find(u8, deeper_pin, "deeper-0.1.0-").?..std.mem.findScalarPos(u8, deeper_pin, std.mem.find(u8, deeper_pin, "deeper-0.1.0-").?, '"').?];
+    for ([_][]const u8{ hash, deeper_hash }) |each| try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p", each }));
+    const checked = try f.bay("work", &.{ "dev", "check" });
+    if (!succeeded(checked)) std.debug.print("{s}\n", .{checked.stderr});
+    try std.testing.expect(succeeded(checked));
+    try std.testing.expect(std.mem.find(u8, checked.stderr, "the tool sees 0.2.0 working") != null);
+}
