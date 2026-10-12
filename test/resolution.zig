@@ -548,3 +548,33 @@ test "bay names its version, the one its manifest gives" {
         try std.testing.expectEqualStrings("bay " ++ options.version ++ "\n", said.stdout);
     }
 }
+
+test "a development build runs what it builds in the package's directory, wherever bay is run from" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("work", "w", "0.1.0", "", &.{}, "pub const x = 1;");
+    try f.write("work", "build.zig.zon", try f.a.print(".{{ .name = .w, .version = \"0.1.0\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .paths = .{{\"\"}}, .dependencies = .{{}}, .dev_dependencies = .{{}} }}\n", .{fingerprint("w")}));
+    try f.write("work", "marker.txt", "the package's own file\n");
+    try f.write("work/src", "keep.txt", "");
+    try f.write("work", "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addModule("w", .{ .root_source_file = b.path("src/root.zig"), .target = b.standardTargetOptions(.{}), .optimize = b.standardOptimizeOption(.{}) });
+        \\}
+        \\pub fn dev(b: *std.Build, tools: type) void {
+        \\    _ = tools;
+        \\    const read = b.addWriteFiles().add("read.zig", "const std = @import(\"std\"); pub fn main(init: std.process.Init) !void { const text = try std.Io.Dir.cwd().readFileAlloc(init.io, \"marker.txt\", init.arena.allocator(), .limited(64)); std.debug.print(\"read: {s}\", .{text}); }");
+        \\    const exe = b.addExecutable(.{ .name = "read", .root_module = b.createModule(.{ .root_source_file = read, .target = b.graph.host }) });
+        \\    b.step("read", "Read the package's marker").dependOn(&b.addRunArtifact(exe).step);
+        \\}
+        \\
+    );
+    for ([_][]const u8{ "work", "work/src" }) |from| {
+        const read = try f.bay(from, &.{ "dev", "read" });
+        if (!succeeded(read)) std.debug.print("{s}\n", .{read.stderr});
+        try std.testing.expect(succeeded(read));
+        try std.testing.expect(std.mem.find(u8, read.stderr, "read: the package's own file") != null);
+    }
+}

@@ -43,7 +43,7 @@ const usage =
     \\  bay vendor                 every package the builds use, into zig-pkg, for building offline
     \\  bay list                   both lists, with their pins
     \\  bay locate [--dev]         the package's directory, or its development build's root,
-    \\                             which is the directory Zig runs in and reads the build's paths from
+    \\                             which the paths of a configured development build are relative to
     \\  bay fetch                  fetch every dependency of both kinds
     \\
     \\  bay install [--prefix <dir>] [--name <name>] [--force] [<url or directory>]
@@ -195,12 +195,14 @@ fn buildable(env: Env, parsed: manifest.Manifest) !resolve.Resolution {
 
 /// Runs zig build over a resolved graph.
 fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where, before: []const []const u8, after: []const []const u8) !u8 {
-    // Zig runs in the build's root, so it reads every path, a fork's too, from one place:
-    // the package, or its development root.
+    // Zig runs in the package's directory, as Cargo runs a crate's tests in its own:
+    // what a build runs (a test, a tool) reads the package's files by their path in
+    // it, as under plain `zig build`, whichever root builds it. The development root
+    // is the build's root through `--build-file`; Zig reads the forks from where it runs.
     const build_root = if (where == .development) try std.fs.path.join(env.a, &.{ env.package, root.directory }) else env.package;
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(env.a, &.{ env.zig, "build" });
-    try argv.appendSlice(env.a, try resolution.forks(if (where == .development) .development else .package, build_root));
+    try argv.appendSlice(env.a, try resolution.forks(if (where == .development) .development else .package, env.package));
     try argv.appendSlice(env.a, before);
     if (where == .development) {
         var dir = try env.dir();
@@ -220,7 +222,7 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
         });
     }
     try argv.appendSlice(env.a, after);
-    var child = std.process.spawn(env.io, .{ .argv = argv.items, .cwd = .{ .path = build_root }, .environ_map = env.environ }) catch |err|
+    var child = std.process.spawn(env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
     return switch (try child.wait(env.io)) {
         .exited => |code| code,
@@ -229,8 +231,8 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
 }
 
 /// `bay locate [--dev]`: the package's directory, or its development root, on
-/// stdout, as `cargo locate-project` names a project to a script. Zig runs a
-/// build in its root, so a tool reading a configured build resolves its paths there.
+/// stdout, as `cargo locate-project` names a project to a script. A configured
+/// build's paths are relative to its root, so a tool reading one resolves them there.
 fn locate(env: Env, args: []const []const u8) !u8 {
     const dev = args.len == 1 and std.mem.eql(u8, args[0], "--dev");
     if (args.len > 1 or (args.len == 1 and !dev)) try say.fail(env.io, "locate takes --dev or nothing", .{});

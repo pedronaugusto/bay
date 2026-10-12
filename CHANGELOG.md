@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A development build runs in the package's directory, as the package build does, so a test or tool it runs reads the package's files by their path in it; it ran in `.zig-cache/bay`, where none of them is.
+
 ## [0.1.0] - 2026-10-12
 
 ### Added

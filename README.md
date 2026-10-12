@@ -272,9 +272,10 @@ without `--force`. Installed programs run without bay.
 The development build is a package bay writes under `.zig-cache/bay`. It depends on
 the package, the package's dependencies and its dev dependencies, and its `build`
 calls the package's `dev` with a `tools` type whose declarations are the dev
-dependencies' build scripts. A build runs in its own root, the package's directory or
-the development build's, which `bay locate --dev` names for a tool that reads a
-configured build. Copies for rewritten pins live under `.zig-cache/bay/forks`, and an
+dependencies' build scripts. Either build runs in the package's directory, as Cargo
+runs a crate's tests in its own, so what it runs reads the package's files by their
+path in it; the development build's root, which its paths are relative to, is what
+`bay locate --dev` names for a tool that reads a configured build. Copies for rewritten pins live under `.zig-cache/bay/forks`, and an
 archive bay must read is unpacked under `.zig-cache/bay/packages`. bay sets `BAY` to
 its own path for everything it runs.
 
