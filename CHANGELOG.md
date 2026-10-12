@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-12
+
 ### Fixed
 
 - A fork is named to Zig by its absolute path. A relative one was read against a different directory once Zig had fetched a package from a remote and configured again, and a cold development build of a package its own tools pin failed with `FileSystemFailure`.
@@ -37,6 +39,7 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/pedronaugusto/bay/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/pedronaugusto/bay/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pedronaugusto/bay/releases/tag/v0.1.0
