@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-12
+
 ### Added
 
 - `bay upgrade [name...]` pins each dependency named, or every one with a git URL, at the newest release tag of its repository that its newest release does not retract, across lines and from a bare commit too, in the list it is in. A repository with no release tag stays as it is, and is said to.
@@ -10,6 +12,10 @@
 ### Fixed
 
 - `bay add <url>` for a dependency already pinned keeps it in the list it is in. Without `--dev` it wrote into `.dependencies` even when the package was pinned only in `.dev_dependencies`, and ended up in both; `--dev` now only chooses the list of a dependency not pinned yet.
+
+### Changed
+
+- Pins aegis 0.1.1 and preflight 0.3.4.
 
 ## [0.1.3] - 2026-10-12
 
@@ -54,7 +60,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/pedronaugusto/bay/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/pedronaugusto/bay/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/pedronaugusto/bay/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/pedronaugusto/bay/compare/v0.1.0...v0.1.1
