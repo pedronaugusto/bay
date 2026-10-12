@@ -308,12 +308,11 @@ test "a command runs in every workspace member after what it ships with, and a f
     try std.testing.expect(std.mem.find(u8, (try f.bay(".", &.{ "--workspace", "build" })).stderr, "depend on each other") != null);
 }
 
-test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives its tree, and updated along its line" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var f: Fixture = try .init(arena.allocator());
-    defer f.deinit();
-    // A repository with a package in it.
+/// A git repository `lib` with release v0.1.0 tagged, an application `app` that
+/// imports it, and the URL bay fetches it by; `expected` is the hash Zig gives the tree.
+const Repository = struct { url: []const u8, expected: []const u8 };
+
+fn gitRepository(f: *Fixture) !Repository {
     try f.package("lib", "lib", "0.1.0", "", &.{}, "pub const version = \"0.1.0\";");
     for ([_][]const []const u8{ &.{ "git", "init", "--quiet", "--initial-branch=main" }, &.{ "git", "add", "." }, &.{ "git", "commit", "--quiet", "-m", "0.1.0" }, &.{ "git", "tag", "v0.1.0" } }) |argv|
         try std.testing.expect(succeeded(try f.run("lib", argv)));
@@ -321,53 +320,81 @@ test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives i
     try f.package("plain", "lib", "0.1.0", "", &.{}, "pub const version = \"0.1.0\";");
     const expected = std.mem.trim(u8, (try f.run(".", &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "plain" }) })).stdout, "\r\n");
     try std.testing.expect(std.mem.startsWith(u8, expected, "lib-0.1.0-"));
-
     try f.application("app", "", &.{"lib"}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"lib {s}\\n\", .{@import(\"lib\").version}); }");
     const url = try f.a.print("git+file://{s}{s}", .{ if (f.root[0] == '/') "" else "/", try std.mem.replaceOwned(u8, f.a, try std.fs.path.join(f.a, &.{ f.root, "lib" }), "\\", "/") });
     try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#v0.1.0", .{url}) })));
-    const pinned = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16));
-    try std.testing.expect(std.mem.find(u8, pinned, expected) != null);
-    try std.testing.expect(std.mem.find(u8, pinned, "?ref=v0.1.0#") != null);
-    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.0") != null);
+    return .{ .url = url, .expected = expected };
+}
 
-    // A release on the line is taken by update, unless the newest release retracts it;
-    // a new line is not taken.
+/// Releases `versions` of `lib` in order, each tagged; `retracting` names a version
+/// the last of them retracts.
+fn releaseLib(f: *Fixture, versions: []const []const u8, retracting: ?[]const u8) !void {
     var previous: []const u8 = "0.1.0";
-    for ([_][]const u8{ "0.1.1", "0.1.2", "0.2.0" }) |version| {
+    for (versions, 0..) |version, i| {
         try f.write("lib", "src/root.zig", try f.a.print("pub const version = \"{s}\";", .{version}));
         var text = try std.mem.replaceOwned(u8, f.a, try f.tmp.dir.readFileAlloc(f.io, "lib/build.zig.zon", f.a, .limited(1 << 16)), try f.a.print("\"{s}\"", .{previous}), try f.a.print("\"{s}\"", .{version}));
-        if (std.mem.eql(u8, version, "0.2.0")) text = try std.mem.replaceOwned(u8, f.a, text, ".paths", ".retracted = .{\"0.1.2\"}, .paths");
+        if (i + 1 == versions.len) if (retracting) |withdrawn| {
+            text = try std.mem.replaceOwned(u8, f.a, text, ".paths", try f.a.print(".retracted = .{{\"{s}\"}}, .paths", .{withdrawn}));
+        };
         try f.write("lib", "build.zig.zon", text);
         for ([_][]const []const u8{ &.{ "git", "commit", "--quiet", "-am", version }, &.{ "git", "tag", try f.a.print("v{s}", .{version}) } }) |argv|
             try std.testing.expect(succeeded(try f.run("lib", argv)));
         previous = version;
     }
+}
+
+test "a repository Zig cannot fetch is fetched with git, to the hash Zig gives its tree" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const repository = try gitRepository(&f);
+    const pinned = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16));
+    try std.testing.expect(std.mem.find(u8, pinned, repository.expected) != null);
+    try std.testing.expect(std.mem.find(u8, pinned, "?ref=v0.1.0#") != null);
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.0") != null);
+}
+
+test "a repository's release line is followed by update, a new line and a retracted version are named" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const repository = try gitRepository(&f);
+    // A release on the line is taken by update, unless the newest release retracts it;
+    // a new line is not taken.
+    try releaseLib(&f, &.{ "0.1.1", "0.1.2", "0.2.0" }, "0.1.2");
     try std.testing.expect(succeeded(try f.bay("app", &.{"update"})));
     try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16)), "?ref=v0.1.1#") != null);
     const outdated = try f.bay("app", &.{"outdated"});
     try std.testing.expect(succeeded(outdated));
     try std.testing.expect(std.mem.find(u8, outdated.stdout, "lib 0.1.1 -> 0.2.0 (tag v0.2.0, a new line)") != null);
+    // A version the newest release retracts is said to be, once a build uses it.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#v0.1.2", .{repository.url}) })));
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "lib 0.1.2 is retracted by its release 0.2.0") != null);
+}
 
-    // With the package gone from Zig's cache, the build fetches it with git again.
-    const updated = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 16));
-    const start = std.mem.find(u8, updated, "lib-0.1.1-").?;
-    const hash = updated[start..std.mem.findScalarPos(u8, updated, start, '"').?];
+test "a package fetched with git is fetched again when Zig's copy of it is gone" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const repository = try gitRepository(&f);
+    const hash = repository.expected;
     const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
+    // With the package gone from Zig's cache, a step fetches it with git again:
+    // bay resolves and fetches before Zig lists the steps.
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
     try f.tmp.dir.deleteTree(f.io, "app/.zig-cache");
     try f.tmp.dir.deleteTree(f.io, "app/zig-pkg");
-    // A step, too: bay resolves and fetches before Zig lists the steps.
-    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"run"})).stderr, "lib 0.1.1") != null);
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"run"})).stderr, "lib 0.1.0") != null);
     // Zig's copies gone and bay's own kept, as a CI that caches only .zig-cache has it:
     // bay puts the package back where Zig looks.
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
     try f.tmp.dir.deleteTree(f.io, "app/zig-pkg");
-    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.1") != null);
-    // A version the newest release retracts is said to be, once a build uses it.
-    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#v0.1.2", .{url}) })));
-    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "lib 0.1.2 is retracted by its release 0.2.0") != null);
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "build", "run" })).stderr, "lib 0.1.0") != null);
 }
 
 test "with no Zig named and none on the PATH, a new package is made by the Zig bay was built with" {
