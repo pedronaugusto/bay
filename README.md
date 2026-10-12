@@ -225,9 +225,10 @@ with no remote reachable.
 | `bay build [args]` | `zig build` of the package |
 | `bay <step> [args]` | The step from the package's build, or else its development build |
 | `bay dev [args]` | `zig build` in the development build, as given |
-| `bay add [--dev] [--lazy] [--name <name>] <url or dir>` | Pin a dependency through `zig fetch`, in that list only |
+| `bay add [--dev] [--lazy] [--name <name>] <url or dir>...` | Pin dependencies through `zig fetch`, then tidy once; a name already pinned stays in its list, `--dev` picks the list of a new one |
 | `bay remove [--dev] <name>` | Drop a dependency |
 | `bay update [name...]` | Pin what each recorded ref names now: a branch at its head, a release tag at the newest release on its line |
+| `bay upgrade [name...]` | Pin each at the newest release tag of its repository, across lines, whether it was pinned at a tag or a commit; a repository with no release tag stays |
 | `bay tidy` | Pin each package at the version selection picks, and in a workspace each member at its release |
 | `bay list` | Both lists, with their pins |
 | `bay tree [--why <name>] [--duplicates]` | The resolved graph; the paths to one package; the packages pinned at several revisions, and by whom |
@@ -241,8 +242,8 @@ with no remote reachable.
 | `bay install --update [name...]` | Reinstall each from its recorded branch or tag |
 | `bay uninstall <name>` | Remove exactly what its install put in place |
 
-`bay --locked <command>` refuses to write a manifest. `add`, `remove` and `update`
-tidy after they write. `bay --workspace [--jobs <n>] <command>` runs the command in
+`bay --locked <command>` refuses to write a manifest. `add`, `remove`, `update` and `upgrade`
+tidy after they write, once for all they pinned. `bay --workspace [--jobs <n>] <command>` runs the command in
 every member of the workspace, in dependency order.
 
 ## Manifest fields

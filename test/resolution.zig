@@ -374,6 +374,100 @@ test "a repository's release line is followed by update, a new line and a retrac
     try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "lib 0.1.2 is retracted by its release 0.2.0") != null);
 }
 
+fn gitUrl(f: *Fixture, dir: []const u8) ![]const u8 {
+    return f.a.print("git+file://{s}{s}", .{ if (f.root[0] == '/') "" else "/", try std.mem.replaceOwned(u8, f.a, try std.fs.path.join(f.a, &.{ f.root, dir }), "\\", "/") });
+}
+
+/// `version` of the package `name` committed and tagged in the git repository `dir`.
+fn tagRelease(f: *Fixture, dir: []const u8, name: []const u8, version: []const u8, dependencies: []const u8) !void {
+    try f.package(dir, name, version, dependencies, &.{}, "");
+    for ([_][]const []const u8{ &.{ "git", "init", "--quiet", "--initial-branch=main" }, &.{ "git", "add", "." }, &.{ "git", "commit", "--quiet", "-m", version }, &.{ "git", "tag", try f.a.print("v{s}", .{version}) } }) |argv|
+        try std.testing.expect(succeeded(try f.run(dir, argv)));
+}
+
+/// x and y, each released as 0.1.0 and 0.2.0, y pinning the x of its own version
+/// (the same trees as plain directories, whose hashes y's manifests record).
+fn pair(f: *Fixture) !void {
+    for ([_][]const u8{ "0.1.0", "0.2.0" }) |version| {
+        const plain = try f.a.print("x{s}", .{version});
+        try f.package(plain, "x", version, "", &.{}, "");
+        try tagRelease(f, "x", "x", version, "");
+        try tagRelease(f, "y", "y", version, try f.pin("x", plain));
+    }
+}
+
+fn manifestOf(f: *Fixture, dir: []const u8) ![]const u8 {
+    return f.tmp.dir.readFileAlloc(f.io, try std.fs.path.join(f.a, &.{ dir, "build.zig.zon" }), f.a, .limited(1 << 16));
+}
+
+test "a dependency pinned again stays in the list it is in" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const repository = try gitRepository(&f);
+    const tag = try f.a.print("{s}#v0.1.0", .{repository.url});
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "remove", "lib" })));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", "--dev", tag })));
+    // Without --dev, lib is still only a dev dependency.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", tag })));
+    const listed = try f.bay("app", &.{"list"});
+    try std.testing.expect(succeeded(listed));
+    try std.testing.expect(std.mem.startsWith(u8, listed.stdout, ".dependencies: none\n"));
+    try std.testing.expect(std.mem.find(u8, listed.stdout, ".dev_dependencies\n  lib  ") != null);
+}
+
+test "several urls are pinned, then tidied once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try pair(&f);
+    const x = try gitUrl(&f, "x");
+    const y = try gitUrl(&f, "y");
+    try f.application("app", "", &.{}, "pub fn main() void {}");
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#v0.1.0", .{x}), try f.a.print("{s}#v0.1.0", .{y}) })));
+    // Moved one at a time, x leaves y behind on the line below it: two lines of x.
+    const old = try manifestOf(&f, "app");
+    const one = try f.bay("app", &.{ "add", try f.a.print("{s}#v0.2.0", .{x}) });
+    try std.testing.expect(refused(one));
+    try f.write("app", "build.zig.zon", old);
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#v0.2.0", .{x}), try f.a.print("{s}#v0.2.0", .{y}) })));
+    const pinned = try manifestOf(&f, "app");
+    try std.testing.expect(std.mem.count(u8, pinned, "?ref=v0.2.0#") == 2);
+}
+
+test "upgrade pins every git dependency at its newest release, across lines, together" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try pair(&f);
+    const x = try gitUrl(&f, "x");
+    const y = try gitUrl(&f, "y");
+    // x at the commit of its first release, y at its tag, both lazy.
+    const commit = std.mem.trim(u8, (try f.run("x", &.{ "git", "rev-parse", "v0.1.0^{commit}" })).stdout, "\r\n");
+    try f.application("app", "", &.{}, "pub fn main() void {}");
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", try f.a.print("{s}#{s}", .{ x, commit }), "--lazy", try f.a.print("{s}#v0.1.0", .{y}) })));
+    // A repository with no release tag stays as it is, and is said to.
+    try tagRelease(&f, "bare", "bare", "0.1.0", "");
+    try std.testing.expect(succeeded(try f.run("bare", &.{ "git", "tag", "-d", "v0.1.0" })));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", "--dev", try f.a.print("{s}#main", .{try gitUrl(&f, "bare")}) })));
+    const before = try manifestOf(&f, "app");
+    const upgraded = try f.bay("app", &.{"upgrade"});
+    try std.testing.expect(succeeded(upgraded));
+    try std.testing.expect(std.mem.find(u8, upgraded.stderr, "bare has no release tag") != null);
+    const pinned = try manifestOf(&f, "app");
+    try std.testing.expect(std.mem.count(u8, pinned, "?ref=v0.2.0#") == 2);
+    try std.testing.expect(std.mem.find(u8, pinned, "?ref=main#") != null);
+    try std.testing.expect(std.mem.find(u8, before, "?ref=v0.2.0#") == null);
+    const listed = try f.bay("app", &.{"list"});
+    try std.testing.expect(std.mem.find(u8, listed.stdout, "y (lazy)") != null);
+    try std.testing.expect(std.mem.find(u8, listed.stdout, "x (lazy)") != null);
+    // A name that is no dependency is refused.
+    try std.testing.expect(refused(try f.bay("app", &.{ "upgrade", "nothing" })));
+}
+
 test "a package fetched with git is fetched again when Zig's copy of it is gone" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

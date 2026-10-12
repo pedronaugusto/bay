@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- `bay upgrade [name...]` pins each dependency named, or every one with a git URL, at the newest release tag of its repository, across lines and from a bare commit too, in the list it is in. A repository with no release tag stays as it is, and is said to.
+- `bay add` takes several URLs. It pins all of them, then tidies once, as `bay upgrade` does, so packages that pin each other can move together.
+
+### Fixed
+
+- `bay add <url>` for a dependency already pinned keeps it in the list it is in. Without `--dev` it wrote into `.dependencies` even when the package was pinned only in `.dev_dependencies`, and ended up in both; `--dev` now only chooses the list of a dependency not pinned yet.
+
 ## [0.1.3] - 2026-10-12
 
 ### Fixed

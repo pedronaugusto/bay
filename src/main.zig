@@ -25,11 +25,14 @@ const usage =
     \\  bay <step> [args]          the step from the package's build, or else from its
     \\                             development build, which has the dev dependencies
     \\  bay dev [args]             zig build in the development build, as given
-    \\  bay add [--dev] [--lazy] [--name <name>] <url or directory>
-    \\                             fetch and pin a dependency; --dev for development only
+    \\  bay add [--dev] [--lazy] [--name <name>] <url or directory>...
+    \\                             fetch and pin dependencies, then tidy once; a name already
+    \\                             pinned stays in its list, --dev picks the list of a new one
     \\  bay remove [--dev] <name>  drop a dependency
     \\  bay update [name...]       pin what each recorded ref names now: a branch at its
     \\                             head, a release tag at the newest release on its line
+    \\  bay upgrade [name...]      pin each at the newest release tag of its repository, across
+    \\                             lines, whether it was pinned at a tag or a commit
     \\  bay tidy                   pin each package at the version selection picks: the
     \\                             highest any manifest in the graph asks for (Go's MVS);
     \\                             in a workspace, each member at its release
@@ -124,6 +127,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, giv
     if (std.mem.eql(u8, command, "add")) return add(env, args[1..]);
     if (std.mem.eql(u8, command, "remove")) return removeCommand(env, args[1..]);
     if (std.mem.eql(u8, command, "update")) return update(env, args[1..]);
+    if (std.mem.eql(u8, command, "upgrade")) return upgrade(env, args[1..]);
     if (std.mem.eql(u8, command, "list")) return list(env);
     if (std.mem.eql(u8, command, "tidy")) return tidy(env);
     if (std.mem.eql(u8, command, "locate")) return locate(env, args[1..]);
@@ -370,34 +374,58 @@ fn fetchAll(env: Env) !u8 {
 
 /// `bay add`: Zig fetches into a scratch manifest with `zig fetch --save`, so
 /// the URL and hash are exactly what Zig records; bay puts the entry in the
-/// package's list of that kind.
+/// package's list of that kind. Every pin is written first and the package is
+/// tidied once, so pins that must move together (two packages that pin each
+/// other) are not checked one at a time against the old other.
 fn add(env: Env, args: []const []const u8) !u8 {
     var kind: manifest.Kind = .normal;
     var lazy = false;
     var name: ?[]const u8 = null;
-    var target: ?[]const u8 = null;
+    var targets: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dev")) kind = .dev else if (std.mem.eql(u8, args[i], "--lazy")) lazy = true else if (std.mem.eql(u8, args[i], "--name")) {
             i += 1;
             if (i == args.len) try say.fail(env.io, "--name needs a value", .{});
             name = args[i];
-        } else if (target == null) target = args[i] else try say.fail(env.io, "add takes one url or directory", .{});
+        } else try targets.append(env.a, args[i]);
     }
-    const where = target orelse try say.fail(env.io, "add needs a url or directory", .{});
-    const dependency = if (isDirectory(env, where)) try local(env, where, name) else try fetched(env, where, name) orelse return 1;
-    var entry = dependency;
-    // A new pin of a dependency already in this list keeps whether it is lazy; --lazy makes it so.
+    if (targets.items.len == 0) try say.fail(env.io, "add needs a url or directory", .{});
+    if (name != null and targets.items.len > 1) try say.fail(env.io, "--name names one dependency; add takes one url with it", .{});
     const pinned = try manifest.parse(env.a, try env.readManifest());
-    for (if (kind == .dev) pinned.dev else pinned.normal) |existing| {
-        if (std.mem.eql(u8, existing.name, entry.name)) entry.lazy = existing.lazy;
+    var text = try env.readManifest();
+    for (targets.items) |where| {
+        const dependency = if (isDirectory(env, where)) try local(env, where, name) else try fetched(env, where, name) orelse return 1;
+        text = try pinInto(env, pinned, text, dependency, kind, lazy);
     }
-    if (lazy) entry.lazy = true;
-    // Each list is its own, as Cargo's are: a package may ship a dependency and
-    // develop with it too, so a pin in one list leaves the other as it is.
-    try writeManifest(env, try manifest.put(env.a, try env.readManifest(), kind, entry));
-    try say.note(env.io, "{s} pinned in .{s}", .{ entry.name, kind.field() });
+    try writeManifest(env, text);
     return tidy(env);
+}
+
+/// `dependency` put into each list that pins its name already, keeping whether it
+/// is lazy (`lazy` makes it so); into `fresh` when neither does. Each list is its
+/// own, as Cargo's are: a package may ship a dependency and develop with it too.
+fn pinInto(env: Env, pinned: manifest.Manifest, text: [:0]const u8, dependency: manifest.Dependency, fresh: manifest.Kind, lazy: bool) ![:0]const u8 {
+    var edited = text;
+    var found = false;
+    for ([_]manifest.Kind{ .normal, .dev }) |kind| {
+        for (if (kind == .normal) pinned.normal else pinned.dev) |existing| {
+            if (!std.mem.eql(u8, existing.name, dependency.name)) continue;
+            found = true;
+            var entry = dependency;
+            entry.lazy = existing.lazy or lazy;
+            edited = try putNoted(env, edited, kind, entry);
+        }
+    }
+    if (found) return edited;
+    var entry = dependency;
+    entry.lazy = lazy;
+    return putNoted(env, edited, fresh, entry);
+}
+
+fn putNoted(env: Env, text: [:0]const u8, kind: manifest.Kind, entry: manifest.Dependency) ![:0]const u8 {
+    try say.note(env.io, "{s} pinned in .{s}", .{ entry.name, kind.field() });
+    return manifest.put(env.a, text, kind, entry);
 }
 
 fn isDirectory(env: Env, path: []const u8) bool {
@@ -466,6 +494,43 @@ fn update(env: Env, names: []const []const u8) !u8 {
             var next = try fetched(env, try releaseOnLine(env, url), dependency.name) orelse return 1;
             next.lazy = dependency.lazy;
             if (std.mem.eql(u8, next.source.remote.hash, remote.hash)) continue;
+            text = try manifest.put(env.a, text, kind, next);
+            try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
+        }
+    }
+    try writeManifest(env, text);
+    return tidy(env);
+}
+
+/// `bay upgrade`: each dependency named, or every one with a git URL when none
+/// is, pinned at the newest release tag of its repository, as `cargo upgrade`
+/// moves a requirement: across lines, whether it was pinned at a tag or at a
+/// bare commit, in the list or lists it is in. All are written, then the
+/// package is tidied once. A repository without a release tag stays as it is.
+fn upgrade(env: Env, names: []const []const u8) !u8 {
+    const parsed = try manifest.parse(env.a, try env.readManifest());
+    for (names) |name| {
+        if (!among(parsed.normal, name) and !among(parsed.dev, name)) try say.fail(env.io, "{s} is not a dependency", .{name});
+    }
+    var text = try env.readManifest();
+    for ([_]manifest.Kind{ .normal, .dev }) |kind| {
+        for (if (kind == .normal) parsed.normal else parsed.dev) |dependency| {
+            if (names.len != 0 and !contains(names, dependency.name)) continue;
+            const remote = switch (dependency.source) {
+                .remote => |remote| remote,
+                .path => continue,
+            };
+            if (!std.mem.startsWith(u8, remote.url, "git+")) continue;
+            const repository = remotes.repository(remote.url) orelse continue;
+            const tags = try remotes.tags(env.io, env.a, remote.url);
+            const newest = remotes.newestVersion(tags) orelse {
+                try say.note(env.io, "{s} has no release tag; it stays as it is", .{dependency.name});
+                continue;
+            };
+            const to = try env.a.print("git+{s}#{s}", .{ repository, newest.tag.name });
+            var next = try fetched(env, to, dependency.name) orelse return 1;
+            next.lazy = dependency.lazy;
+            if (std.mem.eql(u8, next.source.remote.url, remote.url)) continue;
             text = try manifest.put(env.a, text, kind, next);
             try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
         }
