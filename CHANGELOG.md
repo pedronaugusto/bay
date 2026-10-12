@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A path dependency that is no workspace member is refused while its own pins are behind the selection, as a member is: Zig builds it from its directory with its manifest's pins, which no fork rewrites, so it built stale versions without a word.
+
 ## [0.1.6] - 2026-10-12
 
 ### Fixed

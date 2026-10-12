@@ -130,6 +130,7 @@ and `bay tidy` writes them.
 | A coexisting line whose own pins must be rewritten | Refused: Zig would rewrite every line |
 | A member reached by its directory whose pins are behind the selection, or reached by hash as well | Refused: Zig reads its pins as written, or builds it twice |
 | A package naming itself in `.coexist` | Refused: a package builds one line of itself |
+| A path dependency whose own pins are behind the selection | Refused: Zig builds it with its pins as written; name it in `bay.work` to have them tidied |
 | Packages that depend on each other in a ring | Refused |
 
 A version names one content, so every published change gets its own `.version`. A

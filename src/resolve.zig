@@ -255,6 +255,13 @@ fn reachedByDirectory(r: Resolution) !void {
         if (by_hash) try say.fail(io, "{s} is reached by its directory and pinned by hash, which Zig builds as two packages: reach it one way", .{name});
         if ((try r.rewritesOf(main)).len != 0) try say.fail(io, "{s} is reached by its directory, where Zig reads its own pins, and they are behind the selection: tidy it (bay --workspace tidy), or pin it at its release", .{name});
     }
+    // A path dependency that is no member is built the same way: from its
+    // directory, with its own manifest's pins, which no fork can rewrite.
+    for (r.graph.selected.values()) |revision| {
+        if (revision.place != .directory) continue;
+        if ((try r.rewritesOf(revision)).len == 0) continue;
+        try say.fail(io, "{s} is a path dependency, which Zig builds with its own manifest's pins, and they are behind the selection: raise them in {s}, or name it in bay.work, where bay --workspace tidy does", .{ revision.identity.name, revision.place.directory });
+    }
 }
 
 /// Every pin of what is built: the main modules' and the selected revisions'.

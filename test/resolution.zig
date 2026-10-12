@@ -613,6 +613,25 @@ test "a workspace's members may each name packages whose lines coexist, and a pa
     try std.testing.expect(std.mem.find(u8, refusal.stderr, "lib names itself in .coexist") != null);
 }
 
+test "a path dependency with pins behind the selection is refused, as Zig would build them as written" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // a pins c 0.1.0 and is no member, taken by path; b selects c 0.1.1.
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ ".a = .{ .path = \"../a\" },", try f.pin("b", "b") }), &.{ "a", "b" }, main_ab);
+    const refusal = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(refused(refusal));
+    try std.testing.expect(std.mem.find(u8, refusal.stderr, "a is a path dependency, which Zig builds with its own manifest's pins, and they are behind the selection") != null);
+    // Developed in the workspace, its pins are tidied with the rest.
+    try f.write(".", "bay.work", ".{ .members = .{ \"app\", \"a\" } }\n");
+    try std.testing.expect(succeeded(try f.bay(".", &.{ "--workspace", "tidy" })));
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "a sees 0.1.1, b sees 0.1.1") != null);
+}
+
 test "a package that is a directory in one place and pinned in another is refused, and an override makes it one" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
