@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-12
+
 ### Fixed
 
 - `bay add <url>?ref=<tag>` pins the commit the tag names. A `git+https` URL went to `zig fetch` as given, and Zig reads a ref only from the fragment, so it fetched HEAD and the pin recorded the tag beside the head's commit; the two agreed only while the tag was at the head.
@@ -43,7 +45,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/pedronaugusto/bay/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/pedronaugusto/bay/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/pedronaugusto/bay/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pedronaugusto/bay/releases/tag/v0.1.0
