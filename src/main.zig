@@ -16,6 +16,7 @@ const each = @import("each.zig");
 const store = @import("store.zig");
 const licenses = @import("licenses.zig");
 const say = @import("say.zig");
+const release = @import("release");
 
 const usage =
     \\usage: bay <command> [arguments]
@@ -57,6 +58,8 @@ const usage =
     \\  bay init                   the same for the package here, adding only what is
     \\                             missing; zig init first where there is no package
     \\
+    \\  bay version                the version of bay
+    \\
     \\bay --locked <command> refuses to change a manifest, as CI should.
     \\bay --workspace [--jobs <n>] <command> runs it in every member of the workspace,
     \\each after the members it ships with.
@@ -71,6 +74,10 @@ pub fn main(init: std.process.Init) !void {
     const args = (try init.minimal.args.toSlice(a))[1..];
     if (args.len == 0 or std.mem.eql(u8, args[0], "help") or std.mem.eql(u8, args[0], "--help")) {
         try Io.File.stdout().writeStreamingAll(io, usage);
+        return;
+    }
+    if (std.mem.eql(u8, args[0], "version") or std.mem.eql(u8, args[0], "--version")) {
+        try Io.File.stdout().writeStreamingAll(io, "bay " ++ release.version ++ "\n");
         return;
     }
     // Everything bay runs can run bay again, as the same program: a tool that builds

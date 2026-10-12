@@ -536,3 +536,15 @@ test "an install builds what the package ships, whatever its development pins" {
     try std.testing.expect(succeeded(installed));
     try f.tmp.dir.access(f.io, if (@import("builtin").os.tag == .windows) "prefix/bin/app.exe" else "prefix/bin/app", .{});
 }
+
+test "bay names its version, the one its manifest gives" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    for ([_][]const u8{ "version", "--version" }) |command| {
+        const said = try f.bay(".", &.{command});
+        try std.testing.expect(succeeded(said));
+        try std.testing.expectEqualStrings("bay " ++ options.version ++ "\n", said.stdout);
+    }
+}

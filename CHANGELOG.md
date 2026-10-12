@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-12
+
 ### Added
 
 - `.dev_dependencies` beside `.dependencies`, and the development build that runs a package's `dev` function with them. The development build has the package's own dependencies too, as a crate's tests have its dependencies in Cargo: a dependency the package ships and develops with is listed once, and a name pinned differently in both lists is refused.
@@ -13,10 +15,13 @@
 - `bay update` follows a recorded ref: a branch to its head, a release tag to the newest release on its line.
 - `git+ssh://` and `git+file://` dependencies, fetched with the system's git to the hash Zig gives the same tree; a tree's paths stay inside it.
 - The exact Zig a package names (`.zig_version`, else `.minimum_zig_version`, 0.17.0 or newer), downloaded from ziglang.org and verified against the index's SHA-256 and Zig's minisign key. With no Zig named or on the `PATH`, bay starts a package with the Zig it was built with, installed as any other.
-- `bay tree` with `--why` and `--duplicates`, `bay outdated`, `bay licenses [--dev]` and `bay locate`.
+- `bay tree` with `--why` and `--duplicates`, `bay outdated`, `bay licenses [--dev]`, `bay locate` and `bay version`.
 - `bay vendor`: Zig unpacks every package the graph reads into the project's `zig-pkg`, which both builds read, so a project resolves and builds with no remote reachable.
 - `bay <step>` resolves and fetches before it looks for the step; a build runs in its own root, where Zig reads every path of it.
 - `bay new`, `init`, `add`, `remove`, `update`, `list`, `fetch`, and `bay dev`; bay sets `BAY` to itself for what it runs.
 - `bay install`, `install --list`, `install --update` and `uninstall`: global installs, as `cargo install` makes them, built as anything depending on the package would build it, without its development, and recorded by absolute place.
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
+
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/pedronaugusto/bay/releases/tag/v0.1.0
