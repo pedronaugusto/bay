@@ -558,6 +558,61 @@ test "a member a build reaches by path is built from that path, with no fork Zig
     try std.testing.expect(std.mem.find(u8, built.stderr, "c 0.1.0") != null);
 }
 
+test "a member reached by its directory with pins behind the selection is refused, and builds once tidied" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // a pins c 0.1.0 and is taken by path, where Zig reads its own pin; b selects c 0.1.1.
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ ".a = .{ .path = \"../a\" },", try f.pin("b", "b") }), &.{ "a", "b" }, main_ab);
+    try f.write(".", "bay.work", ".{ .members = .{ \"app\", \"a\" } }\n");
+    const refusal = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(refused(refusal));
+    try std.testing.expect(std.mem.find(u8, refusal.stderr, "a is reached by its directory, where Zig reads its own pins, and they are behind the selection") != null);
+    try std.testing.expect(succeeded(try f.bay(".", &.{ "--workspace", "tidy" })));
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "a sees 0.1.1, b sees 0.1.1") != null);
+}
+
+test "a member reached by its directory and pinned by hash in one build is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("c", "c", "0.1.0", "", &.{}, "pub const version = \"0.1.0\"; " ++ shared);
+    try f.package("d", "d", "0.1.0", try f.pin("c", "c"), &.{"c"}, "pub const seen = @import(\"c\").version;");
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ ".c = .{ .path = \"../c\" },", try f.pin("d", "d") }), &.{ "c", "d" }, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"{s} {s}\\n\", .{ @import(\"c\").version, @import(\"d\").seen }); }");
+    try f.write(".", "bay.work", ".{ .members = .{ \"app\", \"c\" } }\n");
+    const refusal = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(refused(refusal));
+    try std.testing.expect(std.mem.find(u8, refusal.stderr, "c is reached by its directory and pinned by hash, which Zig builds as two packages") != null);
+}
+
+test "a workspace's members may each name packages whose lines coexist, and a package naming itself is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("c1", "c", "0.1.0", "", &.{}, "pub const version = \"0.1.0\";");
+    try f.package("c3", "c", "0.2.0", "", &.{}, "pub const version = \"0.2.0\";");
+    try f.package("a", "a", "0.1.0", try f.pin("c", "c1"), &.{"c"}, "pub const seen = @import(\"c\").version;");
+    // lib moves to c 0.2.0 and says the old line may stay beside it.
+    try f.package("lib", "lib", "0.1.0", "", &.{"c"}, "pub const seen = @import(\"c\").version;");
+    try f.write("lib", "build.zig.zon", try f.a.print(".{{ .name = .lib, .version = \"0.1.0\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .paths = .{{\"\"}}, .dependencies = .{{ {s} }}, .coexist = .{{ .c }} }}\n", .{ fingerprint("lib"), try f.pin("c", "c3") }));
+    try f.application("app", try f.pin("a", "a"), &.{"a"}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"a sees {s}\\n\", .{@import(\"a\").seen}); }");
+    try f.write(".", "bay.work", ".{ .members = .{ \"app\", \"lib\" } }\n");
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "a sees 0.1.0") != null);
+    // A package has one line of itself.
+    try f.write("lib", "build.zig.zon", try f.a.print(".{{ .name = .lib, .version = \"0.1.0\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .paths = .{{\"\"}}, .dependencies = .{{ {s} }}, .coexist = .{{ .c, .lib }} }}\n", .{ fingerprint("lib"), try f.pin("c", "c3") }));
+    const refusal = try f.bay("lib", &.{"build"});
+    try std.testing.expect(refused(refusal));
+    try std.testing.expect(std.mem.find(u8, refusal.stderr, "lib names itself in .coexist") != null);
+}
+
 test "a package that is a directory in one place and pinned in another is refused, and an override makes it one" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

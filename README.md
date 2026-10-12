@@ -128,6 +128,8 @@ and `bay tidy` writes them.
 | Two lines of one package: a new major, or below 1.0 a new minor | Refused, naming who asks for each, unless the package lists it in `.coexist` |
 | A package that is a directory in one place and pinned in another | Refused, naming both: Zig would build two; `.overrides` makes one |
 | A coexisting line whose own pins must be rewritten | Refused: Zig would rewrite every line |
+| A member reached by its directory whose pins are behind the selection, or reached by hash as well | Refused: Zig reads its pins as written, or builds it twice |
+| A package naming itself in `.coexist` | Refused: a package builds one line of itself |
 | Packages that depend on each other in a ring | Refused |
 
 A version names one content, so every published change gets its own `.version`. A
@@ -148,6 +150,10 @@ Every member is built from its directory wherever the graph pins it, so a change
 one is built and tested against the others before it is published anywhere. A member
 whose own pins are behind the selection is built from a copy of its working tree with
 only those pins rewritten, so no member's manifest has to change for another to build.
+A member the graph reaches by its directory (a `.path` pin) is the exception: Zig builds
+it from there with its own manifest's pins, so bay refuses it while those pins are behind
+the selection, and when a pin by hash reaches it too, which Zig would build as a second
+package. `bay --workspace tidy` settles the first.
 
 A member's pins are what everyone outside the workspace builds with, so `bay tidy`
 pins each member the package depends on at its release: the tag of the member's own

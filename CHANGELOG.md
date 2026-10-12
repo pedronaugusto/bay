@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A workspace member a build reaches by its directory is refused while its own pins are behind the selection, and when a pin by hash reaches it as well: Zig builds a path dependency with its own manifest's pins and cannot fork it, so 0.1.5 built the stale pins without a word, or the member twice. `bay --workspace tidy` settles the first.
+- A workspace is one graph for `.coexist` too: the packages every member names may keep two lines, where only the package being built was read. A package naming itself there is refused.
+
 ## [0.1.5] - 2026-10-12
 
 ### Fixed

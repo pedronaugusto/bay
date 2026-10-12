@@ -157,7 +157,7 @@ pub fn resolve(input: Input) !Resolution {
         .remote => |remote| try chosen.append(a, remote.hash),
         .path => {},
     };
-    const graph = try select.select(a, packages, &.{}, mains.items, .{ .coexist = input.parsed.coexist, .chosen = chosen.items });
+    const graph = try select.select(a, packages, &.{}, mains.items, .{ .coexist = try coexisting(input), .chosen = chosen.items });
     if (graph.problem) |problem| try refuse(a, input.io, graph, problem);
     var resolution: Resolution = .{ .input = input, .store = packages, .graph = graph, .places = try places(a, graph, chosen.items), .raises = &.{} };
     try materializable(resolution);
@@ -165,13 +165,39 @@ pub fn resolve(input: Input) !Resolution {
     return resolution;
 }
 
+/// The packages whose lines may coexist: what the package names, and in a
+/// workspace what every member names, as the workspace is one graph.
+fn coexisting(input: Input) ![]const []const u8 {
+    const a = input.a;
+    var names: std.ArrayList([]const u8) = .empty;
+    try names.appendSlice(a, input.parsed.coexist);
+    if (contains(input.parsed.coexist, input.parsed.name)) try say.fail(input.io, "{s} names itself in .coexist; a package builds one line of itself", .{input.parsed.name});
+    for (input.members) |member| {
+        const path = try std.fs.path.join(a, &.{ member, "build.zig.zon" });
+        const text = try Io.Dir.cwd().readFileAlloc(input.io, path, a, .limited(1 << 20));
+        const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
+            error.InvalidManifest => try say.fail(input.io, "{s} is not a manifest bay can read", .{path}),
+            error.OutOfMemory => |e| return e,
+        };
+        if (contains(parsed.coexist, parsed.name)) try say.fail(input.io, "{s} names itself in .coexist; a package builds one line of itself", .{parsed.name});
+        for (parsed.coexist) |name| if (!contains(names.items, name)) try names.append(a, name);
+    }
+    return names.items;
+}
+
+fn contains(list: []const []const u8, item: []const u8) bool {
+    for (list) |each| if (std.mem.eql(u8, each, item)) return true;
+    return false;
+}
+
 /// The one place of each package: the selected revision's, or the highest hash pinned for a main module.
 /// Between equal versions of a main module, the hash the root names stands for it.
 /// What Zig cannot build as one graph, refused in a sentence: a package that the
 /// built graph has as a directory somewhere and at another place elsewhere (Zig
 /// makes the directory a package of its own beside the other; `.overrides` makes
-/// one of them), and a package two of whose lines coexist while one needs a fork
-/// (Zig matches a fork by what a package is, not by its line).
+/// one of them), a package two of whose lines coexist while one needs a fork
+/// (Zig matches a fork by what a package is, not by its line), and a main module
+/// reached by its directory that Zig cannot build as selected (below).
 fn materializable(r: Resolution) !void {
     const a = r.input.a;
     const io = r.input.io;
@@ -196,6 +222,38 @@ fn materializable(r: Resolution) !void {
         if (lines.get(revision.identity.name).? < 2) continue; // safe: every selected name was counted
         if ((try r.rewritesOf(revision)).len == 0) continue;
         try say.fail(io, "{s} {f} coexists with another line of {s} and needs its pins rewritten, which Zig would apply to every line: pin it where its own pins agree with the selection", .{ revision.identity.name, revision.version, revision.identity.name });
+    }
+    try reachedByDirectory(r);
+}
+
+/// A main module other than the package (a workspace member) that the built
+/// graph reaches by its directory is built from that directory with its own
+/// manifest's pins: Zig forks only what it fetches by hash. So its pins must be
+/// the selection's, and no pin may reach it by hash as well, which Zig would
+/// build as a second package.
+fn reachedByDirectory(r: Resolution) !void {
+    const a = r.input.a;
+    const io = r.input.io;
+    // The pins Zig reads: every built revision's own, and the package's development ones.
+    var read: std.ArrayList(select.Pin) = .empty;
+    for (try builtPins(a, r.graph)) |pin| if (!pin.dev) try read.append(a, pin);
+    try read.appendSlice(a, try store.pins(a, r.input.package, r.input.parsed.dev));
+    for (r.graph.mains.keys(), r.graph.mains.values()) |key, main| {
+        if (main.place != .directory or std.mem.eql(u8, main.place.directory, r.input.package)) continue;
+        var by_directory = false;
+        var by_hash = false;
+        for (read.items) |pin| {
+            const reached = r.graph.keys.get(pin.place.key()) orelse continue;
+            if (!std.mem.eql(u8, reached, key)) continue;
+            switch (pin.place) {
+                .directory => by_directory = true,
+                .remote => by_hash = true,
+            }
+        }
+        if (!by_directory) continue;
+        const name = main.identity.name;
+        if (by_hash) try say.fail(io, "{s} is reached by its directory and pinned by hash, which Zig builds as two packages: reach it one way", .{name});
+        if ((try r.rewritesOf(main)).len != 0) try say.fail(io, "{s} is reached by its directory, where Zig reads its own pins, and they are behind the selection: tidy it (bay --workspace tidy), or pin it at its release", .{name});
     }
 }
 
