@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-12
+
 ### Fixed
 
 - A workspace member a build reaches only by a path, at the member's own directory, is no longer given a `--fork`: Zig refuses a fork that matches no package it fetched, so the build failed. bay forks only the packages a build fetches by hash.
+
+### Changed
+
+- Pins aegis 0.1.2.
 
 ## [0.1.4] - 2026-10-12
 
@@ -64,7 +70,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/pedronaugusto/bay/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/pedronaugusto/bay/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/pedronaugusto/bay/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/pedronaugusto/bay/compare/v0.1.1...v0.1.2
