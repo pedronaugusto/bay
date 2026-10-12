@@ -505,14 +505,17 @@ fn update(env: Env, names: []const []const u8) !u8 {
 /// `bay upgrade`: each dependency named, or every one with a git URL when none
 /// is, pinned at the newest release tag of its repository, as `cargo upgrade`
 /// moves a requirement: across lines, whether it was pinned at a tag or at a
-/// bare commit, in the list or lists it is in. All are written, then the
-/// package is tidied once. A repository without a release tag stays as it is.
+/// bare commit, in the list or lists it is in, leaving out what its newest
+/// release retracts. All are written, then the package is tidied once. A
+/// repository without a release tag stays as it is.
 fn upgrade(env: Env, names: []const []const u8) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
     for (names) |name| {
         if (!among(parsed.normal, name) and !among(parsed.dev, name)) try say.fail(env.io, "{s} is not a dependency", .{name});
     }
     var text = try env.readManifest();
+    const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
+    const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
     for ([_]manifest.Kind{ .normal, .dev }) |kind| {
         for (if (kind == .normal) parsed.normal else parsed.dev) |dependency| {
             if (names.len != 0 and !contains(names, dependency.name)) continue;
@@ -523,7 +526,9 @@ fn upgrade(env: Env, names: []const []const u8) !u8 {
             if (!std.mem.startsWith(u8, remote.url, "git+")) continue;
             const repository = remotes.repository(remote.url) orelse continue;
             const tags = try remotes.tags(env.io, env.a, remote.url);
-            const newest = remotes.newestVersion(tags) orelse {
+            // What the newest release retracts is left out, as `update` leaves it.
+            const latest = try published.newest(env.io, env.a, env.zig, packages, scratch, remote.url);
+            const newest = remotes.newestKept(tags, if (latest) |l| l.retracted else &.{}) orelse {
                 try say.note(env.io, "{s} has no release tag; it stays as it is", .{dependency.name});
                 continue;
             };

@@ -374,6 +374,18 @@ test "a repository's release line is followed by update, a new line and a retrac
     try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "lib 0.1.2 is retracted by its release 0.2.0") != null);
 }
 
+test "upgrade takes the newest release that its newest release does not retract" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    _ = try gitRepository(&f);
+    // 0.3.0 retracts itself: across lines, upgrade stops at 0.2.0.
+    try releaseLib(&f, &.{ "0.1.1", "0.2.0", "0.3.0" }, "0.3.0");
+    try std.testing.expect(succeeded(try f.bay("app", &.{"upgrade"})));
+    try std.testing.expect(std.mem.find(u8, try manifestOf(&f, "app"), "?ref=v0.2.0#") != null);
+}
+
 fn gitUrl(f: *Fixture, dir: []const u8) ![]const u8 {
     return f.a.print("git+file://{s}{s}", .{ if (f.root[0] == '/') "" else "/", try std.mem.replaceOwned(u8, f.a, try std.fs.path.join(f.a, &.{ f.root, dir }), "\\", "/") });
 }

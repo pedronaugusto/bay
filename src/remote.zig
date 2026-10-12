@@ -137,6 +137,12 @@ pub fn newestVersion(list: []const Tag) ?Newest {
     return newestWhere(list, null, &.{});
 }
 
+/// The newest version, as `newestVersion` picks one, leaving out each version
+/// `retracted` names.
+pub fn newestKept(list: []const Tag, retracted: []const []const u8) ?Newest {
+    return newestWhere(list, null, retracted);
+}
+
 /// The newest version on `line`'s line (`sameLine`), as `newestVersion` picks
 /// one, leaving out each version `retracted` names.
 pub fn newestOnLine(list: []const Tag, line: std.SemanticVersion, retracted: []const []const u8) ?Newest {

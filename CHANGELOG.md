@@ -4,7 +4,7 @@
 
 ### Added
 
-- `bay upgrade [name...]` pins each dependency named, or every one with a git URL, at the newest release tag of its repository, across lines and from a bare commit too, in the list it is in. A repository with no release tag stays as it is, and is said to.
+- `bay upgrade [name...]` pins each dependency named, or every one with a git URL, at the newest release tag of its repository that its newest release does not retract, across lines and from a bare commit too, in the list it is in. A repository with no release tag stays as it is, and is said to.
 - `bay add` takes several URLs. It pins all of them, then tidies once, as `bay upgrade` does, so packages that pin each other can move together.
 
 ### Fixed
