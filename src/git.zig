@@ -77,7 +77,7 @@ pub fn tagListing(io: Io, a: std.mem.Allocator, url: []const u8) ![]const u8 {
     return git(io, a, null, &.{ "ls-remote", "--tags", parts(url).repository });
 }
 
-fn isCommit(text: []const u8) bool {
+pub fn isCommit(text: []const u8) bool {
     if (text.len != 40 and text.len != 64) return false;
     for (text) |c| if (!std.ascii.isDigit(c) and !(c >= 'a' and c <= 'f')) return false;
     return true;

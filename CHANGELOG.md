@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `bay add <url>?ref=<tag>` pins the commit the tag names. A `git+https` URL went to `zig fetch` as given, and Zig reads a ref only from the fragment, so it fetched HEAD and the pin recorded the tag beside the head's commit; the two agreed only while the tag was at the head.
+
 ## [0.1.2] - 2026-10-12
 
 ### Fixed
