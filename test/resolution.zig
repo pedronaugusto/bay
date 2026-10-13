@@ -632,6 +632,23 @@ test "a path dependency with pins behind the selection is refused, as Zig would 
     try std.testing.expect(std.mem.find(u8, built.stderr, "a sees 0.1.1, b sees 0.1.1") != null);
 }
 
+test "a member checked out a second time is that member, and tidy there keeps its own pins" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("c1", "c", "0.1.0", "", &.{}, "pub const version = \"0.1.0\";");
+    try f.package("c2", "c", "0.1.1", "", &.{}, "pub const version = \"0.1.1\";");
+    // c is developed beside them. lib is a member at c 0.1.0; a landing's scratch
+    // checkout of lib has moved it to 0.1.1, which a stale copy must not undo.
+    try f.package("lib", "lib", "0.1.0", try f.pin("c", "c1"), &.{"c"}, "pub const seen = @import(\"c\").version;");
+    try f.package("work/lib-copy", "lib", "0.1.0", try f.pin("c", "c2"), &.{"c"}, "pub const seen = @import(\"c\").version;");
+    try f.write(".", "bay.work", ".{ .members = .{ \"lib\", \"c2\" } }\n");
+    try std.testing.expect(succeeded(try f.bay("work/lib-copy", &.{"tidy"})));
+    const after = try f.tmp.dir.readFileAlloc(f.io, "work/lib-copy/build.zig.zon", f.a, .limited(1 << 16));
+    try std.testing.expect(std.mem.find(u8, after, "c-0.1.1-") != null);
+}
+
 test "a package that is a directory in one place and pinned in another is refused, and an override makes it one" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

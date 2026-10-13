@@ -10,16 +10,38 @@
 const std = @import("std");
 const Io = std.Io;
 const say = @import("say.zig");
+const manifest = @import("manifest.zig");
 
 pub const file_name = "bay.work";
 
 /// The other members of the workspace holding `package`, as absolute
-/// directories; none outside a workspace.
+/// directories; none outside a workspace. A member that is the package itself,
+/// at its own directory or checked out elsewhere (a landing's scratch worktree,
+/// a second clone), is left out: the package under development stands for it.
 pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []const u8 {
     const every = try all(io, a, package) orelse return &.{};
+    const own = try identity(io, a, package);
     var list: std.ArrayList([]const u8) = .empty;
-    for (every) |member| if (!std.mem.eql(u8, member, package)) try list.append(a, member);
+    for (every) |member| {
+        if (std.mem.eql(u8, member, package)) continue;
+        const theirs = try identity(io, a, member);
+        if (std.mem.eql(u8, theirs.name, own.name) and theirs.fingerprint == own.fingerprint) continue;
+        try list.append(a, member);
+    }
     return list.toOwnedSlice(a);
+}
+
+const Identity = struct { name: []const u8, fingerprint: u64 };
+
+/// What a package is, as its manifest names it.
+fn identity(io: Io, a: std.mem.Allocator, directory: []const u8) !Identity {
+    const path = try std.fs.path.join(a, &.{ directory, "build.zig.zon" });
+    const text = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+    const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
+        error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{path}),
+        error.OutOfMemory => |e| return e,
+    };
+    return .{ .name = parsed.name, .fingerprint = parsed.fingerprint };
 }
 
 /// Every member of the workspace found from `from` up, as absolute directories

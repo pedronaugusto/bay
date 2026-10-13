@@ -316,6 +316,11 @@ fn raisesOf(r: Resolution, list: *std.ArrayList(manifest.Repin), directory: []co
             if (pin.place != .remote) continue; // a path dependency names a directory, not a version
             const target = r.wanted(pin) orelse continue;
             if (target != .remote or std.mem.eql(u8, target.remote.hash, pin.place.remote.hash)) continue;
+            // Selection never goes below a pin it counted: a lower one means the
+            // graph read is not the one this manifest makes, so nothing is written.
+            if (r.graph.read.get(pin.place.key())) |pinned| if (r.graph.read.get(target.key())) |selected| {
+                if (selected.version.order(pinned.version) == .lt) try say.fail(r.input.io, "{s}: {s} would go from {f} down to {f}, below what the manifest pins; the workspace holds another copy of a package, or its graph is stale", .{ directory, dependency.name, pinned.version, selected.version });
+            };
             try list.append(r.input.a, .{ .directory = directory, .kind = kind, .from = dependency, .to = .{ .name = dependency.name, .lazy = dependency.lazy, .source = .{ .remote = .{ .url = target.remote.url, .hash = target.remote.hash } } } });
         }
     }
