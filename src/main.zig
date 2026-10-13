@@ -452,19 +452,33 @@ fn fetched(env: Env, url: []const u8, name: ?[]const u8) !?manifest.Dependency {
 }
 
 fn removeCommand(env: Env, args: []const []const u8) !u8 {
-    var kind: manifest.Kind = .normal;
+    var dev = false;
     var name: ?[]const u8 = null;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--dev")) kind = .dev else if (name == null) name = arg else try say.fail(env.io, "remove takes one name", .{});
+        if (std.mem.eql(u8, arg, "--dev")) dev = true else if (name == null) name = arg else try say.fail(env.io, "remove takes one name", .{});
     }
     const target = name orelse try say.fail(env.io, "remove needs a name", .{});
-    const edited = manifest.remove(env.a, try env.readManifest(), kind, target) catch |err| switch (err) {
-        error.NotFound => try say.fail(env.io, "no {s} in .{s}", .{ target, kind.field() }),
-        else => return err,
-    };
+    const parsed = try manifest.parse(env.a, try env.readManifest());
+    const kind = removedFrom(parsed, target, dev) orelse if (dev)
+        try say.fail(env.io, "no {s} in .dev_dependencies", .{target})
+    else
+        try say.fail(env.io, "{s} is in neither .dependencies nor .dev_dependencies", .{target});
+    const edited = try manifest.remove(env.a, try env.readManifest(), kind, target);
     try writeManifest(env, edited);
     try say.note(env.io, "{s} removed from .{s}", .{ target, kind.field() });
+    if (kind == .normal and among(parsed.dev, target)) try say.note(env.io, "its development pin stays; bay remove --dev {s} removes it", .{target});
     return tidy(env);
+}
+
+/// The list `bay remove` takes a name from: `.dev_dependencies` when `--dev`
+/// is given; otherwise `.dependencies`, or `.dev_dependencies` when the name
+/// is only there. A package may ship a dependency and develop with it, so a
+/// name in both lists leaves its development pin unless `--dev` names it.
+fn removedFrom(parsed: manifest.Manifest, name: []const u8, dev: bool) ?manifest.Kind {
+    if (dev) return if (among(parsed.dev, name)) .dev else null;
+    if (among(parsed.normal, name)) return .normal;
+    if (among(parsed.dev, name)) return .dev;
+    return null;
 }
 
 /// `bay update`: each remote pin of either kind (or those named) fetched again
@@ -655,6 +669,27 @@ test "update follows a recorded ref and leaves a commit pin" {
     try std.testing.expectEqualStrings("git+https://example.org/x#main", branch);
     try std.testing.expectEqual(null, manifest.following(a, "git+https://example.org/x#5d2a92141f0298d76dc5fd602526d55a62b4e11a"));
     try std.testing.expectEqualStrings("https://example.org/x.tar.gz", manifest.following(a, "https://example.org/x.tar.gz").?);
+}
+
+test "remove finds a name in the list that holds it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try manifest.parse(arena.allocator(),
+        \\.{
+        \\    .name = .sample,
+        \\    .version = "0.1.0",
+        \\    .fingerprint = 0x1,
+        \\    .paths = .{""},
+        \\    .dependencies = .{ .both = .{ .path = "both" }, .shipped = .{ .path = "shipped" } },
+        \\    .dev_dependencies = .{ .both = .{ .path = "both" }, .tool = .{ .path = "tool" } },
+        \\}
+    );
+    try std.testing.expectEqual(manifest.Kind.dev, removedFrom(parsed, "tool", false).?);
+    try std.testing.expectEqual(manifest.Kind.normal, removedFrom(parsed, "shipped", false).?);
+    try std.testing.expectEqual(manifest.Kind.normal, removedFrom(parsed, "both", false).?);
+    try std.testing.expectEqual(manifest.Kind.dev, removedFrom(parsed, "both", true).?);
+    try std.testing.expectEqual(null, removedFrom(parsed, "shipped", true));
+    try std.testing.expectEqual(null, removedFrom(parsed, "absent", false));
 }
 
 test "a step is found in zig build -l's listing" {
