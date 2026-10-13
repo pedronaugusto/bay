@@ -5,6 +5,7 @@
 //! directory, so `bay uninstall` removes exactly that and `--update` follows the
 //! ref an install came from.
 const std = @import("std");
+const ensign = @import("ensign");
 const builtin = @import("builtin");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
@@ -35,23 +36,46 @@ pub const Context = struct {
     package: ?[]const u8,
 };
 
+/// `bay install`'s arguments.
+pub const Args = struct {
+    prefix: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    force: bool = false,
+    list: bool = false,
+    update: bool = false,
+    sources: []const []const u8 = &.{},
+
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "Build a package's programs (ReleaseSafe) into <prefix>/bin, ~/.local/bin by default; with no source, the package here",
+        .options = .{
+            .prefix = .{ .value_name = "DIR", .hint = .directory, .help = "Install under this directory's bin" },
+            .name = .{ .help = "The name to record the install under" },
+            .force = .{ .help = "Replace programs another install put in place" },
+            .list = .{ .help = "What bay installed, and from where" },
+            .update = .{ .help = "Reinstall each one named, or every one, from its recorded branch or tag" },
+            .sources = .{ .positional = true, .value_name = "SOURCE", .hint = .directory, .help = "A URL or directory to install from; with --update, the names to reinstall" },
+        },
+        .conflicts = &.{&.{ .list, .update }},
+    };
+};
+
+/// `bay uninstall`'s argument.
+pub const Uninstall = struct {
+    name: []const u8,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "Remove what an install put in place",
+        .options = .{ .name = .{ .positional = true } },
+    };
+};
+
 /// `bay install [--prefix <dir>] [--name <name>] [--force] [<url or directory>]`,
 /// `bay install --list` and `bay install --update [name...]`.
-pub fn command(c: Context, args: []const []const u8) !u8 {
-    var prefix: ?[]const u8 = null;
-    var name: ?[]const u8 = null;
-    var force = false;
-    var mode: enum { one, list, update } = .one;
-    var rest: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--list")) mode = .list else if (std.mem.eql(u8, arg, "--update")) mode = .update else if (std.mem.eql(u8, arg, "--force")) force = true else if (std.mem.eql(u8, arg, "--prefix") or std.mem.eql(u8, arg, "--name")) {
-            i += 1;
-            if (i == args.len) try say.fail(c.io, "{s} needs a value", .{arg});
-            if (std.mem.eql(u8, arg, "--prefix")) prefix = args[i] else name = args[i];
-        } else try rest.append(c.a, arg);
-    }
+pub fn command(c: Context, args: Args) !u8 {
+    const mode: enum { one, list, update } = if (args.list) .list else if (args.update) .update else .one;
+    const rest = args.sources;
+    const prefix = args.prefix;
+    const name = args.name;
+    const force = args.force;
     var records = try load(c);
     switch (mode) {
         .list => {
@@ -64,7 +88,7 @@ pub fn command(c: Context, args: []const []const u8) !u8 {
         },
         .update => {
             for (records.items) |record| {
-                if (rest.items.len != 0 and !contains(rest.items, record.name)) continue;
+                if (rest.len != 0 and !contains(rest, record.name)) continue;
                 if (std.mem.find(u8, record.source, "://") == null) {
                     if (try one(c, &records, record.source, record.prefix, record.name, true) != 0) return 1;
                     continue;
@@ -78,19 +102,18 @@ pub fn command(c: Context, args: []const []const u8) !u8 {
             return 0;
         },
         .one => {
-            if (rest.items.len > 1) try say.fail(c.io, "install takes one url or directory", .{});
-            const source = if (rest.items.len == 1) rest.items[0] else c.package orelse try say.fail(c.io, "install needs a url or directory, or a package here", .{});
+            if (rest.len > 1) try say.fail(c.io, "install takes one url or directory", .{});
+            const source = if (rest.len == 1) rest[0] else c.package orelse try say.fail(c.io, "install needs a url or directory, or a package here", .{});
             return one(c, &records, source, prefix orelse try defaultPrefix(c), name, force);
         },
     }
 }
 
 /// `bay uninstall <name>`: removes the files the install of `name` put in place.
-pub fn uninstall(c: Context, args: []const []const u8) !u8 {
-    if (args.len != 1) try say.fail(c.io, "uninstall takes one name", .{});
+pub fn uninstall(c: Context, name: []const u8) !u8 {
     var records = try load(c);
     for (records.items, 0..) |record, index| {
-        if (!std.mem.eql(u8, record.name, args[0])) continue;
+        if (!std.mem.eql(u8, record.name, name)) continue;
         for (record.files) |file| Io.Dir.cwd().deleteFile(c.io, try std.fs.path.join(c.a, &.{ record.prefix, file })) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
@@ -100,7 +123,7 @@ pub fn uninstall(c: Context, args: []const []const u8) !u8 {
         try say.note(c.io, "{s} uninstalled", .{record.name});
         return 0;
     }
-    try say.fail(c.io, "{s} is not installed; bay install --list names what is", .{args[0]});
+    try say.fail(c.io, "{s} is not installed; bay install --list names what is", .{name});
 }
 
 /// The install build of the copy in `work`, as bay builds any package: with the

@@ -18,128 +18,225 @@ const store = @import("store.zig");
 const licenses = @import("licenses.zig");
 const say = @import("say.zig");
 const release = @import("release");
+const aegis = @import("aegis");
+const ensign = @import("ensign");
 
-const usage =
-    \\usage: bay <command> [arguments]
-    \\
-    \\  bay build [args]           zig build: the package's install step
-    \\  bay <step> [args]          the step from the package's build, or else from its
-    \\                             development build, which has the dev dependencies
-    \\  bay dev [args]             zig build in the development build, as given
-    \\  bay add [--dev] [--lazy] [--name <name>] <url or directory>...
-    \\                             fetch and pin dependencies, then tidy once; a name already
-    \\                             pinned stays in its list, --dev picks the list of a new one
-    \\  bay remove [--dev] <name>  drop a dependency
-    \\  bay update [name...]       pin what each recorded ref names now: a branch at its
-    \\                             head, a release tag at the newest release on its line
-    \\  bay upgrade [name...]      pin each at the newest release tag of its repository, across
-    \\                             lines, whether it was pinned at a tag or a commit
-    \\  bay tidy                   pin each package at the version selection picks: the
-    \\                             highest any manifest in the graph asks for (Go's MVS);
-    \\                             in a workspace, each member at its release
-    \\  bay tree [--why <name>] [--duplicates]
-    \\                             the resolved graph; the paths to one package; the ones
-    \\                             pinned at more than one revision, and who pins each
-    \\  bay outdated               packages the builds use with a newer release, or at a
-    \\                             version their newest release retracts
-    \\  bay licenses [--dev]       each package a build contains, with the license it states;
-    \\                             --dev adds what only development uses
-    \\  bay vendor                 every package the builds use, into zig-pkg, for building offline
-    \\  bay list                   both lists, with their pins
-    \\  bay locate [--dev]         the package's directory, or its development build's root,
-    \\                             which the paths of a configured development build are relative to
-    \\  bay fetch                  fetch every dependency of both kinds
-    \\
-    \\  bay install [--prefix <dir>] [--name <name>] [--force] [<url or directory>]
-    \\                             build a package's programs (ReleaseSafe) into <dir>/bin,
-    \\                             ~/.local/bin by default; with no source, the package here
-    \\  bay install --list         what bay installed, and from where
-    \\  bay install --update [name...]
-    \\                             reinstall each from its recorded branch or tag
-    \\  bay uninstall <name>       remove what its install put in place
-    \\  bay new <name>             a new package in a new directory: zig init, then the
-    \\                             empty dev list and a `dev` function
-    \\  bay init                   the same for the package here, adding only what is
-    \\                             missing; zig init first where there is no package
-    \\
-    \\  bay version                the version of bay
-    \\
-    \\bay --locked <command> refuses to change a manifest, as CI should.
-    \\bay --workspace [--jobs <n>] <command> runs it in every member of the workspace,
-    \\each after the members it ships with.
-    \\Arguments after the step go to zig build. Each package builds with the exact Zig it
-    \\names, which bay installs; ZIG names another by hand.
-    \\
-;
+/// bay's command line: what each command takes, its help and completions,
+/// all read from this declaration by ensign.
+pub const Cli = struct {
+    locked: bool = false,
+    workspace: bool = false,
+    jobs: ?aegis.int.Ranged(u16, 1, 4096) = null,
+    command: ?union(enum) {
+        build: Pass,
+        dev: Pass,
+        add: Add,
+        remove: Remove,
+        update: Names,
+        upgrade: Names,
+        tidy,
+        tree: Tree,
+        outdated,
+        licenses: Developed,
+        vendor,
+        list,
+        locate: Developed,
+        fetch,
+        new: New,
+        init,
+        install: install.Args,
+        uninstall: install.Uninstall,
+        version,
+        completions: Completions,
+        step: ensign.External,
+    } = null,
+
+    pub const spec: ensign.Spec(@This()) = .{
+        .name = "bay",
+        .version = release.version,
+        .about = "Dependencies for Zig packages, on Zig's own package manager",
+        .description = "Each package builds with the exact Zig it names, which bay installs; ZIG names another by hand.",
+        .options = .{
+            .locked = .{ .global = true, .help = "Refuse to change a manifest, as CI should" },
+            .workspace = .{ .help = "Run the command in every member of the workspace, each after the members it ships with and is developed with" },
+            .jobs = .{ .short = 'j', .help = "With --workspace, run at most this many members at once; one per CPU by default" },
+        },
+        .commands = .{
+            .build = .{ .help = "Run zig build, the package's install step, with the arguments given" },
+            .dev = .{ .help = "Run zig build in the development build, with the arguments given" },
+            .update = .{ .help = "Pin what each recorded ref names now: a branch at its head, a release tag at the newest release on its line" },
+            .upgrade = .{ .help = "Pin each at the newest release tag of its repository, across lines, whether it was pinned at a tag or a commit" },
+            .licenses = .{ .help = "Each package a build contains, with the license it states" },
+            .locate = .{ .help = "The package's directory, or with --dev its development build's root, which a configured development build's paths are relative to" },
+            .tidy = .{ .help = "Pin each package at the version selection picks: the highest any manifest in the graph asks for (Go's MVS); in a workspace, each member at its release" },
+            .outdated = .{ .help = "Packages the builds use with a newer release, or at a version their newest release retracts" },
+            .vendor = .{ .help = "Every package the builds use, into zig-pkg, for building offline" },
+            .list = .{ .help = "Both lists, with their pins" },
+            .fetch = .{ .help = "Fetch every dependency of both kinds" },
+            .init = .{ .help = "Make the package here one bay develops, adding only what is missing; zig init first where there is no package" },
+            .version = .{ .help = "The version of bay" },
+            .step = .{ .help = "The step from the package's build, or else from its development build, which has the dev dependencies; the arguments go to zig build" },
+        },
+        .examples = &.{
+            .{ .command = "bay add https://github.com/pedronaugusto/aegis", .help = "Pin a dependency at its newest release" },
+            .{ .command = "bay test -Dtest-filter=parse", .help = "Run a step, with arguments for zig build" },
+            .{ .command = "bay --workspace --jobs 4 land", .help = "Land every member of a workspace, in order" },
+        },
+    };
+};
+
+/// The arguments a command passes on to zig build, as given.
+const Pass = struct {
+    args: []const []const u8 = &.{},
+    pub const spec: ensign.Spec(@This()) = .{ .options = .{ .args = .{ .positional = true, .raw = true, .help = "Passed to zig build as given" } } };
+};
+
+const Add = struct {
+    dev: bool = false,
+    lazy: bool = false,
+    name: ?[]const u8 = null,
+    sources: []const []const u8,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "Fetch and pin dependencies, then tidy once",
+        .options = .{
+            .dev = .{ .help = "A new dependency goes in .dev_dependencies; a name already pinned stays in its list" },
+            .lazy = .{ .help = "Fetched only when a build uses it" },
+            .name = .{ .help = "The name to pin the one source given under" },
+            .sources = .{ .positional = true, .value_name = "URL-OR-DIRECTORY", .hint = .directory, .help = "A repository's URL (pinned at its newest release), a git URL with a ref, an archive URL, or a directory" },
+        },
+    };
+};
+
+const Remove = struct {
+    dev: bool = false,
+    name: []const u8,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "Drop a dependency",
+        .options = .{
+            .dev = .{ .help = "From .dev_dependencies, where the name is in both lists" },
+            .name = .{ .positional = true },
+        },
+    };
+};
+
+const Names = struct {
+    names: []const []const u8 = &.{},
+    pub const spec: ensign.Spec(@This()) = .{ .options = .{ .names = .{ .positional = true, .value_name = "NAME", .help = "The dependencies to move; every one when none is named" } } };
+};
+
+const Tree = struct {
+    why: ?[]const u8 = null,
+    duplicates: bool = false,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "The resolved graph",
+        .options = .{
+            .why = .{ .value_name = "NAME", .help = "The paths to one package" },
+            .duplicates = .{ .help = "The packages pinned at more than one revision, and who pins each" },
+        },
+    };
+};
+
+/// A command that can look at the development build too.
+const Developed = struct {
+    dev: bool = false,
+    pub const spec: ensign.Spec(@This()) = .{ .options = .{ .dev = .{ .help = "The development build too" } } };
+};
+
+const Completions = struct {
+    shell: ensign.Shell,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "The completion script for a shell, to write where the shell loads completions from",
+        .options = .{ .shell = .{ .positional = true } },
+    };
+};
+
+const New = struct {
+    name: []const u8,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "A new package in a new directory: zig init, then the empty dev list and a `dev` function",
+        .options = .{ .name = .{ .positional = true, .hint = .directory } },
+    };
+};
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const io = init.io;
-    const args = (try init.minimal.args.toSlice(a))[1..];
-    if (args.len == 0 or std.mem.eql(u8, args[0], "help") or std.mem.eql(u8, args[0], "--help")) {
-        try Io.File.stdout().writeStreamingAll(io, usage);
-        return;
-    }
-    if (std.mem.eql(u8, args[0], "version") or std.mem.eql(u8, args[0], "--version")) {
-        try Io.File.stdout().writeStreamingAll(io, "bay " ++ release.version ++ "\n");
-        return;
+    const cli = ensign.parseOrExit(Cli, init);
+    const command = cli.command orelse {
+        var buffer: [4096]u8 = undefined;
+        var w = Io.File.stdout().writer(io, &buffer);
+        try ensign.writeHelp(Cli, &w.interface, "bay", ensign.terminalWidth(io, .stdout(), init.environ_map) orelse 80);
+        return w.interface.flush();
+    };
+    switch (command) {
+        .version => return Io.File.stdout().writeStreamingAll(io, "bay " ++ release.version ++ "\n"),
+        .completions => |c| {
+            var buffer: [4096]u8 = undefined;
+            var w = Io.File.stdout().writer(io, &buffer);
+            try ensign.writeCompletion(Cli, c.shell, &w.interface, "bay");
+            return w.interface.flush();
+        },
+        else => {},
     }
     // Everything bay runs can run bay again, as the same program: a tool that builds
     // another checkout of the package (a benchmark comparison) needs its development build.
     try init.environ_map.put("BAY", try std.process.executablePathAlloc(io, a));
     // A reported failure has said what went wrong; it ends the run without a trace.
-    const code = dispatch(io, a, init.environ_map, args) catch |err| switch (err) {
+    const code = dispatch(io, a, init.environ_map, cli) catch |err| switch (err) {
         error.Reported => 1,
         else => return err,
     };
     std.process.exit(code);
 }
 
-fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, given: []const []const u8) !u8 {
-    var locked = false;
-    var every = false;
-    var jobs: ?usize = null;
-    var first: usize = 0;
-    while (first < given.len) : (first += 1) {
-        const flag = given[first];
-        if (std.mem.eql(u8, flag, "--locked")) locked = true else if (std.mem.eql(u8, flag, "--workspace")) every = true else if (std.mem.eql(u8, flag, "--jobs") and first + 1 < given.len) {
-            first += 1;
-            jobs = std.fmt.parseUnsigned(usize, given[first], 10) catch try say.fail(io, "--jobs takes a number", .{});
-        } else break;
+fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli: Cli) !u8 {
+    const command = cli.command.?; // safe: main answered a command line without one
+    if (cli.jobs != null and !cli.workspace) try say.fail(io, "--jobs is for --workspace", .{});
+    // Each member runs this bay with the same command, --locked kept.
+    if (cli.workspace) {
+        var member = cli;
+        member.workspace = false;
+        member.jobs = null;
+        const jobs: ?usize = if (cli.jobs) |j| j.raw() else null;
+        return each.run(io, a, environ, jobs, try ensign.render(Cli, a, member));
     }
-    const args = given[first..];
-    if (args.len == 0) try say.fail(io, "--locked, --workspace and --jobs come before a command", .{});
-    if (jobs != null and !every) try say.fail(io, "--jobs is for --workspace", .{});
-    // Each member runs this bay, with --locked when it was given.
-    if (every) return each.run(io, a, environ, jobs, if (locked) try std.mem.concat(a, []const u8, &.{ &.{"--locked"}, args }) else args);
-    // Before a package exists, a Zig that names no version makes it (`toolchain.unpinned`).
-    if (std.mem.eql(u8, args[0], "init")) return initCommand(io, a, try toolchain.unpinned(io, a, environ));
-    if (std.mem.eql(u8, args[0], "new")) return newCommand(io, a, try toolchain.unpinned(io, a, environ), args[1..]);
-    // Global: anywhere, as cargo install is.
-    if (std.mem.eql(u8, args[0], "install") or std.mem.eql(u8, args[0], "uninstall")) {
-        const here = try packageHere(io, a);
-        const zig = if (here) |package| try toolchain.forPackage(io, a, environ, package) else try toolchain.unpinned(io, a, environ);
-        const context: install.Context = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = here };
-        return if (std.mem.eql(u8, args[0], "install")) install.command(context, args[1..]) else install.uninstall(context, args[1..]);
+    switch (command) {
+        // Before a package exists, a Zig that names no version makes it (`toolchain.unpinned`).
+        .init => return initCommand(io, a, try toolchain.unpinned(io, a, environ)),
+        .new => |n| return newCommand(io, a, try toolchain.unpinned(io, a, environ), n.name),
+        // Global: anywhere, as cargo install is.
+        .install, .uninstall => {
+            const here = try packageHere(io, a);
+            const zig = if (here) |package| try toolchain.forPackage(io, a, environ, package) else try toolchain.unpinned(io, a, environ);
+            const context: install.Context = .{ .io = io, .a = a, .zig = zig, .environ = environ, .package = here };
+            return switch (command) {
+                .install => |args| install.command(context, args),
+                .uninstall => |args| install.uninstall(context, args.name),
+                else => unreachable, // unreachable: the outer arm took only these two
+            };
+        },
+        else => {},
     }
     const package = try findPackage(io, a);
-    const env: Env = .{ .io = io, .a = a, .zig = try toolchain.forPackage(io, a, environ, package), .environ = environ, .package = package, .locked = locked };
-    const command = args[0];
-    if (std.mem.eql(u8, command, "add")) return add(env, args[1..]);
-    if (std.mem.eql(u8, command, "remove")) return removeCommand(env, args[1..]);
-    if (std.mem.eql(u8, command, "update")) return update(env, args[1..]);
-    if (std.mem.eql(u8, command, "upgrade")) return upgrade(env, args[1..]);
-    if (std.mem.eql(u8, command, "list")) return list(env);
-    if (std.mem.eql(u8, command, "tidy")) return tidy(env);
-    if (std.mem.eql(u8, command, "locate")) return locate(env, args[1..]);
-    if (std.mem.eql(u8, command, "tree")) return treeCommand(env, args[1..]);
-    if (std.mem.eql(u8, command, "outdated")) return graphCommand(env, .outdated);
-    if (std.mem.eql(u8, command, "licenses")) return licensesCommand(env, args[1..]);
-    if (std.mem.eql(u8, command, "vendor")) return graphCommand(env, .vendor);
-    if (std.mem.eql(u8, command, "fetch")) return fetchAll(env);
-    if (std.mem.eql(u8, command, "build")) return zigBuild(env, .package, &.{}, args[1..]);
-    if (std.mem.eql(u8, command, "dev")) return zigBuild(env, .development, &.{}, args[1..]);
-    return step(env, command, args[1..]);
+    const env: Env = .{ .io = io, .a = a, .zig = try toolchain.forPackage(io, a, environ, package), .environ = environ, .package = package, .locked = cli.locked };
+    return switch (command) {
+        .add => |args| add(env, args),
+        .remove => |args| removeCommand(env, args),
+        .update => |args| update(env, args.names),
+        .upgrade => |args| upgrade(env, args.names),
+        .list => list(env),
+        .tidy => tidy(env),
+        .locate => |args| locate(env, args.dev),
+        .tree => |args| treeCommand(env, args),
+        .outdated => graphCommand(env, .outdated),
+        .licenses => |args| licensesCommand(env, args.dev),
+        .vendor => graphCommand(env, .vendor),
+        .fetch => fetchAll(env),
+        .build => |args| zigBuild(env, .package, &.{}, args.args),
+        .dev => |args| zigBuild(env, .development, &.{}, args.args),
+        .step => |args| step(env, args.name, args.args),
+        .init, .new, .install, .uninstall, .version, .completions => unreachable, // unreachable: answered above
+    };
 }
 
 const Env = struct {
@@ -238,32 +335,21 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
 /// `bay locate [--dev]`: the package's directory, or its development root, on
 /// stdout, as `cargo locate-project` names a project to a script. A configured
 /// build's paths are relative to its root, so a tool reading one resolves them there.
-fn locate(env: Env, args: []const []const u8) !u8 {
-    const dev = args.len == 1 and std.mem.eql(u8, args[0], "--dev");
-    if (args.len > 1 or (args.len == 1 and !dev)) try say.fail(env.io, "locate takes --dev or nothing", .{});
+fn locate(env: Env, dev: bool) !u8 {
     const directory = if (dev) try std.fs.path.join(env.a, &.{ env.package, root.directory }) else env.package;
     try say.out(env.io, "{s}\n", .{directory});
     return 0;
 }
 
 /// `bay tree [--why <name>] [--duplicates]`.
-fn treeCommand(env: Env, args: []const []const u8) !u8 {
-    var options: graph.TreeOptions = .{};
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--duplicates")) options.duplicates = true else if (std.mem.eql(u8, args[i], "--why") and i + 1 < args.len) {
-            i += 1;
-            options.why = args[i];
-        } else try say.fail(env.io, "tree takes --why <name> or --duplicates", .{});
-    }
+fn treeCommand(env: Env, args: Tree) !u8 {
+    const options: graph.TreeOptions = .{ .why = args.why, .duplicates = args.duplicates };
     try graph.tree(try resolveHere(env, try manifest.parse(env.a, try env.readManifest())), options);
     return 0;
 }
 
 /// `bay licenses [--dev]`.
-fn licensesCommand(env: Env, args: []const []const u8) !u8 {
-    const dev = args.len == 1 and std.mem.eql(u8, args[0], "--dev");
-    if (args.len > 1 or (args.len == 1 and !dev)) try say.fail(env.io, "licenses takes --dev or nothing", .{});
+fn licensesCommand(env: Env, dev: bool) !u8 {
     try licenses.list(try resolveHere(env, try manifest.parse(env.a, try env.readManifest())), dev);
     return 0;
 }
@@ -378,26 +464,14 @@ fn fetchAll(env: Env) !u8 {
 /// package's list of that kind. Every pin is written first and the package is
 /// tidied once, so pins that must move together (two packages that pin each
 /// other) are not checked one at a time against the old other.
-fn add(env: Env, args: []const []const u8) !u8 {
-    var kind: manifest.Kind = .normal;
-    var lazy = false;
-    var name: ?[]const u8 = null;
-    var targets: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--dev")) kind = .dev else if (std.mem.eql(u8, args[i], "--lazy")) lazy = true else if (std.mem.eql(u8, args[i], "--name")) {
-            i += 1;
-            if (i == args.len) try say.fail(env.io, "--name needs a value", .{});
-            name = args[i];
-        } else try targets.append(env.a, args[i]);
-    }
-    if (targets.items.len == 0) try say.fail(env.io, "add needs a url or directory", .{});
-    if (name != null and targets.items.len > 1) try say.fail(env.io, "--name names one dependency; add takes one url with it", .{});
+fn add(env: Env, args: Add) !u8 {
+    if (args.name != null and args.sources.len > 1) try say.fail(env.io, "--name names one dependency; add takes one source with it", .{});
     const pinned = try manifest.parse(env.a, try env.readManifest());
     var text = try env.readManifest();
-    for (targets.items) |where| {
-        const dependency = if (isDirectory(env, where)) try local(env, where, name) else try fetched(env, try addable(env, where), name) orelse return 1;
-        text = try pinInto(env, pinned, text, dependency, kind, lazy);
+    const kind: manifest.Kind = if (args.dev) .dev else .normal;
+    for (args.sources) |where| {
+        const dependency = if (isDirectory(env, where)) try local(env, where, args.name) else try fetched(env, try addable(env, where), args.name) orelse return 1;
+        text = try pinInto(env, pinned, text, dependency, kind, args.lazy);
     }
     try writeManifest(env, text);
     return tidy(env);
@@ -480,13 +554,9 @@ fn fetched(env: Env, url: []const u8, name: ?[]const u8) !?manifest.Dependency {
     return fetch.fetch(env.io, env.a, env.zig, try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" }), url, name);
 }
 
-fn removeCommand(env: Env, args: []const []const u8) !u8 {
-    var dev = false;
-    var name: ?[]const u8 = null;
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--dev")) dev = true else if (name == null) name = arg else try say.fail(env.io, "remove takes one name", .{});
-    }
-    const target = name orelse try say.fail(env.io, "remove needs a name", .{});
+fn removeCommand(env: Env, args: Remove) !u8 {
+    const target = args.name;
+    const dev = args.dev;
     const parsed = try manifest.parse(env.a, try env.readManifest());
     const kind = removedFrom(parsed, target, dev) orelse if (dev)
         try say.fail(env.io, "no {s} in .dev_dependencies", .{target})
@@ -649,13 +719,12 @@ fn initCommand(io: Io, a: std.mem.Allocator, zig: []const u8) !u8 {
 }
 
 /// `bay new <name>`: a new package in a new directory `name` here.
-fn newCommand(io: Io, a: std.mem.Allocator, zig: []const u8, args: []const []const u8) !u8 {
-    if (args.len != 1) try say.fail(io, "new takes one name: the directory and the package", .{});
-    Io.Dir.cwd().createDir(io, args[0], .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => try say.fail(io, "{s} exists; bay init inside it makes it a package", .{args[0]}),
+fn newCommand(io: Io, a: std.mem.Allocator, zig: []const u8, name: []const u8) !u8 {
+    Io.Dir.cwd().createDir(io, name, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => try say.fail(io, "{s} exists; bay init inside it makes it a package", .{name}),
         else => return err,
     };
-    return prepare(io, a, zig, try Io.Dir.cwd().realPathFileAlloc(io, args[0], a));
+    return prepare(io, a, zig, try Io.Dir.cwd().realPathFileAlloc(io, name, a));
 }
 
 /// The nearest directory above `path` with a build.zig.zon.
@@ -698,6 +767,34 @@ test "update follows a recorded ref and leaves a commit pin" {
     try std.testing.expectEqualStrings("git+https://example.org/x#main", branch);
     try std.testing.expectEqual(null, manifest.following(a, "git+https://example.org/x#5d2a92141f0298d76dc5fd602526d55a62b4e11a"));
     try std.testing.expectEqualStrings("https://example.org/x.tar.gz", manifest.following(a, "https://example.org/x.tar.gz").?);
+}
+
+test "bay's command lines read as they did by hand, and --workspace hands each member the same command" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { given: []const []const u8, member: []const []const u8 };
+    const cases = [_]Case{
+        .{ .given = &.{ "build", "-Doptimize=ReleaseSafe" }, .member = &.{ "build", "--", "-Doptimize=ReleaseSafe" } },
+        .{ .given = &.{ "test", "-Dtest-filter=x", "--summary", "all" }, .member = &.{ "test", "-Dtest-filter=x", "--summary", "all" } },
+        .{ .given = &.{ "--workspace", "--jobs", "4", "--locked", "land" }, .member = &.{ "--locked", "land" } },
+        .{ .given = &.{ "add", "--dev", "--name", "tool", "../tool" }, .member = &.{ "add", "--dev", "--name=tool", "../tool" } },
+        .{ .given = &.{ "remove", "shakedown" }, .member = &.{ "remove", "shakedown" } },
+        .{ .given = &.{ "install", "--update" }, .member = &.{ "install", "--update" } },
+    };
+    for (cases) |case| {
+        var cli = switch (try ensign.parse(Cli, a, case.given, .{})) {
+            .parsed => |v| v,
+            else => return error.TestUnexpectedResult,
+        };
+        cli.workspace = false;
+        cli.jobs = null;
+        const member = try ensign.render(Cli, a, cli);
+        try std.testing.expectEqual(case.member.len, member.len);
+        for (case.member, member) |expected, got| try std.testing.expectEqualStrings(expected, got);
+    }
+    try std.testing.expectError(error.Conflict, ensign.parse(Cli, a, &.{ "install", "--list", "--update" }, .{}));
+    try std.testing.expectError(error.InvalidValue, ensign.parse(Cli, a, &.{ "--workspace", "--jobs", "0", "test" }, .{}));
 }
 
 test "remove finds a name in the list that holds it" {
