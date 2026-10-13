@@ -166,10 +166,14 @@ a Go workspace. `bay tidy` writes only the package's own manifest; `bay --worksp
 tidy` tidies every member.
 
 `bay --workspace <command>` runs a command in every member, each after the members it
-ships with, and members with nothing between them at once (`--jobs <n>` at most; one
-per CPU by default). A member that fails skips the members that depend on it, and the
-rest go on. Releasing a workspace is then one command per member in order: once a
-member is tagged, `bay tidy` in the next pins that release.
+ships with and the members it is developed with (a linter or CI tool released in the
+same workspace), and members with nothing between them at once (`--jobs <n>` at most;
+one per CPU by default). A development dependency that would close a ring, as a tool
+developed with a released copy of a package that ships it, is left out of the order:
+that member uses the release it pins. A member that fails skips the members that
+depend on it, and the rest go on. A workspace whose members land with a release step
+(preflight's `land`) lands with `bay --workspace land`: each member pins the releases
+of the members before it.
 
 ```sh
 bay --workspace test
@@ -251,7 +255,7 @@ with no remote reachable.
 
 `bay --locked <command>` refuses to write a manifest. `add`, `remove`, `update` and `upgrade`
 tidy after they write, once for all they pinned. `bay --workspace [--jobs <n>] <command>` runs the command in
-every member of the workspace, in dependency order.
+every member of the workspace, after what each ships with and is developed with.
 
 ## Manifest fields
 

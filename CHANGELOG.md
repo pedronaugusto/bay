@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `bay --workspace` runs each member after the members it is developed with too, so a member whose gate runs a tool released in the same workspace (a linter, preflight) lands after it; a development dependency that would close a ring is left out, and that member uses the release it pins.
+
+### Fixed
+
+- `bay remove <name>` finds a development pin without `--dev` when the name is only there; a name in both lists keeps its development pin unless `--dev` names it.
+- `bay add https://host/owner/repo`, a repository's page URL, adds the git repository there (Zig fetched it as a file and refused its HTML); a git URL with no ref is pinned at its newest release, or the default branch where there is none.
+
 ## [0.1.8] - 2026-10-13
 
 ### Fixed

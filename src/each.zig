@@ -1,7 +1,8 @@
 //! `bay --workspace [--jobs <n>] <command> [arguments]`: the command in every
 //! member of the workspace, each after the members it ships with (its normal
-//! dependencies), and members with nothing between them at once, as `go test
-//! ./...` runs packages. A member that fails skips the members that depend on
+//! dependencies) and the members it is developed with (a tool its gate runs,
+//! such as a linter released in the same train), and members with nothing
+//! between them at once, as `go test ./...` runs packages. A member that fails skips the members that depend on
 //! it, and the rest go on. Each member's output is printed whole when it ends.
 const std = @import("std");
 const Io = std.Io;
@@ -87,24 +88,73 @@ fn order(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]Membe
             else => |e| return e,
         };
     }
+    const all = try needs(a, manifests, directories);
     const members = try a.alloc(Member, directories.len);
-    for (members, manifests, directories) |*member, parsed, directory| {
-        var needs: std.ArrayList(usize) = .empty;
-        for (parsed.normal) |dependency| switch (dependency.source) {
-            // A path names the member itself; a pin names a package by its hash's name.
-            .path => |path| {
-                const target = try std.fs.path.resolveAlloc(a, &.{ directory, path });
-                for (directories, 0..) |other, index| if (std.mem.eql(u8, other, target) and !std.mem.eql(u8, other, directory)) try needs.append(a, index);
-            },
-            .remote => |remote| {
-                const name = (manifest.named(remote.hash) orelse continue).name;
-                for (manifests, 0..) |other, index| if (std.mem.eql(u8, other.name, name) and !std.mem.eql(u8, other.name, parsed.name)) try needs.append(a, index);
-            },
-        };
-        member.* = .{ .directory = directory, .name = parsed.name, .needs = try needs.toOwnedSlice(a) };
+    for (members, manifests, directories, all) |*member, parsed, directory, member_needs| {
+        member.* = .{ .directory = directory, .name = parsed.name, .needs = member_needs };
     }
     if (try ring(a, members)) |name| try say.fail(io, "{s} and the members it ships with depend on each other: no member of a ring can go first", .{name});
     return members;
+}
+
+/// What each member waits for: the members it ships with, then the members it
+/// is developed with, each only where it closes no ring. A development edge
+/// that would close one is a tool developing with its own released self or
+/// with a package that ships it (glint pins a released preflight, which ships
+/// glint): that member checks itself with the release it pins, so nothing in
+/// the train needs it to go first. Development edges are taken in member and
+/// manifest order, so the same workspace is always ordered the same way.
+fn needs(a: std.mem.Allocator, manifests: []const manifest.Manifest, directories: []const []const u8) ![]const []const usize {
+    const lists = try a.alloc(std.ArrayList(usize), manifests.len);
+    for (lists) |*list| list.* = .empty;
+    for (manifests, directories, lists) |parsed, directory, *list| {
+        try among(a, manifests, directories, parsed, directory, parsed.normal, list);
+    }
+    for (manifests, directories, 0..) |parsed, directory, index| {
+        var developed: std.ArrayList(usize) = .empty;
+        try among(a, manifests, directories, parsed, directory, parsed.dev, &developed);
+        for (developed.items) |target| {
+            if (std.mem.findScalar(usize, lists[index].items, target) != null) continue;
+            if (try reaches(a, lists, target, index)) continue;
+            try lists[index].append(a, target);
+        }
+    }
+    const result = try a.alloc([]const usize, manifests.len);
+    for (result, lists) |*slot, *list| slot.* = try list.toOwnedSlice(a);
+    return result;
+}
+
+/// The members `dependencies` of the member `parsed` at `directory` name,
+/// appended to `out`: a path names a member's directory, a pin a package by
+/// the name in its hash.
+fn among(a: std.mem.Allocator, manifests: []const manifest.Manifest, directories: []const []const u8, parsed: manifest.Manifest, directory: []const u8, dependencies: []const manifest.Dependency, out: *std.ArrayList(usize)) !void {
+    for (dependencies) |dependency| switch (dependency.source) {
+        .path => |path| {
+            const target = try std.fs.path.resolveAlloc(a, &.{ directory, path });
+            for (directories, 0..) |other, index| if (std.mem.eql(u8, other, target) and !std.mem.eql(u8, other, directory)) try out.append(a, index);
+        },
+        .remote => |remote| {
+            const name = (manifest.named(remote.hash) orelse continue).name;
+            for (manifests, 0..) |other, index| if (std.mem.eql(u8, other.name, name) and !std.mem.eql(u8, other.name, parsed.name)) try out.append(a, index);
+        },
+    };
+}
+
+/// Whether `from` waits, through the edges so far, on `to`.
+fn reaches(a: std.mem.Allocator, lists: []const std.ArrayList(usize), from: usize, to: usize) !bool {
+    const seen = try a.alloc(bool, lists.len);
+    defer a.free(seen);
+    @memset(seen, false);
+    var stack: std.ArrayList(usize) = .empty;
+    defer stack.deinit(a);
+    try stack.append(a, from);
+    while (stack.pop()) |at| {
+        if (at == to) return true;
+        if (seen[at]) continue;
+        seen[at] = true;
+        try stack.appendSlice(a, lists[at].items);
+    }
+    return false;
 }
 
 /// A member on a ring of normal dependencies, or null.
@@ -202,4 +252,36 @@ test "members are ordered by what they ship with, and a ring is found" {
     try std.testing.expectEqual(null, try ring(a, &members));
     members[0].needs = &.{2};
     try std.testing.expect(try ring(a, &members) != null);
+}
+
+test "a member waits for the tools it is developed with, unless that closes a ring" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // aegis ← glint (ships it) ← preflight (ships glint); glint and ensign develop with preflight.
+    const texts = [_][:0]const u8{
+        \\.{ .name = .aegis, .version = "0.1.0", .fingerprint = 0x1, .paths = .{""} }
+        ,
+        \\.{ .name = .glint, .version = "0.1.0", .fingerprint = 0x2, .paths = .{""},
+        \\  .dependencies = .{ .aegis = .{ .path = "../aegis" } },
+        \\  .dev_dependencies = .{ .preflight = .{ .path = "../preflight" } } }
+        ,
+        \\.{ .name = .preflight, .version = "0.1.0", .fingerprint = 0x3, .paths = .{""},
+        \\  .dependencies = .{ .glint = .{ .path = "../glint" } } }
+        ,
+        \\.{ .name = .ensign, .version = "0.1.0", .fingerprint = 0x4, .paths = .{""},
+        \\  .dependencies = .{ .aegis = .{ .path = "../aegis" } },
+        \\  .dev_dependencies = .{ .preflight = .{ .path = "../preflight" } } }
+        ,
+    };
+    var manifests: [texts.len]manifest.Manifest = undefined;
+    for (&manifests, texts) |*m, text| m.* = try manifest.parse(a, text);
+    const directories = [_][]const u8{ "/w/aegis", "/w/glint", "/w/preflight", "/w/ensign" };
+    const all = try needs(a, &manifests, &directories);
+    try std.testing.expectEqualSlices(usize, &.{}, all[0]);
+    // glint's development edge to preflight would close a ring: glint uses the released preflight.
+    try std.testing.expectEqualSlices(usize, &.{0}, all[1]);
+    try std.testing.expectEqualSlices(usize, &.{1}, all[2]);
+    // ensign lands after preflight, the tool its gate runs.
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2 }, all[3]);
 }
