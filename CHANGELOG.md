@@ -2,10 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10-13
+
 ### Fixed
 
 - A test of the train itself: a dependent landed from a scratch checkout pins its dependency's new release.
 - A workspace member checked out a second time (a landing's scratch worktree, another clone) is that member, not a second package beside it: the stale copy replaced the one being built, so `tidy` there pinned what the stale copy pinned and left a landing behind a dependency's new release. A raise that would lower a pin is refused, naming both versions.
+
+### Changed
+
+- Pins aegis 0.1.3.
 
 ## [0.1.7] - 2026-10-12
 
@@ -88,7 +94,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/pedronaugusto/bay/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/pedronaugusto/bay/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/pedronaugusto/bay/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/pedronaugusto/bay/compare/v0.1.4...v0.1.5
