@@ -276,7 +276,9 @@ test "a member waits for the tools it is developed with, unless that closes a ri
     };
     var manifests: [texts.len]manifest.Manifest = undefined;
     for (&manifests, texts) |*m, text| m.* = try manifest.parse(a, text);
-    const directories = [_][]const u8{ "/w/aegis", "/w/glint", "/w/preflight", "/w/ensign" };
+    // Resolved as the members' directories are, so they compare on every platform.
+    var directories: [texts.len][]const u8 = undefined;
+    for (&directories, [_][]const u8{ "aegis", "glint", "preflight", "ensign" }) |*d, name| d.* = try std.fs.path.resolveAlloc(a, &.{ "w", name });
     const all = try needs(a, &manifests, &directories);
     try std.testing.expectEqualSlices(usize, &.{}, all[0]);
     // glint's development edge to preflight would close a ring: glint uses the released preflight.
