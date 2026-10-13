@@ -97,6 +97,7 @@ const Pass = struct {
 const Add = struct {
     dev: bool = false,
     lazy: bool = false,
+    tidy: bool = true,
     name: ?[]const u8 = null,
     sources: []const []const u8,
     pub const spec: ensign.Spec(@This()) = .{
@@ -104,6 +105,7 @@ const Add = struct {
         .options = .{
             .dev = .{ .help = "A new dependency goes in .dev_dependencies; a name already pinned stays in its list" },
             .lazy = .{ .help = "Fetched only when a build uses it" },
+            .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
             .name = .{ .help = "The name to pin the one source given under" },
             .sources = .{ .positional = true, .value_name = "URL-OR-DIRECTORY", .hint = .directory, .help = "A repository's URL (pinned at its newest release), a git URL with a ref, an archive URL, or a directory" },
         },
@@ -112,19 +114,25 @@ const Add = struct {
 
 const Remove = struct {
     dev: bool = false,
+    tidy: bool = true,
     name: []const u8,
     pub const spec: ensign.Spec(@This()) = .{
         .about = "Drop a dependency",
         .options = .{
             .dev = .{ .help = "From .dev_dependencies, where the name is in both lists" },
+            .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
             .name = .{ .positional = true },
         },
     };
 };
 
 const Names = struct {
+    tidy: bool = true,
     names: []const []const u8 = &.{},
-    pub const spec: ensign.Spec(@This()) = .{ .options = .{ .names = .{ .positional = true, .value_name = "NAME", .help = "The dependencies to move; every one when none is named" } } };
+    pub const spec: ensign.Spec(@This()) = .{ .options = .{
+        .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
+        .names = .{ .positional = true, .value_name = "NAME", .help = "The dependencies to move; every one when none is named" },
+    } };
 };
 
 const Tree = struct {
@@ -192,6 +200,17 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(code);
 }
 
+/// Leaves tidying to the caller when `cli`'s command writes pins; whether it does.
+fn deferTidy(cli: *Cli) bool {
+    switch (cli.command.?) { // safe: dispatch runs only with a command
+        .add => |*args| args.tidy = false,
+        .remove => |*args| args.tidy = false,
+        .update, .upgrade => |*args| args.tidy = false,
+        else => return false,
+    }
+    return true;
+}
+
 fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli: Cli) !u8 {
     const command = cli.command.?; // safe: main answered a command line without one
     if (cli.jobs != null and !cli.workspace) try say.fail(io, "--jobs is for --workspace", .{});
@@ -201,6 +220,12 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         member.workspace = false;
         member.jobs = null;
         const jobs: ?usize = if (cli.jobs) |j| j.raw() else null;
+        // A command that writes pins writes every member before any tidies: a member
+        // tidied first would resolve against members not yet moved, and refuse them.
+        const writes = deferTidy(&member);
+        const code = try each.run(io, a, environ, jobs, try ensign.render(Cli, a, member));
+        if (!writes or code != 0) return code;
+        member.command = .tidy;
         return each.run(io, a, environ, jobs, try ensign.render(Cli, a, member));
     }
     switch (command) {
@@ -223,10 +248,10 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
     const package = try findPackage(io, a);
     const env: Env = .{ .io = io, .a = a, .zig = try toolchain.forPackage(io, a, environ, package), .environ = environ, .package = package, .locked = cli.locked };
     return switch (command) {
-        .add => |args| add(env, args),
-        .remove => |args| removeCommand(env, args),
-        .update => |args| update(env, args.names),
-        .upgrade => |args| upgrade(env, args.names),
+        .add => |args| tidied(env, args.tidy, try add(env, args)),
+        .remove => |args| tidied(env, args.tidy, try removeCommand(env, args)),
+        .update => |args| tidied(env, args.tidy, try update(env, args.names)),
+        .upgrade => |args| tidied(env, args.tidy, try upgrade(env, args.names)),
         .list => list(env),
         .tidy => tidy(env),
         .locate => |args| locate(env, args.dev),
@@ -358,6 +383,12 @@ fn licensesCommand(env: Env, dev: bool) !u8 {
     return 0;
 }
 
+/// A writing command's result, tidied after when `tidy` and it succeeded.
+fn tidied(env: Env, tidy_after: bool, code: u8) !u8 {
+    if (code != 0 or !tidy_after) return code;
+    return tidy(env);
+}
+
 /// `bay audit`: 1 when an advisory or a retraction holds a selected version.
 fn auditCommand(env: Env) !u8 {
     const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
@@ -485,7 +516,7 @@ fn add(env: Env, args: Add) !u8 {
         text = try pinInto(env, pinned, text, dependency, kind, args.lazy);
     }
     try writeManifest(env, text);
-    return tidy(env);
+    return 0;
 }
 
 /// What `bay add` fetches for `where`: a repository's page URL (`https://host/
@@ -577,7 +608,7 @@ fn removeCommand(env: Env, args: Remove) !u8 {
     try writeManifest(env, edited);
     try say.note(env.io, "{s} removed from .{s}", .{ target, kind.field() });
     if (kind == .normal and among(parsed.dev, target)) try say.note(env.io, "its development pin stays; bay remove --dev {s} removes it", .{target});
-    return tidy(env);
+    return 0;
 }
 
 /// The list `bay remove` takes a name from: `.dev_dependencies` when `--dev`
@@ -623,7 +654,7 @@ fn update(env: Env, names: []const []const u8) !u8 {
         }
     }
     try writeManifest(env, text);
-    return tidy(env);
+    return 0;
 }
 
 /// `bay upgrade`: each dependency named, or every one with a git URL when none
@@ -665,7 +696,7 @@ fn upgrade(env: Env, names: []const []const u8) !u8 {
         }
     }
     try writeManifest(env, text);
-    return tidy(env);
+    return 0;
 }
 
 fn among(dependencies: []const manifest.Dependency, name: []const u8) bool {
@@ -804,6 +835,18 @@ test "bay's command lines read as they did by hand, and --workspace hands each m
         try std.testing.expectEqual(case.member.len, member.len);
         for (case.member, member) |expected, got| try std.testing.expectEqualStrings(expected, got);
     }
+    // A writing command runs in each member untidied; the workspace tidies them all after.
+    var upgrade_all = switch (try ensign.parse(Cli, a, &.{ "--workspace", "upgrade" }, .{})) {
+        .parsed => |v| v,
+        else => return error.TestUnexpectedResult,
+    };
+    upgrade_all.workspace = false;
+    try std.testing.expect(deferTidy(&upgrade_all));
+    const written = try ensign.render(Cli, a, upgrade_all);
+    try std.testing.expectEqual(2, written.len);
+    try std.testing.expectEqualStrings("--no-tidy", written[1]);
+    var listing: Cli = .{ .command = .list };
+    try std.testing.expect(!deferTidy(&listing));
     try std.testing.expectError(error.Conflict, ensign.parse(Cli, a, &.{ "install", "--list", "--update" }, .{}));
     try std.testing.expectError(error.InvalidValue, ensign.parse(Cli, a, &.{ "--workspace", "--jobs", "0", "test" }, .{}));
 }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `bay --workspace update`, `upgrade`, `add` and `remove` write every member before any is tidied, then tidy them all: a member tidied first resolved against members not yet moved, and was refused for a mix of lines. `--no-tidy` leaves the tidy to a later `bay tidy` by hand too.
+
 ## [0.1.10] - 2026-10-13
 
 ### Fixed
