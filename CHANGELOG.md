@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-10-13
+
 ### Fixed
 
 - `build.zig` configures on Zig master, where `standardOptimizeOption` returns an optional mode: the build functions take `?std.lang.Optimize`, which 0.17 passes as well.
+
+### Changed
+
+- Pins aegis 0.1.5.
 
 ## [0.1.9] - 2026-10-13
 
@@ -116,7 +122,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/pedronaugusto/bay/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/pedronaugusto/bay/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/pedronaugusto/bay/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/pedronaugusto/bay/compare/v0.1.6...v0.1.7
