@@ -16,6 +16,7 @@ const published = @import("published.zig");
 const each = @import("each.zig");
 const store = @import("store.zig");
 const licenses = @import("licenses.zig");
+const audit = @import("audit.zig");
 const say = @import("say.zig");
 const release = @import("release");
 const aegis = @import("aegis");
@@ -38,6 +39,7 @@ pub const Cli = struct {
         tree: Tree,
         outdated,
         licenses: Developed,
+        audit,
         vendor,
         list,
         locate: Developed,
@@ -71,6 +73,7 @@ pub const Cli = struct {
             .tidy = .{ .help = "Pin each package at the version selection picks: the highest any manifest in the graph asks for (Go's MVS); in a workspace, each member at its release" },
             .outdated = .{ .help = "Packages the builds use with a newer release, or at a version their newest release retracts" },
             .vendor = .{ .help = "Every package the builds use, into zig-pkg, for building offline" },
+            .audit = .{ .help = "Each package the builds select checked against its repository's published security advisories and its own retractions; fails on any finding. GITHUB_TOKEN, when set, is sent to GitHub" },
             .list = .{ .help = "Both lists, with their pins" },
             .fetch = .{ .help = "Fetch every dependency of both kinds" },
             .init = .{ .help = "Make the package here one bay develops, adding only what is missing; zig init first where there is no package" },
@@ -231,6 +234,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         .outdated => graphCommand(env, .outdated),
         .licenses => |args| licensesCommand(env, args.dev),
         .vendor => graphCommand(env, .vendor),
+        .audit => auditCommand(env),
         .fetch => fetchAll(env),
         .build => |args| zigBuild(env, .package, &.{}, args.args),
         .dev => |args| zigBuild(env, .development, &.{}, args.args),
@@ -352,6 +356,13 @@ fn treeCommand(env: Env, args: Tree) !u8 {
 fn licensesCommand(env: Env, dev: bool) !u8 {
     try licenses.list(try resolveHere(env, try manifest.parse(env.a, try env.readManifest())), dev);
     return 0;
+}
+
+/// `bay audit`: 1 when an advisory or a retraction holds a selected version.
+fn auditCommand(env: Env) !u8 {
+    const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
+    const token = if (env.environ.get("GITHUB_TOKEN")) |t| if (t.len != 0) t else null else null;
+    return if (try audit.audit(resolution, token)) 0 else 1;
 }
 
 /// `bay outdated` and `bay vendor`, over the resolved graph.
@@ -852,6 +863,7 @@ test {
     _ = graph;
     _ = install;
     _ = licenses;
+    _ = audit;
     _ = manifest;
     _ = @import("minisign.zig");
     _ = published;

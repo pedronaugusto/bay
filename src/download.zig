@@ -8,10 +8,15 @@ const say = @import("say.zig");
 /// status but 200, and a body longer than `limit`, are refused by name.
 /// `error.WriteFailed` is the sink's: its own error says why.
 pub fn get(client: *std.http.Client, url: []const u8, sink: *Io.Writer, limit: u64) !u64 {
+    return getWith(client, url, sink, limit, &.{});
+}
+
+/// `get`, sending `headers` too: an API's media type, a token.
+pub fn getWith(client: *std.http.Client, url: []const u8, sink: *Io.Writer, limit: u64, headers: []const std.http.Header) !u64 {
     const io = client.io;
     const uri = std.Uri.parse(url) catch try say.fail(io, "{s} is not a URL", .{url});
     // The body is wanted as the server stores it: a signature or a digest covers those bytes.
-    var request = client.request(.GET, uri, .{ .headers = .{ .accept_encoding = .{ .override = "identity" } } }) catch |err|
+    var request = client.request(.GET, uri, .{ .headers = .{ .accept_encoding = .{ .override = "identity" } }, .extra_headers = headers }) catch |err|
         try say.fail(io, "could not reach {s}: {t}", .{ url, err });
     defer request.deinit();
     request.sendBodiless() catch |err| try say.fail(io, "could not ask {s}: {t}", .{ url, err });
