@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- A test of the train itself: a dependent landed from a scratch checkout pins its dependency's new release.
 - A workspace member checked out a second time (a landing's scratch worktree, another clone) is that member, not a second package beside it: the stale copy replaced the one being built, so `tidy` there pinned what the stale copy pinned and left a landing behind a dependency's new release. A raise that would lower a pin is refused, naming both versions.
 
 ## [0.1.7] - 2026-10-12

@@ -649,6 +649,26 @@ test "a member checked out a second time is that member, and tidy there keeps it
     try std.testing.expect(std.mem.find(u8, after, "c-0.1.1-") != null);
 }
 
+test "a workspace's train: a dependent landed from a scratch checkout pins its dependency's new release" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // lib is released at v0.1.0 and app pins it; both are developed in one workspace.
+    _ = try gitRepository(&f);
+    for ([_][]const []const u8{ &.{ "git", "init", "--quiet", "--initial-branch=main" }, &.{ "git", "add", "." }, &.{ "git", "commit", "--quiet", "-m", "app" } }) |argv|
+        try std.testing.expect(succeeded(try f.run("app", argv)));
+    try f.write(".", "bay.work", ".{ .members = .{ \"lib\", \"app\" } }\n");
+    // lib lands first and is tagged.
+    try releaseLib(&f, &.{"0.1.1"}, null);
+    // app lands next, from a checkout of its own inside its git directory, as preflight's land makes one.
+    try std.testing.expect(succeeded(try f.run("app", &.{ "git", "worktree", "add", "--quiet", "--detach", ".git/landing", "HEAD" })));
+    try std.testing.expect(succeeded(try f.bay("app/.git/landing", &.{"tidy"})));
+    try std.testing.expect(std.mem.find(u8, try manifestOf(&f, "app/.git/landing"), "?ref=v0.1.1#") != null);
+    // And it builds against the release it now pins.
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app/.git/landing", &.{ "build", "run" })).stderr, "lib 0.1.1") != null);
+}
+
 test "a package that is a directory in one place and pinned in another is refused, and an override makes it one" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
