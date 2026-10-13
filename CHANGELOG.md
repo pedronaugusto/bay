@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- `bay audit`: each package the builds select, checked against its repository's published security advisories on GitHub (with `GITHUB_TOKEN` when set) and against its own newest release's retractions; it fails on any finding, so CI can gate on it.
+- `bay completions <shell>`: the completion script for bash, zsh, fish or PowerShell.
+- `bay --help` and `bay <command> --help`: help for every command, generated with the command line itself.
+
 ### Changed
 
+- The command line is read by [ensign](https://github.com/pedronaugusto/ensign) from one declaration: mistakes are named with the nearest command or option, `--locked` is accepted after the command too, and `--jobs` (`-j`) takes 1 to 4096. A new dependency: ensign.
 - `bay --workspace` runs each member after the members it is developed with too, so a member whose gate runs a tool released in the same workspace (a linter, preflight) lands after it; a development dependency that would close a ring is left out, and that member uses the release it pins.
 
 ### Fixed

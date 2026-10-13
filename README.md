@@ -233,11 +233,11 @@ with no remote reachable.
 | --- | --- |
 | `bay new <name>` | A new package in a new directory: `zig init`, then the empty dev list and a `dev` function |
 | `bay init` | The same for the package here, adding only what is missing |
-| `bay build [args]` | `zig build` of the package |
+| `bay build [args]` | `zig build` of the package, the arguments passed on as given |
 | `bay <step> [args]` | The step from the package's build, or else its development build |
 | `bay dev [args]` | `zig build` in the development build, as given |
-| `bay add [--dev] [--lazy] [--name <name>] <url or dir>...` | Pin dependencies through `zig fetch`, then tidy once; a name already pinned stays in its list, `--dev` picks the list of a new one |
-| `bay remove [--dev] <name>` | Drop a dependency |
+| `bay add [--dev] [--lazy] [--name <name>] <url or dir>...` | Pin dependencies through `zig fetch`, then tidy once; a repository's URL (`https://github.com/owner/repo`) is pinned at its newest release; a name already pinned stays in its list, `--dev` picks the list of a new one |
+| `bay remove [--dev] <name>` | Drop a dependency from the list that holds it; `--dev` where it is in both |
 | `bay update [name...]` | Pin what each recorded ref names now: a branch at its head, a release tag at the newest release on its line |
 | `bay upgrade [name...]` | Pin each at the newest release tag of its repository, across lines, whether it was pinned at a tag or a commit; a repository with no release tag stays |
 | `bay tidy` | Pin each package at the version selection picks, and in a workspace each member at its release |
@@ -245,6 +245,7 @@ with no remote reachable.
 | `bay tree [--why <name>] [--duplicates]` | The resolved graph; the paths to one package; the packages pinned at several revisions, and by whom |
 | `bay outdated` | Packages the builds use with a newer release on their remote, or at a version their newest release retracts |
 | `bay licenses [--dev]` | Each package a build contains, with the license its files state; `--dev` adds the development tools |
+| `bay audit` | Each package the builds select, checked against its repository's published security advisories (GitHub; `GITHUB_TOKEN` when set) and its own retractions; fails on any finding |
 | `bay vendor` | Every package the graph reads, into `zig-pkg` |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
 | `bay fetch` | Fetch every dependency of both kinds |
@@ -252,8 +253,9 @@ with no remote reachable.
 | `bay install --list` | What bay installed, and from where |
 | `bay install --update [name...]` | Reinstall each from its recorded branch or tag |
 | `bay uninstall <name>` | Remove exactly what its install put in place |
+| `bay completions <shell>` | The completion script for bash, zsh, fish or PowerShell |
 
-`bay --locked <command>` refuses to write a manifest. `add`, `remove`, `update` and `upgrade`
+`bay --help` and `bay <command> --help` say what each takes. `bay --locked <command>` refuses to write a manifest. `add`, `remove`, `update` and `upgrade`
 tidy after they write, once for all they pinned. `bay --workspace [--jobs <n>] <command>` runs the command in
 every member of the workspace, after what each ships with and is developed with.
 

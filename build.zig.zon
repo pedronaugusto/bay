@@ -11,13 +11,14 @@
         },
 
         .ensign = .{
-            .path = "../../aegis-ensign/ensign",
+            .url = "git+https://github.com/pedronaugusto/ensign?ref=v0.2.1#106d9245f2e367865fe7ef99bd41608548f8ea45",
+            .hash = "ensign-0.2.1-6eMTD20qBACFylSpaHg-mV4AVnjGk1GPAJHaBua5nRCd",
         },
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.3.4#a0efa97ac6fb5656d5e2b1a19657926b66a55d11",
-            .hash = "preflight-0.3.4-LX1ZwoE8DgCcci81Z_m2wf0UmKlkxeLCGV74OcKQC8nV",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.4.4#7059ac4735977a3b2a6ba7629199d1d65efe5f57",
+            .hash = "preflight-0.4.4-LX1Zwg6UDgBdRptbzIdTBoXi521er_P0zhf25E4Uu-lJ",
         },
     },
 }
