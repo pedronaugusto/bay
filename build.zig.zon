@@ -1,24 +1,24 @@
 .{
     .name = .bay,
-    .version = "0.1.10",
+    .version = "0.1.11",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0xe12d5522677902bb,
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.5#ced62c02cfa3be28b834e14e34533aff84b489fd",
-            .hash = "aegis-0.1.5-rsxoujOxBwA9ptJaF5wEA2P5rIM0Xj1S1qps_rgA2txC",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.6#2b97b877a07690ea3ac447f82f9efe660743a84a",
+            .hash = "aegis-0.1.6-rsxouvHOBwC2_K3U8Vewo9LnTYL48c57ztMYdlW72Z3r",
         },
 
         .ensign = .{
-            .url = "git+https://github.com/pedronaugusto/ensign?ref=v0.2.1#106d9245f2e367865fe7ef99bd41608548f8ea45",
-            .hash = "ensign-0.2.1-6eMTD20qBACFylSpaHg-mV4AVnjGk1GPAJHaBua5nRCd",
+            .url = "git+https://github.com/pedronaugusto/ensign?ref=v0.2.2#04c5e2d707b00924b2d70761072f40e5417a2e1d",
+            .hash = "ensign-0.2.2-6eMTD7kqBAAmFJQHEeqzTYspfVj5pVOX46LuKeQig8QN",
         },
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.4.4#7059ac4735977a3b2a6ba7629199d1d65efe5f57",
-            .hash = "preflight-0.4.4-LX1Zwg6UDgBdRptbzIdTBoXi521er_P0zhf25E4Uu-lJ",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.4.5#22e928fba1b897fd5888cc7ef92037b29e1d8e06",
+            .hash = "preflight-0.4.5-LX1ZwgeZDgD4Mmm3Cxjy04JQkPBUlcYKDQa9BPv4_GWW",
         },
     },
 }

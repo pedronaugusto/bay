@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-10-14
+
 ### Fixed
 
 - `bay --workspace update`, `upgrade`, `add` and `remove` write every member before any is tidied, then tidy them all: a member tidied first resolved against members not yet moved, and was refused for a mix of lines. `--no-tidy` leaves the tidy to a later `bay tidy` by hand too.
+
+### Changed
+
+- Pins aegis 0.1.6, ensign 0.2.2.
 
 ## [0.1.10] - 2026-10-13
 
