@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `build.zig` configures on Zig master, where `standardOptimizeOption` returns an optional mode: the build functions take `?std.lang.Optimize`, which 0.17 passes as well.
+
 ## [0.1.9] - 2026-10-13
 
 ### Added

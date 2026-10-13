@@ -43,7 +43,7 @@ pub fn dev(b: *std.Build, tools: type) void {
 }
 
 /// bay's root module from `package`'s sources, built in `b`, with aegis and ensign.
-fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
+fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize) *std.Build.Module {
     const aegis = package.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const ensign = package.dependency("ensign", .{ .target = target, .optimize = optimize }).module("ensign");
     const release = b.addOptions();
@@ -57,7 +57,7 @@ fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget,
 
 /// The unit tests, and bay end to end over real packages, run with the Zig that builds it.
 /// `step` runs them; `check` only compiles them, and the program.
-fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, step: *std.Build.Step, check: *std.Build.Step) void {
+fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize, step: *std.Build.Step, check: *std.Build.Step) void {
     const unit = b.addTest(.{ .root_module = program(b, package, target, optimize) });
     step.dependOn(&b.addRunArtifact(unit).step);
     check.dependOn(&unit.step);
