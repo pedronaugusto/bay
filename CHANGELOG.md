@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The manifest parser's fuzz test is a shakedown `check` property over its examples with a few edits, as every package's are, where it was a fuzz test of std's: it runs as many seeded cases in every test run and shrinks what fails. The tests are the development build's, `bay test`, with shakedown a development dependency; `zig build` builds the program alone.
+
 ## [0.1.12] - 2026-10-14
 
 ### Fixed

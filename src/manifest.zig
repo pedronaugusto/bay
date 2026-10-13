@@ -450,20 +450,27 @@ test "a dependency missing its hash is refused" {
 }
 
 test "any bytes parse or are refused, and a dependency put into what parses parses back" {
-    try std.testing.fuzz({}, parseAny, .{ .corpus = &.{
+    const shakedown = @import("shakedown");
+    const examples: []const []const u8 = &.{
         ".{ .name = .demo, .version = \"0.0.0\", .dependencies = .{} }",
         ".{ .name = .demo, .dependencies = .{ .a = .{ .url = \"git+https://example.org/a#1\", .hash = \"a-1\", .lazy = true } }, .dev_dependencies = .{ .t = .{ .path = \"../t\" } } }",
         ".{ .name = .demo, .paths = .{\"\"} }",
-    } });
+    };
+    const property = struct {
+        fn body(_: void, case: *shakedown.Case) anyerror!void {
+            var bytes: [4096]u8 = undefined;
+            try parseAny(shakedown.gen.mutated(case.source, &bytes, examples));
+        }
+    };
+    for (examples) |example| try parseAny(example);
+    try shakedown.check(std.testing.allocator, {}, property.body, .{});
 }
 
-fn parseAny(_: void, smith: *std.testing.Smith) anyerror!void {
-    var bytes: [4096]u8 = undefined;
-    const len = smith.slice(&bytes);
+fn parseAny(bytes: []const u8) anyerror!void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const source = try a.dupeSentinel(u8, bytes[0..len], 0);
+    const source = try a.dupeSentinel(u8, bytes, 0);
     _ = parse(a, source) catch |err| switch (err) {
         error.InvalidManifest => return,
         error.OutOfMemory => return err,

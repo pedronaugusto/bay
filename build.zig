@@ -1,14 +1,13 @@
 const std = @import("std");
 const zon = @import("build.zig.zon");
 
-/// The bay program, and its tests: std, aegis and ensign.
+/// The bay program: std, aegis and ensign. Its tests are its development build's (`bay test`).
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const exe = b.addExecutable(.{ .name = "bay", .root_module = program(b, b, target, optimize) });
     b.installArtifact(exe);
     b.step("run", "Run bay").dependOn(&b.addRunArtifact(exe).step);
-    tests(b, b, target, optimize, b.step("test", "Run the tests"), b.step("check", "Compile the program and the tests without running them"));
     dist(b);
 }
 
@@ -31,14 +30,15 @@ fn dist(b: *std.Build) void {
     }
 }
 
-/// bay's development: the same tests under preflight's gate.
+/// bay's development: its tests, on shakedown, under preflight's gate.
 pub fn dev(b: *std.Build, tools: type) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const package = b.dependency("bay", .{ .target = target, .optimize = optimize }).builder;
     const step = b.step("test", "Run the tests");
     const check = b.step("check", "Compile the program and the tests without running them");
-    tests(b, package, target, optimize, step, check);
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown");
+    tests(b, package, target, optimize, shakedown, step, check);
     tools.preflight.addCi(b, package, .{ .tests = step });
 }
 
@@ -55,10 +55,12 @@ fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget,
     } });
 }
 
-/// The unit tests, and bay end to end over real packages, run with the Zig that builds it.
-/// `step` runs them; `check` only compiles them, and the program.
-fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize, step: *std.Build.Step, check: *std.Build.Step) void {
-    const unit = b.addTest(.{ .root_module = program(b, package, target, optimize) });
+/// The unit tests, their properties on `shakedown`, and bay end to end over real packages,
+/// run with the Zig that builds it. `step` runs them; `check` only compiles them, and the program.
+fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize, shakedown: *std.Build.Module, step: *std.Build.Step, check: *std.Build.Step) void {
+    const unit_module = program(b, package, target, optimize);
+    unit_module.addImport("shakedown", shakedown);
+    const unit = b.addTest(.{ .root_module = unit_module });
     step.dependOn(&b.addRunArtifact(unit).step);
     check.dependOn(&unit.step);
     const exe = b.addExecutable(.{ .name = "bay", .root_module = program(b, package, target, optimize) });
