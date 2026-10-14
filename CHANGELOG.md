@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-10-14
+
 ### Fixed
 
 - A package pinned by an archive URL is fetched as a build fetches it, as the one dependency of a scratch build. `zig fetch <url>` in Zig 0.17.0 keeps an archive's top directory in the copy it stores in Zig's cache while printing the hash without it, so every later build unpacked other content and refused the pin ("hash mismatch ... the fetched package has N-V-..."); ghostty's dependencies in morse's and visor's conformance builds met it. A copy an earlier bay left in a cache (`p/<hash>.tar.gz` holding one more directory) is not repaired: delete it.
