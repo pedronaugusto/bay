@@ -137,20 +137,21 @@ fn decode(out: []u8, text: []const u8) !void {
 const testing = std.testing;
 const encoder = std.base64.standard.Encoder;
 
-/// A minisign key and the text of a signature it makes, as minisign writes them.
-const Signer = struct {
+/// A minisign key and the text of a signature it makes, as minisign writes them:
+/// for tests of what bay verifies.
+pub const Signer = struct {
     pair: Ed25519.KeyPair,
     id: [8]u8,
 
-    fn init(seed: u8, id: [8]u8) !Signer {
+    pub fn init(seed: u8, id: [8]u8) !Signer {
         return .{ .pair = try .generateDeterministic(@splat(seed)), .id = id };
     }
 
-    fn publicKey(signer: Signer, buffer: []u8) []const u8 {
+    pub fn publicKey(signer: Signer, buffer: []u8) []const u8 {
         return encoder.encode(buffer, &("Ed".* ++ signer.id ++ signer.pair.public_key.toBytes()));
     }
 
-    fn sign(signer: Signer, a: std.mem.Allocator, file: []const u8, algorithm: Algorithm, comment: []const u8) ![]u8 {
+    pub fn sign(signer: Signer, a: std.mem.Allocator, file: []const u8, algorithm: Algorithm, comment: []const u8) ![]u8 {
         var digest: [Blake2b512.digest_length]u8 = undefined;
         Blake2b512.hash(file, &digest, .{});
         const signed = switch (algorithm) {

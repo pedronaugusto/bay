@@ -9,6 +9,7 @@ const install = @import("install.zig");
 const resolve = @import("resolve.zig");
 const workspace = @import("workspace.zig");
 const toolchain = @import("toolchain.zig");
+const own = @import("own.zig");
 const remotes = @import("remote.zig");
 const graph = @import("graph.zig");
 const git = @import("git.zig");
@@ -172,6 +173,9 @@ const New = struct {
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const io = init.io;
+    // The bay the package names runs the command, before this one reads it: a
+    // command line may be one only a newer bay knows.
+    try own.handOver(io, a, init, try packageHere(io, a));
     const cli = ensign.parseOrExit(Cli, init);
     const command = cli.command orelse {
         var buffer: [4096]u8 = undefined;
@@ -790,7 +794,10 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
         }
     }
     const text = try dir.readFileAlloc(io, "build.zig.zon", a, .limited(1 << 20));
-    if (try manifest.ensureList(a, try a.dupeSentinel(u8, text, 0), .dev)) |edited| try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = edited });
+    const listed = try manifest.ensureList(a, try a.dupeSentinel(u8, text, 0), .dev) orelse try a.dupeSentinel(u8, text, 0);
+    // The package is developed with this bay until it names another.
+    const pinned = try manifest.ensureString(a, listed, "bay_version", release.version) orelse listed;
+    if (!std.mem.eql(u8, pinned, text)) try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = pinned });
     const build = dir.readFileAlloc(io, "build.zig", a, .limited(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => try say.fail(io, "build.zig.zon has no build.zig beside it", .{}),
         else => return err,
@@ -909,6 +916,7 @@ test {
     _ = audit;
     _ = manifest;
     _ = @import("minisign.zig");
+    _ = own;
     _ = published;
     _ = remotes;
     _ = resolve;

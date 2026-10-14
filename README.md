@@ -215,6 +215,17 @@ downloaded from ziglang.org on first use and checked against the release index's
 SHA-256 and Zig's minisign key; the Zig on the `PATH` builds only what names no
 version. Setting `ZIG` names another Zig by hand.
 
+## The exact bay
+
+A package names the bay it is developed with, `.bay_version = "0.2.0"`, and any
+other bay hands that one its command line, so everyone working on the package
+resolves and builds it the same way whichever bay they installed. `bay init` and
+`bay new` write the version of the bay that runs them; raising it is an edit to
+the manifest. bay keeps its own copy of each version, downloaded from bay's GitHub
+release for this host on first use and checked against the minisign key bay is
+built with; nothing is run unless that key signed it. `BAY_VERSION=0.2.0` names a
+version by hand and `BAY_VERSION=local` runs the bay you started.
+
 ## In CI
 
 ```sh
@@ -270,6 +281,7 @@ All are ignored by Zig.
 | `.coexist = .{ .name }` | Packages whose incompatible lines may be selected side by side |
 | `.retracted = .{ "0.4.0" }` | Versions of this package a newer release withdraws: `outdated` names them in use, `update` skips them |
 | `.zig_version` | The exact Zig to build with; `.minimum_zig_version` when absent |
+| `.bay_version` | The exact bay the package is developed with; any other bay hands it each command |
 
 ## Global installs
 

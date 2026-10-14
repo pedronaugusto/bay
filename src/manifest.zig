@@ -58,6 +58,8 @@ pub const Manifest = struct {
     coexist: []const []const u8 = &.{},
     /// bay's: the exact Zig this package builds with; else `minimum_zig_version`.
     zig_version: ?[]const u8 = null,
+    /// bay's: the exact bay this package is developed with; any other bay hands it its commands.
+    bay_version: ?[]const u8 = null,
     /// bay's: versions of this package no selection may pick, read from its newest manifest.
     retracted: []const []const u8 = &.{},
 };
@@ -86,6 +88,8 @@ pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest
             manifest.version = try string(arena, value);
         } else if (std.mem.eql(u8, field, "zig_version")) {
             manifest.zig_version = try string(arena, value);
+        } else if (std.mem.eql(u8, field, "bay_version")) {
+            manifest.bay_version = try string(arena, value);
         } else if (std.mem.eql(u8, field, "fingerprint")) {
             manifest.fingerprint = switch (value) {
                 .int_literal => |number| switch (number) {
@@ -237,6 +241,23 @@ pub fn ensureList(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind) !?[:
     if (located.list != null) return null;
     const text = try a.print("{s}.{s} = .{{}},\n", .{ if (located.root_needs_comma) "," else "", kind.field() });
     return try format(gpa, try splice(a, source, .{ .start = located.root_close, .end = located.root_close }, text));
+}
+
+/// `source` with the root field `field` set to the string `value` when it has
+/// no such field, else `null`: what is there is kept.
+pub fn ensureString(gpa: std.mem.Allocator, source: [:0]const u8, field: []const u8, value: []const u8) !?[:0]u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tree = try Ast.parse(a, source, .{ .mode = .zon });
+    if (tree.errors.len != 0) return error.InvalidManifest;
+    var buffer: [2]Ast.Node.Index = undefined;
+    const root_node = tree.nodeData(.root).node;
+    const root = tree.fullStructInit(&buffer, root_node) orelse return error.InvalidManifest;
+    for (root.ast.fields) |existing| if (std.mem.eql(u8, fieldName(tree, existing), field)) return null;
+    const close = tree.tokenStart(tree.lastToken(root_node));
+    const text = try a.print("{s}.{f} = \"{f}\",\n", .{ if (needsComma(tree, root_node, root.ast.fields)) "," else "", std.zig.fmtId(field), std.zig.fmtString(value) });
+    return try format(gpa, try splice(a, source, .{ .start = close, .end = close }, text));
 }
 
 /// `source` without the dependency `name` in the `kind` list; `error.NotFound` when there is none.
@@ -523,4 +544,14 @@ test "a package hash names the package and its version" {
     try std.testing.expectEqual(1, aegis.version.patch);
     try std.testing.expectEqual(null, named("aegis-0.2.1-short"));
     try std.testing.expectEqual(null, named("1220" ++ &@as([64]u8, @splat('0'))));
+}
+
+test "ensureString adds a missing root field once, and keeps one already there" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const added = (try ensureString(gpa, sample, "bay_version", "0.2.0")).?;
+    defer gpa.free(added);
+    try std.testing.expectEqualStrings("0.2.0", (try parse(arena.allocator(), added)).bay_version.?);
+    try std.testing.expectEqual(null, try ensureString(gpa, added, "bay_version", "0.3.0"));
 }

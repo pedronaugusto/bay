@@ -518,6 +518,48 @@ test "with no Zig named and none on the PATH, a new package is made by the Zig b
     try std.testing.expect(succeeded(try f.bay(".", &.{ "new", "fresh" })));
     const made = try f.tmp.dir.readFileAlloc(f.io, "fresh/build.zig.zon", f.a, .limited(1 << 16));
     try std.testing.expect(std.mem.find(u8, made, ".dev_dependencies") != null);
+    // The package is developed with the bay that made it until it names another.
+    try std.testing.expect(std.mem.find(u8, made, ".bay_version = \"" ++ options.version ++ "\"") != null);
+}
+
+/// A manifest naming bay `version`, and nothing a build needs.
+fn pinsBay(f: *Fixture, dir: []const u8, version: []const u8) !void {
+    try f.tmp.dir.createDirPath(f.io, dir);
+    try f.write(dir, "build.zig.zon", try f.a.print(".{{ .name = .pinned, .version = \"0.1.0\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .bay_version = \"{s}\", .paths = .{{\"\"}} }}\n", .{ fingerprint("pinned"), version }));
+}
+
+test "a package naming another bay hands that bay the command line, and BAY_VERSION=local keeps this one" {
+    // The other bay is a script standing in for an installed release: POSIX runs it as a program.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.tmp.dir.createDirPath(f.io, "data/bay/bay/9.9.9");
+    try f.tmp.dir.writeFile(f.io, .{ .sub_path = "data/bay/bay/9.9.9/bay", .data = "#!/bin/sh\nprintf 'bay 9.9.9, BAY_VERSION=%s: %s\\n' \"$BAY_VERSION\" \"$*\"\n", .flags = .{ .permissions = .executable_file } });
+    try pinsBay(&f, "pinned", "9.9.9");
+    const handed = try f.bay("pinned", &.{ "build", "-Doptimize=ReleaseSafe", "--", "x" });
+    try std.testing.expect(succeeded(handed));
+    try std.testing.expectEqualStrings("bay 9.9.9, BAY_VERSION=local: build -Doptimize=ReleaseSafe -- x\n", handed.stdout);
+    // In a directory of the package too: the nearest manifest up names the bay.
+    try f.tmp.dir.createDirPath(f.io, "pinned/src");
+    try std.testing.expectEqualStrings("bay 9.9.9, BAY_VERSION=local: version\n", (try f.bay("pinned/src", &.{"version"})).stdout);
+    try f.env.put("BAY_VERSION", "local");
+    try std.testing.expectEqualStrings("bay " ++ options.version ++ "\n", (try f.bay("pinned", &.{"version"})).stdout);
+    // A version named outside any package is run there too.
+    try f.env.put("BAY_VERSION", "9.9.9");
+    try std.testing.expectEqualStrings("bay 9.9.9, BAY_VERSION=local: version\n", (try f.bay(".", &.{"version"})).stdout);
+}
+
+test "a manifest naming a bay that is not a version is refused in a sentence" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try pinsBay(&f, "pinned", "latest");
+    const said = try f.bay("pinned", &.{"version"});
+    try std.testing.expect(refused(said));
+    try std.testing.expect(std.mem.find(u8, said.stderr, "names bay latest, which is not a version") != null);
 }
 
 test "a member whose pins are behind builds from a copy with them rewritten, and only its own tidy writes it" {

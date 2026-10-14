@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `.bay_version`: a package names the exact bay it is developed with, and any other bay hands that one its command line, downloaded from bay's release for the host and run only when bay's release key signed it. `bay init` and `bay new` write the running bay's version. `BAY_VERSION` names a version by hand; `local` runs the bay started.
+
 ## [0.1.11] - 2026-10-14
 
 ### Fixed
