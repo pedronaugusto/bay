@@ -8,6 +8,7 @@ const manifest = @import("manifest.zig");
 const select = @import("select.zig");
 const say = @import("say.zig");
 const git = @import("git.zig");
+const scratchManifest = @import("root.zig").scratchManifest;
 
 /// Where bay unpacks an archived package to read it, under the package.
 pub const unpacked_directory = ".zig-cache/bay/packages";
@@ -55,7 +56,7 @@ pub const Store = struct {
         const directory = try store.search(remote.hash) orelse
             try store.unpack(remote.hash) orelse fetched: {
             try store.fetch(remote);
-            break :fetched try store.unpack(remote.hash) orelse try say.fail(store.io, "{s} fetched, yet Zig's cache has no {s}", .{ remote.url, remote.hash });
+            break :fetched try store.search(remote.hash) orelse try store.unpack(remote.hash) orelse try say.fail(store.io, "{s} fetched, yet Zig has no {s}", .{ remote.url, remote.hash });
         };
         try store.found.put(store.a, remote.hash, directory);
         return directory;
@@ -67,14 +68,30 @@ pub const Store = struct {
             if (!std.mem.eql(u8, fetched.hash, remote.hash)) try say.fail(store.io, "{s} is {s} now, but it is pinned as {s}: the pin names other content", .{ remote.url, fetched.hash, remote.hash });
             return;
         }
-        const result = std.process.run(store.a, store.io, .{ .argv = &.{ store.zig, "fetch", remote.url }, .stdout_limit = .limited(1 << 16), .stderr_limit = .limited(1 << 20) }) catch |err|
-            try say.fail(store.io, "could not run {s} fetch: {t}", .{ store.zig, err });
+        // Zig 0.17's `zig fetch <url>` prints an archive's hash with its one top
+        // directory taken away, but keeps that directory in the copy it stores in its
+        // cache, so every later build unpacks other content and refuses the pin. A
+        // build's own fetch stores the package as it hashes it: the package is fetched
+        // as the one dependency of a scratch build, checked against the pin by Zig,
+        // and unpacked by Zig where bay reads it.
+        const scratch = try std.fs.path.join(store.a, &.{ std.fs.path.dirname(store.unpacked).?, "fetch" });
+        try Io.Dir.cwd().deleteTree(store.io, scratch);
+        try Io.Dir.cwd().createDirPath(store.io, scratch);
+        var dir = try Io.Dir.cwd().openDir(store.io, scratch, .{});
+        defer dir.close(store.io);
+        try dir.writeFile(store.io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
+        const dependency = try store.a.print(".pinned = .{{ .url = \"{f}\", .hash = \"{f}\" }},", .{ std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) });
+        try dir.writeFile(store.io, .{ .sub_path = "build.zig.zon", .data = try scratchManifest(store.a, "bay_fetch", dependency) });
+        // The scratch build runs in its own directory: Zig is given where to unpack absolutely.
+        try Io.Dir.cwd().createDirPath(store.io, store.unpacked);
+        const destination = try Io.Dir.cwd().realPathFileAlloc(store.io, store.unpacked, store.a);
+        const result = std.process.run(store.a, store.io, .{ .argv = &.{ store.zig, "build", "--fetch=all", "--pkg-dir", destination }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
+            try say.fail(store.io, "could not run {s} build --fetch: {t}", .{ store.zig, err });
         if (result.term != .exited or result.term.exited != 0) {
             try say.relay(store.io, result.stderr);
-            try say.fail(store.io, "could not fetch {s}", .{remote.url});
+            try say.fail(store.io, "could not fetch {s} as it is pinned, {s}", .{ remote.url, remote.hash });
         }
-        const hash = std.mem.trim(u8, result.stdout, " \r\n");
-        if (!std.mem.eql(u8, hash, remote.hash)) try say.fail(store.io, "{s} is {s} now, but it is pinned as {s}: the pin names other content", .{ remote.url, hash, remote.hash });
+        try Io.Dir.cwd().deleteTree(store.io, scratch);
     }
 
     /// Whether Zig finds the package `hash` without fetching it: unpacked in the

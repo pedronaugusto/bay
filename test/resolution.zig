@@ -247,6 +247,40 @@ test "a vendored package resolves and builds with its packages in no cache and n
     try std.testing.expect(succeeded(try f.bay("app", &.{ "dev", "-l" })));
 }
 
+test "a package archived under one top directory is fetched as Zig builds it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // As a forge serves a commit: the package's files under one directory, here `t-1.0`.
+    try f.package("t-1.0", "t", "1.0.0", "", &.{}, "pub const version = \"1.0.0\";");
+    var archive_file = try f.tmp.dir.createFile(f.io, "t.tar", .{});
+    var buffer: [4096]u8 = undefined;
+    var file_writer = archive_file.writer(f.io, &buffer);
+    var archive: std.tar.Writer = .{ .underlying_writer = &file_writer.interface };
+    try archive.setRoot("t-1.0");
+    for ([_][]const u8{ "build.zig", "build.zig.zon", "src/root.zig" }) |name| {
+        try archive.writeFileBytes(name, try f.tmp.dir.readFileAlloc(f.io, try std.fs.path.join(f.a, &.{ "t-1.0", name }), f.a, .limited(1 << 16)), .{});
+    }
+    try archive.finishPedantically();
+    try file_writer.interface.flush();
+    archive_file.close(f.io);
+    // The hash Zig gives the package is its files', the directory's as the archive's;
+    // taken in a cache of its own, so bay's cache holds no copy and bay fetches it.
+    var hashing = try f.env.clone(f.a);
+    try hashing.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(f.a, &.{ f.root, "hashing-cache" }));
+    const hashed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "t-1.0" }) }, .environ_map = &hashing });
+    try std.testing.expect(succeeded(hashed));
+    try f.env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(f.a, &.{ f.root, "cache" }));
+    const path = try std.fs.path.join(f.a, &.{ f.root, "t.tar" });
+    std.mem.replaceScalar(u8, path, '\\', '/');
+    const pin = try f.a.print(".t = .{{ .url = \"file://{s}{s}\", .hash = \"{s}\" }},", .{ if (path[0] == '/') "" else "/", path, std.mem.trim(u8, hashed.stdout, "\r\n") });
+    try f.application("app", pin, &.{"t"}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"t {s}\\n\", .{@import(\"t\").version}); }");
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "t 1.0.0") != null);
+}
+
 /// An application on the diamond whose manifest, before its last brace, is
 /// returned, for a test to add a field to it.
 fn overridden(f: *Fixture) ![]const u8 {
