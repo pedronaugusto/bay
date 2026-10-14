@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A fetched package, the store's and `bay vendor`'s, is unpacked under a `--pkg-dir` relative to the build Zig runs, and the development build's is `zig-pkg` relative to the package: Zig 0.17 makes the path dependencies of a package it unpacks under an absolute one absolute, then refuses them ("expected path relative to build root"), which bay 0.1.12's fetch met in ghostty's `pkg/` packages.
+
 ### Changed
 
 - The manifest parser's fuzz test is a shakedown `check` property over its examples with a few edits, as every package's are, where it was a fuzz test of std's: it runs as many seeded cases in every test run and shrinks what fails. The tests are the development build's, `bay test`, with shakedown a development dependency; `zig build` builds the program alone.

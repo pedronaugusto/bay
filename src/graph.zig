@@ -164,7 +164,10 @@ pub fn vendor(r: resolve.Resolution) !void {
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
     try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(a, "bay_vendor", dependencies.written()) });
     const destination = try std.fs.path.join(a, &.{ r.input.package, "zig-pkg" });
-    const result = std.process.run(a, io, .{ .argv = &.{ r.input.zig, "build", "--fetch=all", "--pkg-dir", destination }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
+    // Relative to the scratch build, as the store's fetch passes it: Zig 0.17 refuses the
+    // path dependencies of a package unpacked under an absolute --pkg-dir.
+    const relative = try std.fs.path.join(a, &.{ "..", "..", "..", "zig-pkg" });
+    const result = std.process.run(a, io, .{ .argv = &.{ r.input.zig, "build", "--fetch=all", "--pkg-dir", relative }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(io, "could not run {s}: {t}", .{ r.input.zig, err });
     if (result.term != .exited or result.term.exited != 0) {
         try say.relay(io, result.stderr);

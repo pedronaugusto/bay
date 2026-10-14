@@ -349,7 +349,9 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
             "--cache-dir",  try std.fs.path.join(env.a, &.{ env.package, ".zig-cache" }),
             "--prefix",     try std.fs.path.join(env.a, &.{ env.package, "zig-out" }),
             // One package directory for both builds: what the package build or `bay vendor` put there.
-            "--pkg-dir",    try std.fs.path.join(env.a, &.{ env.package, "zig-pkg" }),
+            // Relative to the package, where Zig runs: under an absolute one, Zig 0.17 refuses
+            // the path dependencies of the packages it unpacks there.
+            "--pkg-dir",    "zig-pkg",
         });
     }
     try argv.appendSlice(env.a, after);

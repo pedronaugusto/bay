@@ -247,19 +247,21 @@ test "a vendored package resolves and builds with its packages in no cache and n
     try std.testing.expect(succeeded(try f.bay("app", &.{ "dev", "-l" })));
 }
 
-test "a package archived under one top directory is fetched as Zig builds it" {
+test "a package archived under one top directory, with a package nested by path, is fetched as Zig builds it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var f: Fixture = try .init(arena.allocator());
     defer f.deinit();
-    // As a forge serves a commit: the package's files under one directory, here `t-1.0`.
-    try f.package("t-1.0", "t", "1.0.0", "", &.{}, "pub const version = \"1.0.0\";");
+    // As a forge serves a commit: the package's files under one directory, here `t-1.0`,
+    // with a package of its own inside taken by a relative path, as ghostty takes its pkg/.
+    try f.package("t-1.0/sub", "sub", "0.1.0", "", &.{}, "pub const n = 1;");
+    try f.package("t-1.0", "t", "1.0.0", ".sub = .{ .path = \"sub\" },", &.{"sub"}, "pub const version = \"1.0.0\"; pub const n = @import(\"sub\").n;");
     var archive_file = try f.tmp.dir.createFile(f.io, "t.tar", .{});
     var buffer: [4096]u8 = undefined;
     var file_writer = archive_file.writer(f.io, &buffer);
     var archive: std.tar.Writer = .{ .underlying_writer = &file_writer.interface };
     try archive.setRoot("t-1.0");
-    for ([_][]const u8{ "build.zig", "build.zig.zon", "src/root.zig" }) |name| {
+    for ([_][]const u8{ "build.zig", "build.zig.zon", "src/root.zig", "sub/build.zig", "sub/build.zig.zon", "sub/src/root.zig" }) |name| {
         try archive.writeFileBytes(name, try f.tmp.dir.readFileAlloc(f.io, try std.fs.path.join(f.a, &.{ "t-1.0", name }), f.a, .limited(1 << 16)), .{});
     }
     try archive.finishPedantically();

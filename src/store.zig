@@ -82,9 +82,10 @@ pub const Store = struct {
         try dir.writeFile(store.io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
         const dependency = try store.a.print(".pinned = .{{ .url = \"{f}\", .hash = \"{f}\" }},", .{ std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) });
         try dir.writeFile(store.io, .{ .sub_path = "build.zig.zon", .data = try scratchManifest(store.a, "bay_fetch", dependency) });
-        // The scratch build runs in its own directory: Zig is given where to unpack absolutely.
-        try Io.Dir.cwd().createDirPath(store.io, store.unpacked);
-        const destination = try Io.Dir.cwd().realPathFileAlloc(store.io, store.unpacked, store.a);
+        // Where Zig unpacks, beside the scratch build: relative to it, since Zig 0.17 makes
+        // the path dependencies of a package unpacked under an absolute --pkg-dir absolute,
+        // then refuses them ("expected path relative to build root").
+        const destination = try std.fs.path.join(store.a, &.{ "..", std.fs.path.basename(store.unpacked) });
         const result = std.process.run(store.a, store.io, .{ .argv = &.{ store.zig, "build", "--fetch=all", "--pkg-dir", destination }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
             try say.fail(store.io, "could not run {s} build --fetch: {t}", .{ store.zig, err });
         if (result.term != .exited or result.term.exited != 0) {
