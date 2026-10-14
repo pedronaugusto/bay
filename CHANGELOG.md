@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-10-14
+
 ### Fixed
 
 - A fetched package, the store's and `bay vendor`'s, is unpacked under a `--pkg-dir` relative to the build Zig runs, and the development build's is `zig-pkg` relative to the package: Zig 0.17 makes the path dependencies of a package it unpacks under an absolute one absolute, then refuses them ("expected path relative to build root"), which bay 0.1.12's fetch met in ghostty's `pkg/` packages.
@@ -146,7 +148,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/pedronaugusto/bay/compare/v0.1.10...v0.1.13
 [0.1.10]: https://github.com/pedronaugusto/bay/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/pedronaugusto/bay/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/pedronaugusto/bay/compare/v0.1.7...v0.1.8
