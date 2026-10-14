@@ -14,7 +14,8 @@ packages Zig builds, adding what a Zig manifest has no words for:
   of a third, bay selects one, so a type that crosses between them is one type.
 - **Workspaces**: several packages developed together, each built from its local
   checkout, run in dependency order, and pinned at each other's releases.
-- **The exact Zig**: the version a package names, downloaded and verified.
+- **The exact Zig and the exact bay**: the versions a package names, downloaded and
+  verified, so everyone develops it with the same tools.
 
 A package developed with bay is still a plain Zig package. Anyone without bay builds
 it with `zig build` from its manifest, as before.
@@ -265,6 +266,7 @@ with no remote reachable.
 | `bay install --update [name...]` | Reinstall each from its recorded branch or tag |
 | `bay uninstall <name>` | Remove exactly what its install put in place |
 | `bay completions <shell>` | The completion script for bash, zsh, fish or PowerShell |
+| `bay version` | The version of the bay that runs: the one the package names, when it names one |
 
 `bay --help` and `bay <command> --help` say what each takes. `bay --locked <command>` refuses to write a manifest. `add`, `remove`, `update` and `upgrade`
 tidy after they write, once for all they pinned. `bay --workspace [--jobs <n>] <command>` runs the command in

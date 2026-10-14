@@ -58,7 +58,7 @@ pub const Cli = struct {
         .name = "bay",
         .version = release.version,
         .about = "Dependencies for Zig packages, on Zig's own package manager",
-        .description = "Each package builds with the exact Zig it names, which bay installs; ZIG names another by hand.",
+        .description = "Each package builds with the exact Zig it names, which bay installs; ZIG names another by hand. A package naming another bay (.bay_version) has that bay run each command; BAY_VERSION names one by hand, local this one.",
         .options = .{
             .locked = .{ .global = true, .help = "Refuse to change a manifest, as CI should" },
             .workspace = .{ .help = "Run the command in every member of the workspace, each after the members it ships with and is developed with" },
