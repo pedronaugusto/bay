@@ -248,10 +248,10 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
     const package = try findPackage(io, a);
     const env: Env = .{ .io = io, .a = a, .zig = try toolchain.forPackage(io, a, environ, package), .environ = environ, .package = package, .locked = cli.locked };
     return switch (command) {
-        .add => |args| tidied(env, args.tidy, try add(env, args)),
-        .remove => |args| tidied(env, args.tidy, try removeCommand(env, args)),
-        .update => |args| tidied(env, args.tidy, try update(env, args.names)),
-        .upgrade => |args| tidied(env, args.tidy, try upgrade(env, args.names)),
+        .add => |args| afterEdit(env, args.tidy, try add(env, args)),
+        .remove => |args| afterEdit(env, args.tidy, try removeCommand(env, args)),
+        .update => |args| afterEdit(env, args.tidy, try update(env, args.names)),
+        .upgrade => |args| afterEdit(env, args.tidy, try upgrade(env, args.names)),
         .list => list(env),
         .tidy => tidy(env),
         .locate => |args| locate(env, args.dev),
@@ -385,10 +385,14 @@ fn licensesCommand(env: Env, dev: bool) !u8 {
     return 0;
 }
 
-/// A writing command's result, tidied after when `tidy` and it succeeded.
-fn tidied(env: Env, tidy_after: bool, code: u8) !u8 {
-    if (code != 0 or !tidy_after) return code;
-    return tidy(env);
+/// A writing command's manifest (null: it failed, having said why), tidied
+/// when `tidy_after`, then written once. A graph the edit cannot resolve is
+/// refused before anything is written.
+fn afterEdit(env: Env, tidy_after: bool, text_or_failed: ?[:0]const u8) !u8 {
+    const text = text_or_failed orelse return 1;
+    if (tidy_after) return writeTidied(env, text);
+    try writeChanged(env, text);
+    return 0;
 }
 
 /// `bay audit`: 1 when an advisory or a retraction holds a selected version.
@@ -424,29 +428,42 @@ fn writeManifest(env: Env, text: []const u8) !void {
 /// and nothing to write says nothing. Only this manifest is written: every
 /// member's is its own (`bay --workspace tidy` tidies them all).
 fn tidy(env: Env) !u8 {
+    return writeTidied(env, try env.readManifest());
+}
+
+/// `text`, the package's manifest, tidied in memory and written when that
+/// changes what is on disk: nothing is written unless the graph resolves.
+fn writeTidied(env: Env, text: [:0]const u8) !u8 {
+    var tidied = text;
     const others = try workspace.members(env.io, env.a, env.package);
     if (others.len != 0) {
         // Releases first: what they pin is then part of the selection.
         const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
-        const syncs = try published.syncs(env.io, env.a, env.zig, try store.Store.init(env.io, env.a, env.zig, env.package), scratch, &.{env.package}, try std.mem.concat(env.a, []const u8, &.{ &.{env.package}, others }));
-        try repin(env, syncs, "pinned at its release", null);
+        const owner: published.Owned = .{ .directory = env.package, .parsed = try manifest.parse(env.a, tidied) };
+        const syncs = try published.syncs(env.io, env.a, env.zig, try store.Store.init(env.io, env.a, env.zig, env.package), scratch, &.{owner}, try std.mem.concat(env.a, []const u8, &.{ &.{env.package}, others }));
+        tidied = try repin(env, tidied, syncs, "pinned at its release", null);
     }
-    const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
-    try repin(env, resolution.raises, "raised to", resolution);
+    const resolution = try resolveHere(env, try manifest.parse(env.a, tidied));
+    tidied = try repin(env, tidied, resolution.raises, "raised to", resolution);
+    try writeChanged(env, tidied);
     return 0;
 }
 
-/// Writes each entry into the package's manifest, saying what moved; `--locked`
-/// says what would and refuses.
-fn repin(env: Env, pins: []const manifest.Repin, verb: []const u8, resolution: ?resolve.Resolution) !void {
-    if (pins.len == 0) return;
-    var text = try env.readManifest();
+/// `text` with each entry put in, saying what moved (`--locked`: what would).
+fn repin(env: Env, text: [:0]const u8, pins: []const manifest.Repin, verb: []const u8, resolution: ?resolve.Resolution) ![:0]const u8 {
+    var out = text;
     for (pins) |pin| {
         std.debug.assert(std.mem.eql(u8, pin.directory, env.package)); // tidy writes only the package's manifest
         const to = if (resolution) |r| try describe(r, pin.to) else pin.to.source.remote.hash;
         try say.note(env.io, "{s} {s}{s} {s}", .{ pin.from.name, if (env.locked) "would be " else "", verb, to });
-        text = try manifest.put(env.a, text, pin.kind, pin.to);
+        out = try manifest.put(env.a, out, pin.kind, pin.to);
     }
+    return out;
+}
+
+/// Writes `text` as the package's manifest unless it is what is there.
+fn writeChanged(env: Env, text: []const u8) !void {
+    if (std.mem.eql(u8, text, try env.readManifest())) return;
     try writeManifest(env, text);
 }
 
@@ -508,17 +525,16 @@ fn fetchAll(env: Env) !u8 {
 /// package's list of that kind. Every pin is written first and the package is
 /// tidied once, so pins that must move together (two packages that pin each
 /// other) are not checked one at a time against the old other.
-fn add(env: Env, args: Add) !u8 {
+fn add(env: Env, args: Add) !?[:0]const u8 {
     if (args.name != null and args.sources.len > 1) try say.fail(env.io, "--name names one dependency; add takes one source with it", .{});
     const pinned = try manifest.parse(env.a, try env.readManifest());
     var text = try env.readManifest();
     const kind: manifest.Kind = if (args.dev) .dev else .normal;
     for (args.sources) |where| {
-        const dependency = if (isDirectory(env, where)) try local(env, where, args.name) else try fetched(env, try addable(env, where), args.name) orelse return 1;
+        const dependency = if (isDirectory(env, where)) try local(env, where, args.name) else try fetched(env, try addable(env, where), args.name) orelse return null;
         text = try pinInto(env, pinned, text, dependency, kind, args.lazy);
     }
-    try writeManifest(env, text);
-    return 0;
+    return text;
 }
 
 /// What `bay add` fetches for `where`: a repository's page URL (`https://host/
@@ -598,7 +614,7 @@ fn fetched(env: Env, url: []const u8, name: ?[]const u8) !?manifest.Dependency {
     return fetch.fetch(env.io, env.a, env.zig, try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" }), url, name);
 }
 
-fn removeCommand(env: Env, args: Remove) !u8 {
+fn removeCommand(env: Env, args: Remove) !?[:0]const u8 {
     const target = args.name;
     const dev = args.dev;
     const parsed = try manifest.parse(env.a, try env.readManifest());
@@ -607,10 +623,9 @@ fn removeCommand(env: Env, args: Remove) !u8 {
     else
         try say.fail(env.io, "{s} is in neither .dependencies nor .dev_dependencies", .{target});
     const edited = try manifest.remove(env.a, try env.readManifest(), kind, target);
-    try writeManifest(env, edited);
     try say.note(env.io, "{s} removed from .{s}", .{ target, kind.field() });
     if (kind == .normal and among(parsed.dev, target)) try say.note(env.io, "its development pin stays; bay remove --dev {s} removes it", .{target});
-    return 0;
+    return edited;
 }
 
 /// The list `bay remove` takes a name from: `.dev_dependencies` when `--dev`
@@ -629,7 +644,7 @@ fn removedFrom(parsed: manifest.Manifest, name: []const u8, dev: bool) ?manifest
 /// at its head, a release tag at the newest release on its line, as `cargo update`
 /// and `go get -u` move within what is compatible. A pin to an exact commit, or a
 /// directory, has nothing to follow and stays; a new line is `bay add` at its tag.
-fn update(env: Env, names: []const []const u8) !u8 {
+fn update(env: Env, names: []const []const u8) !?[:0]const u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
     // Each name given must be a dependency, in either list.
     for (names) |name| {
@@ -648,15 +663,14 @@ fn update(env: Env, names: []const []const u8) !u8 {
                 try say.note(env.io, "{s} is pinned to an exact commit; bay add it with a branch or tag to follow one", .{dependency.name});
                 continue;
             };
-            var next = try fetched(env, try releaseOnLine(env, url), dependency.name) orelse return 1;
+            var next = try fetched(env, try releaseOnLine(env, url), dependency.name) orelse return null;
             next.lazy = dependency.lazy;
             if (std.mem.eql(u8, next.source.remote.hash, remote.hash)) continue;
             text = try manifest.put(env.a, text, kind, next);
             try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
         }
     }
-    try writeManifest(env, text);
-    return 0;
+    return text;
 }
 
 /// `bay upgrade`: each dependency named, or every one with a git URL when none
@@ -665,7 +679,7 @@ fn update(env: Env, names: []const []const u8) !u8 {
 /// bare commit, in the list or lists it is in, leaving out what its newest
 /// release retracts. All are written, then the package is tidied once. A
 /// repository without a release tag stays as it is.
-fn upgrade(env: Env, names: []const []const u8) !u8 {
+fn upgrade(env: Env, names: []const []const u8) !?[:0]const u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
     for (names) |name| {
         if (!among(parsed.normal, name) and !among(parsed.dev, name)) try say.fail(env.io, "{s} is not a dependency", .{name});
@@ -690,15 +704,14 @@ fn upgrade(env: Env, names: []const []const u8) !u8 {
                 continue;
             };
             const to = try env.a.print("git+{s}#{s}", .{ repository, newest.tag.name });
-            var next = try fetched(env, to, dependency.name) orelse return 1;
+            var next = try fetched(env, to, dependency.name) orelse return null;
             next.lazy = dependency.lazy;
             if (std.mem.eql(u8, next.source.remote.url, remote.url)) continue;
             text = try manifest.put(env.a, text, kind, next);
             try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
         }
     }
-    try writeManifest(env, text);
-    return 0;
+    return text;
 }
 
 fn among(dependencies: []const manifest.Dependency, name: []const u8) bool {

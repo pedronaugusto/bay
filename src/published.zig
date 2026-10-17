@@ -16,12 +16,11 @@ const store = @import("store.zig");
 /// A manifest the workspace owns, where it is.
 pub const Owned = struct { directory: []const u8, parsed: manifest.Manifest };
 
-/// The pins, across `owners` (directories whose manifests the workspace owns),
-/// that name a member by an older version than the member's published one.
-/// `members` are every member's directory; `scratch` is where Zig fetches.
-pub fn syncs(io: Io, a: std.mem.Allocator, zig: []const u8, packages: *store.Store, scratch: []const u8, owners: []const []const u8, members: []const []const u8) ![]const manifest.Repin {
-    const owned = try a.alloc(Owned, owners.len);
-    for (owned, owners) |*entry, directory| entry.* = .{ .directory = directory, .parsed = try read(io, a, directory) };
+/// The pins, across `owners` (the manifests the workspace owns, as they stand
+/// in memory), that name a member by an older version than the member's
+/// published one. `members` are every member's directory; `scratch` is where
+/// Zig fetches.
+pub fn syncs(io: Io, a: std.mem.Allocator, zig: []const u8, packages: *store.Store, scratch: []const u8, owned: []const Owned, members: []const []const u8) ![]const manifest.Repin {
     const versioned = try a.alloc(manifest.Manifest, members.len);
     for (versioned, members) |*parsed, directory| parsed.* = try read(io, a, directory);
     var remote: Remote = .{ .io = io, .a = a, .zig = zig, .packages = packages, .scratch = scratch };

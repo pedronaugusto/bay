@@ -23,19 +23,6 @@ Requires Zig 0.17.0. Work in progress.
 
 ## Install
 
-Each release carries the program for every host: `bay-x86_64-linux`,
-`bay-aarch64-linux`, `bay-x86_64-macos`, `bay-aarch64-macos`, `bay-x86_64-windows.exe`
-and `bay-aarch64-windows.exe`. Put the one for yours on the `PATH` as `bay`:
-
-```sh
-curl -fL -o ~/.local/bin/bay https://github.com/pedronaugusto/bay/releases/latest/download/bay-aarch64-macos
-chmod +x ~/.local/bin/bay
-```
-
-No Zig is needed first. bay builds each package with the Zig it names, installing it
-on first use, and starts a new package with the Zig on the `PATH`, or else the release
-bay was built with.
-
 From source, with Zig 0.17.0:
 
 ```sh
@@ -44,9 +31,13 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 bay installs itself into `~/.local/bin`. Installed from a URL
-(`bay install git+https://github.com/pedronaugusto/bay#v0.1.0`), it updates with
-`bay install --update bay`. `zig build dist` builds the release programs into
-`zig-out/dist`.
+(`bay install git+https://github.com/pedronaugusto/bay#v0.1.14`), it updates with
+`bay install --update bay`. After that no Zig is needed first: bay builds each
+package with the Zig it names, installing it on first use, and starts a new package
+with the Zig on the `PATH`, or else the release bay was built with. `zig build dist`
+builds the program for every host into `zig-out/dist`: `bay-x86_64-linux`,
+`bay-aarch64-linux`, `bay-x86_64-macos`, `bay-aarch64-macos`, `bay-x86_64-windows.exe`
+and `bay-aarch64-windows.exe`.
 
 ## A first package
 
@@ -56,6 +47,7 @@ bay add git+https://github.com/owner/library#v1.2.0   # a dependency it ships
 bay add --dev git+https://github.com/owner/checker    # a tool it is developed with
 bay test                                               # zig build test, with both
 bay tree                                               # what it builds with
+bay update                                             # library to its newest v1 release, never v2
 ```
 
 An existing package adopts bay with `bay init` at its root, which adds an empty

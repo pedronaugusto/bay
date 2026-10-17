@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A command that writes pins (`add`, `remove`, `update`, `upgrade`) and is then refused by the graph leaves the manifest as it was: the edit is tidied and resolved in memory, the package's own revision read from it, and written once, only when it resolves. `bay add ../dir` of a path dependency whose pins were behind the selection wrote the pin, then refused.
+- README: the install section says what is true (from source; `zig build dist` builds the six host programs), and `bay update` is shown moving along a release line.
+
 ## [0.1.13] - 2026-10-14
 
 ### Fixed

@@ -142,7 +142,8 @@ pub fn resolve(input: Input) !Resolution {
     var mains: std.ArrayList(select.Revision) = .empty;
     // Every package under development takes part with its development, as Go
     // counts each workspace module's tests: every member resolves one graph.
-    try mains.append(a, if (input.development) try store.developedAt(input.io, a, input.package) else try store.revisionAt(input.io, a, input.package, .{ .directory = input.package }));
+    // The package as `input.parsed` has it, which a writing command resolves before it writes.
+    try mains.append(a, try store.revisionOf(input.io, a, input.package, .{ .directory = input.package }, input.parsed, input.development));
     for (input.members) |member| try mains.append(a, try store.developedAt(input.io, a, member));
     for (input.parsed.overrides) |override| try mains.append(a, switch (override.source) {
         .path => |path| main: {

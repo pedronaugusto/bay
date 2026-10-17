@@ -179,8 +179,14 @@ fn read(io: Io, a: std.mem.Allocator, directory: []const u8, place: select.Place
         error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{path}),
         error.OutOfMemory => |e| return e,
     };
+    return revisionOf(io, a, directory, place, parsed, developed);
+}
+
+/// The revision `parsed`, the manifest of the package in `directory` as it
+/// stands in memory, makes: what a command about to write it resolves.
+pub fn revisionOf(io: Io, a: std.mem.Allocator, directory: []const u8, place: select.Place, parsed: manifest.Manifest, developed: bool) !select.Revision {
     const version = std.SemanticVersion.parse(parsed.version) catch
-        try say.fail(io, "{s}: .version \"{s}\" is not a semantic version", .{ path, parsed.version });
+        try say.fail(io, "{s}/build.zig.zon: .version \"{s}\" is not a semantic version", .{ directory, parsed.version });
     const shipped = try pins(a, directory, parsed.normal);
     const developing = try pins(a, directory, if (developed) parsed.dev else &.{});
     for (developing) |*pin| pin.dev = true;

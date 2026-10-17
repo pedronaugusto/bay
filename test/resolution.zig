@@ -675,6 +675,21 @@ test "a path dependency with pins behind the selection is refused, as Zig would 
     try std.testing.expect(std.mem.find(u8, built.stderr, "a sees 0.1.1, b sees 0.1.1") != null);
 }
 
+test "a dependency added where the graph is refused leaves the manifest as it was" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // a pins c 0.1.0; taken by path beside b, which selects c 0.1.1, it is refused.
+    try f.application("app", try f.pin("b", "b"), &.{"b"}, "pub fn main() void {}");
+    const before = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const refusal = try f.bay("app", &.{ "add", "../a" });
+    try std.testing.expect(refused(refusal));
+    try std.testing.expect(std.mem.find(u8, refusal.stderr, "a is a path dependency, which Zig builds with its own manifest's pins, and they are behind the selection") != null);
+    try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20)));
+}
+
 test "a member checked out a second time is that member, and tidy there keeps its own pins" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
