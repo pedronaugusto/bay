@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-10-17
+
 ### Fixed
 
 - A command that writes pins (`add`, `remove`, `update`, `upgrade`) and is then refused by the graph leaves the manifest as it was: the edit is tidied and resolved in memory, the package's own revision read from it, and written once, only when it resolves. `bay add ../dir` of a path dependency whose pins were behind the selection wrote the pin, then refused.
@@ -153,7 +155,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.13...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/pedronaugusto/bay/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/pedronaugusto/bay/compare/v0.1.10...v0.1.13
 [0.1.10]: https://github.com/pedronaugusto/bay/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/pedronaugusto/bay/compare/v0.1.8...v0.1.9
