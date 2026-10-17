@@ -74,10 +74,16 @@ const Fixture = struct {
         const absolute = try std.fs.path.join(f.a, &.{ f.root, dir });
         const fetched = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", absolute }, .environ_map = &f.env });
         try std.testing.expect(succeeded(fetched));
-        // A file URL's path starts with `/` and has `/` between its parts: `file:///D:/a` on Windows.
-        const path = try f.a.dupe(u8, absolute);
+        return f.a.print(".{s} = .{{ .url = \"{s}\", .hash = \"{s}\" }},", .{ key, try fileUrl(f.a, absolute), std.mem.trim(u8, fetched.stdout, "\r\n") });
+    }
+
+    /// A URL for the file at `absolute` that Zig's fetch opens: it opens a file URL's
+    /// path as written, so a Windows path keeps its drive first (`file:D:/a/t.tar`, the
+    /// DOS form RFC 8089 allows), where `file:///D:/a` would be opened as `/D:/a`.
+    fn fileUrl(a: std.mem.Allocator, absolute: []const u8) ![]const u8 {
+        const path = try a.dupe(u8, absolute);
         std.mem.replaceScalar(u8, path, '\\', '/');
-        return f.a.print(".{s} = .{{ .url = \"file://{s}{s}\", .hash = \"{s}\" }},", .{ key, if (path[0] == '/') "" else "/", path, std.mem.trim(u8, fetched.stdout, "\r\n") });
+        return a.print("file:{s}{s}", .{ if (path[0] == '/') "//" else "", path });
     }
 
     fn run(f: *Fixture, dir: []const u8, argv: []const []const u8) !std.process.RunResult {
@@ -277,9 +283,7 @@ test "a package archived under one top directory, with a package nested by path,
     const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
-    const path = try std.fs.path.join(f.a, &.{ f.root, "t.tar" });
-    std.mem.replaceScalar(u8, path, '\\', '/');
-    const pin = try f.a.print(".t = .{{ .url = \"file://{s}{s}\", .hash = \"{s}\" }},", .{ if (path[0] == '/') "" else "/", path, hash });
+    const pin = try f.a.print(".t = .{{ .url = \"{s}\", .hash = \"{s}\" }},", .{ try Fixture.fileUrl(f.a, try std.fs.path.join(f.a, &.{ f.root, "t.tar" })), hash });
     try f.application("app", pin, &.{"t"}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"t {s}\\n\", .{@import(\"t\").version}); }");
     const built = try f.bay("app", &.{ "build", "run" });
     try std.testing.expect(succeeded(built));
