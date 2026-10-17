@@ -267,16 +267,19 @@ test "a package archived under one top directory, with a package nested by path,
     try archive.finishPedantically();
     try file_writer.interface.flush();
     archive_file.close(f.io);
-    // The hash Zig gives the package is its files', the directory's as the archive's;
-    // taken in a cache of its own, so bay's cache holds no copy and bay fetches it.
-    var hashing = try f.env.clone(f.a);
-    try hashing.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(f.a, &.{ f.root, "hashing-cache" }));
-    const hashed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "t-1.0" }) }, .environ_map = &hashing });
+    // The hash Zig gives the package is its files', the directory's as the archive's.
+    // Taken in the tests' cache, whose build runner is built already (a cache of its
+    // own builds it again, past the watchdog on a hosted runner); the package is then
+    // taken out of the cache, so bay fetches it.
+    const hashed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "t-1.0" }) }, .environ_map = &f.env });
     try std.testing.expect(succeeded(hashed));
-    try f.env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(f.a, &.{ f.root, "cache" }));
+    const hash = std.mem.trim(u8, hashed.stdout, "\r\n");
+    const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
     const path = try std.fs.path.join(f.a, &.{ f.root, "t.tar" });
     std.mem.replaceScalar(u8, path, '\\', '/');
-    const pin = try f.a.print(".t = .{{ .url = \"file://{s}{s}\", .hash = \"{s}\" }},", .{ if (path[0] == '/') "" else "/", path, std.mem.trim(u8, hashed.stdout, "\r\n") });
+    const pin = try f.a.print(".t = .{{ .url = \"file://{s}{s}\", .hash = \"{s}\" }},", .{ if (path[0] == '/') "" else "/", path, hash });
     try f.application("app", pin, &.{"t"}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"t {s}\\n\", .{@import(\"t\").version}); }");
     const built = try f.bay("app", &.{ "build", "run" });
     try std.testing.expect(succeeded(built));
