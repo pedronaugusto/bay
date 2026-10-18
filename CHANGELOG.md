@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- aegis 0.1.14 (from 0.1.6), the version the development build selects since preflight 0.10.0.
+- Developed with preflight 0.10.0 (from 0.5.3): Z026 gated, every test under preflight's runner, the caller checked against its plan, a test leaving its output held failing, and the API-diff check; bay met each with nothing to change.
+
 ## [0.1.14] - 2026-10-17
 
 ### Fixed

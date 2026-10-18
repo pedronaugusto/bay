@@ -6,8 +6,8 @@
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.6#2b97b877a07690ea3ac447f82f9efe660743a84a",
-            .hash = "aegis-0.1.6-rsxouvHOBwC2_K3U8Vewo9LnTYL48c57ztMYdlW72Z3r",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.14#5852ab956e97a47926af73abbb7dced5361f9267",
+            .hash = "aegis-0.1.14-rsxouiwFCACpt6FVOECFUhpjUaetlNneWpaDTj95q514",
         },
 
         .ensign = .{
@@ -17,8 +17,8 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.5.3#5518e92aa5a1e587392477dc4b6e08296562f5ee",
-            .hash = "preflight-0.5.3-LX1Zwq_aDwA3R2OIbpL6xl-BmoDw8NyTOcq3vV-Q5G2u",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.10.0#566cf937c3f74b3c1926894b171d5dbc690da713",
+            .hash = "preflight-0.10.0-LX1ZwqCPEgCpI5m5EI8usZT1La-EDidPqAm7stEzs_MJ",
         },
 
         .shakedown = .{
