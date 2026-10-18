@@ -66,6 +66,9 @@ pub const ParseError = error{ InvalidManifest, OutOfMemory };
 
 /// Reads the fields bay needs. Strings are owned by `arena`.
 pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest {
+    // Zig source is UTF-8, and std's literal parsing reads past a sequence cut short
+    // (`'\xe2\x82'` panics in `std.zig.parseCharLiteral`, Zig 0.17.0).
+    if (!std.unicode.utf8ValidateSlice(source)) return error.InvalidManifest;
     const tree = try Ast.parse(arena, source, .{ .mode = .zon });
     if (tree.errors.len != 0) return error.InvalidManifest;
     const zoir = try std.zig.ZonGen.generate(arena, tree, .{});
@@ -441,6 +444,12 @@ test "ensureList adds an empty list once" {
     try std.testing.expect(std.mem.find(u8, added, ".dev_dependencies = .{},") != null);
     try std.testing.expectEqual(null, try ensureList(gpa, added, .dev));
     try std.testing.expectEqual(null, try ensureList(gpa, sample, .normal));
+}
+
+test "a manifest that is not UTF-8 is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidManifest, parse(arena.allocator(), ".{ .name = .demo, .x = '\xe2\x82' }"));
 }
 
 test "a dependency missing its hash is refused" {

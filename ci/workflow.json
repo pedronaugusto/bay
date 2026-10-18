@@ -1,4 +1,5 @@
 {
   "land": true,
-  "release": true
+  "release": true,
+  "hardened": true
 }

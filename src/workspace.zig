@@ -50,7 +50,9 @@ pub fn all(io: Io, a: std.mem.Allocator, from: []const u8) !?[]const []const u8 
     const found = try find(io, a, from) orelse return null;
     const Work = struct { members: []const []const u8 };
     var diagnostics: std.zon.parse.Diagnostics = undefined;
-    const work = std.zon.parse.fromSlice(Work, .{ .gpa = a, .arena = a, .source = found.text, .diagnostics = &diagnostics }) catch |err| switch (err) {
+    // ZON is UTF-8, which std's literal parsing takes for granted (`manifest.parse`).
+    const read = if (std.unicode.utf8ValidateSlice(found.text)) std.zon.parse.fromSlice(Work, .{ .gpa = a, .arena = a, .source = found.text, .diagnostics = &diagnostics }) else error.ParseZon;
+    const work = read catch |err| switch (err) {
         error.ParseZon => try say.fail(io, "{s} is not a workspace bay can read: .{{ .members = .{{ \"dir\", ... }} }}", .{found.path}),
         error.OutOfMemory => |e| return e,
     };

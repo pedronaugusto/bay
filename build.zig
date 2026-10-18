@@ -39,7 +39,9 @@ pub fn dev(b: *std.Build, tools: type) void {
     const check = b.step("check", "Compile the program and the tests without running them");
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown");
     tests(b, package, target, optimize, shakedown, step, check);
-    tools.preflight.addCi(b, package, .{ .tests = step });
+    // The release tier fuzzes the properties and runs the suite under ThreadSanitizer: a
+    // workspace runs its members on threads of its own.
+    tools.preflight.addCi(b, package, .{ .tests = step, .hardened = .{ .fuzz_step = "test", .tsan_step = "test" } });
 }
 
 /// bay's root module from `package`'s sources, built in `b`, with aegis and ensign.
