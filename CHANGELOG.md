@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-10-18
+
 ### Fixed
 
 - A manifest or `bay.work` that is not UTF-8 is refused as unreadable: std's ZON reader panicked on a character literal whose UTF-8 sequence is cut short (`'\xe2\x82'`), found by the hardened profile's fuzzing.
@@ -166,7 +168,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.14...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.15...HEAD
+[0.1.15]: https://github.com/pedronaugusto/bay/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/pedronaugusto/bay/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/pedronaugusto/bay/compare/v0.1.10...v0.1.13
 [0.1.10]: https://github.com/pedronaugusto/bay/compare/v0.1.9...v0.1.10
