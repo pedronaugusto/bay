@@ -77,10 +77,14 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
         .optimize = optimize,
         .imports = &.{.{ .name = "options", .module = options.createModule() }},
     }) });
+    check.dependOn(&end_to_end.step);
+    // End to end, bay runs the Zig that builds it, which runs on this host alone: a
+    // build for another machine (the riscv64 kernel's leg) runs the unit tests there.
+    const host = b.graph.host.result;
+    if (target.result.cpu.arch != host.cpu.arch or target.result.os.tag != host.os.tag) return;
     // The tests run bay, Zig and git on packages they write, none of which is an input
     // Zig tracks: a run is never taken from the cache.
     const run_end_to_end = b.addRunArtifact(end_to_end);
     run_end_to_end.has_side_effects = true;
     step.dependOn(&run_end_to_end.step);
-    check.dependOn(&end_to_end.step);
 }

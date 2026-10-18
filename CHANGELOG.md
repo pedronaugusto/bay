@@ -11,6 +11,7 @@
 - aegis 0.1.14 (from 0.1.6), the version the development build selects since preflight 0.10.0.
 - Developed with preflight 0.10.0 (from 0.5.3): Z026 gated, every test under preflight's runner, the caller checked against its plan, a test leaving its output held failing, and the API-diff check; bay met each with nothing to change.
 - The hardened profile: the release tier runs the suite with safety on, fuzzes its properties, and runs it under ThreadSanitizer.
+- The end-to-end tests run where bay is built for the host it runs on: they run the host's Zig, which the riscv64 kernel's leg has none of; that leg runs the unit tests.
 
 ## [0.1.14] - 2026-10-17
 
