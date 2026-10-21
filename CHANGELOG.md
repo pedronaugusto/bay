@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Development: the lint gates the aegis pack, glint's A001-A005 (`ci/preflight.json`).
+
 ## [0.1.15] - 2026-10-18
 
 ### Fixed
