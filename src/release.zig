@@ -400,7 +400,6 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
 pub fn train(c: Context, options: Options) !u8 {
     const directories = try workspace.all(c.io, c.a, c.package) orelse try say.fail(c.io, "no {s} here or in any directory above", .{workspace.file_name});
     const cars = try each.train(c.io, c.a, directories);
-    const Done = enum { released, pushed, nothing, failed, skipped };
     const done = try c.a.alloc(Done, cars.len);
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
     @memset(versions, null);
@@ -410,28 +409,16 @@ pub fn train(c: Context, options: Options) !u8 {
                 try say.note(c.io, "{s}: skipped, since {s} did not release", .{ car.name, cars[need].name });
                 break .skipped;
             }
-        } else outcome: {
-            try say.note(c.io, "{s}: {s}", .{ car.name, car.directory });
-            var member = c;
-            member.package = car.directory;
-            repinned(member, options) catch |err| switch (err) {
-                error.Reported => break :outcome .failed,
-                else => return err,
-            };
-            break :outcome switch (run(member, .{ .dry_run = options.dry_run, .push_unreleased = true }) catch |err| switch (err) {
-                error.Reported => break :outcome .failed,
-                else => return err,
-            }) {
-                .nothing => .nothing,
-                .pushed => .pushed,
-                .held => unreachable, // unreachable: a train pushes each release before the next pins it
-                .released => |v| released: {
-                    version.* = v;
-                    break :released .released;
-                },
-            };
-        };
+        } else try ride(c, car, options, .always, version);
     }
+    // A development pin that would close a ring is left out of the order (a tool developed
+    // with a release of a member that ships it): its member went first, and now pins the
+    // release made after it, gated again and pushed.
+    if (!options.dry_run) for (cars, done, versions) |car, *outcome, *version| {
+        if (outcome.* == .failed or outcome.* == .skipped) continue;
+        const again = try ride(c, car, options, .when_repinned, version);
+        if (again == .failed or again == .released or again == .pushed) outcome.* = again;
+    };
     var failed = false;
     for (cars, done, versions) |car, outcome, version| {
         if (version) |v| try say.note(c.io, "{s}: released {f}", .{ car.name, v }) else try say.note(c.io, "{s}: {t}", .{ car.name, outcome });
@@ -440,16 +427,44 @@ pub fn train(c: Context, options: Options) !u8 {
     return if (failed) 1 else 0;
 }
 
+const Done = enum { released, pushed, nothing, failed, skipped };
+
+/// One member's turn: pinned at the releases before it, then released, or gated and pushed
+/// with development pins alone. `.when_repinned` takes a turn only when the pins moved.
+fn ride(c: Context, car: each.Car, options: Options, when: enum { always, when_repinned }, version: *?std.SemanticVersion) !Done {
+    var member = c;
+    member.package = car.directory;
+    const pins_moved = repinned(member, options) catch |err| switch (err) {
+        error.Reported => return .failed,
+        else => return err,
+    };
+    if (when == .when_repinned and !pins_moved) return .nothing;
+    try say.note(c.io, "{s}: {s}", .{ car.name, car.directory });
+    return switch (run(member, .{ .dry_run = options.dry_run, .push_unreleased = true }) catch |err| switch (err) {
+        error.Reported => return .failed,
+        else => return err,
+    }) {
+        .nothing => .nothing,
+        .pushed => .pushed,
+        .held => unreachable, // unreachable: a train pushes each release before the next pins it
+        .released => |v| released: {
+            version.* = v;
+            break :released .released;
+        },
+    };
+}
+
 /// The member pinned at the releases of the members it depends on, as `bay tidy`
 /// pins them in a workspace; its normal dependencies' re-pins named in its
-/// CHANGELOG, and the change committed. A dry run says what would move.
-fn repinned(c: Context, options: Options) !void {
+/// CHANGELOG, and the change committed; whether anything moved. A dry run says what
+/// would move, and moves nothing.
+fn repinned(c: Context, options: Options) !bool {
     const bay = c.environ.get("BAY").?; // safe: main sets BAY before any command
     if (options.dry_run) {
         // --locked names what would move and writes nothing; a refusal to write is its answer.
         var child = try std.process.spawn(c.io, .{ .argv = &.{ bay, "--locked", "tidy" }, .cwd = .{ .path = c.package }, .environ_map = c.environ });
         _ = try child.wait(c.io);
-        return;
+        return false;
     }
     const before_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
     var child = std.process.spawn(c.io, .{ .argv = &.{ bay, "tidy" }, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
@@ -459,7 +474,7 @@ fn repinned(c: Context, options: Options) !void {
         else => try say.fail(c.io, "bay tidy failed in {s}", .{c.package}),
     }
     const after_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
-    if (std.mem.eql(u8, before_text, after_text)) return;
+    if (std.mem.eql(u8, before_text, after_text)) return false;
     const before = try manifest.parse(c.a, before_text);
     const after = try manifest.parse(c.a, after_text);
     const shipped = try moved(c.a, before.normal, after.normal);
@@ -475,6 +490,7 @@ fn repinned(c: Context, options: Options) !void {
     _ = try must(c, &.{ "add", "--", "build.zig.zon", "CHANGELOG.md" });
     const all = try std.mem.concat(c.a, []const u8, &.{ shipped, developed });
     _ = try must(c, &.{ "commit", "--quiet", "-m", try c.a.print("Pin {s}", .{try listed(c.a, all)}) });
+    return true;
 }
 
 /// `name version` of each dependency `after` pins at another hash than `before`.

@@ -469,6 +469,11 @@ test "a workspace's train releases its members in order, each pinned at the rele
         try w.git(dir, &.{ "commit", "--quiet", "-am", "Pin" });
         try w.git(dir, &.{ "push", "--quiet", "origin", "main" });
     }
+    // a is developed with c, which ships b, which ships a: that pin would close a ring, so a
+    // goes first and pins c's new release once c has one.
+    try std.testing.expect(succeeded(try w.f.bay("a", &.{ "add", "--dev", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("c")}) })));
+    try w.git("a", &.{ "commit", "--quiet", "-am", "Develop with c" });
+    try w.git("a", &.{ "push", "--quiet", "origin", "main" });
     try w.f.write(".", "bay.work", ".{ .members = .{ \"c\", \"b\", \"a\" } }\n");
     try w.change("a", "### Fixed\n\n- A fix.\n");
     const train = try w.f.bay(".", &.{ "--workspace", "release" });
@@ -484,4 +489,11 @@ test "a workspace's train releases its members in order, each pinned at the rele
         try std.testing.expectEqualStrings("Release v0.1.1", try w.out(dir, &.{ "log", "-1", "--format=%s" }));
         try std.testing.expectEqualStrings(try w.f.a.print("Pin {s} 0.1.1", .{dependency}), try w.out(dir, &.{ "log", "-1", "--format=%s", "HEAD^" }));
     }
+    // a's development pin moved after c's tag: gated and pushed, a release of nothing.
+    try std.testing.expectEqualStrings("Pin c 0.1.1", try w.out("a", &.{ "log", "-1", "--format=%s" }));
+    try std.testing.expectEqualStrings(try w.head("a"), try w.remoteAt("a", "refs/heads/main"));
+    try std.testing.expectEqualStrings(try w.out("a", &.{ "rev-parse", "HEAD^" }), try w.remoteAt("a", "refs/tags/v0.1.1"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("a", "refs/tags/v0.1.2"));
+    try std.testing.expectEqual(1, std.mem.count(u8, try w.read("a", "build.zig.zon"), "?ref=v0.1.1#"));
+    try std.testing.expectEqual(1, try w.gated(try w.head("a")));
 }
