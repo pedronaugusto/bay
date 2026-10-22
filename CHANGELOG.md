@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-10-22
+
 ### Added
 
 - `bay release`: the version the CHANGELOG's `[Unreleased]` section makes (Breaking and Removed the minor below 1.0, the major from it; Added and Deprecated the minor from 1.0; the rest the patch), the section cut into the release and the manifest's `.version` set, committed as `Release vX.Y.Z`, gated by the package's own `gate` step on that commit, then the branch and its tag pushed in one atomic push over SSH and read back. It refuses a tree with changes, a branch behind its remote, a remote that is not SSH, a version already tagged, a manifest and a changelog at different releases, and an entry under no group. A red gate puts the branch back; a stopped release is finished by the next run; `--dry-run` prints the version, the section and the plan; `--no-push` commits and gates, holding the gated commit for a later `bay release` to push without gating it again.
@@ -179,7 +181,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.15...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.16...HEAD
+[0.1.16]: https://github.com/pedronaugusto/bay/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/pedronaugusto/bay/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/pedronaugusto/bay/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/pedronaugusto/bay/compare/v0.1.10...v0.1.13
