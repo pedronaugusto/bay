@@ -118,12 +118,14 @@ const Add = struct {
 
 const Release = struct {
     dry_run: bool = false,
+    no_push: bool = false,
     gate_bundle: ?[]const u8 = null,
     package: []const u8 = ".",
     pub const spec: ensign.Spec(@This()) = .{
         .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed, gated here and on the machines in bay's machines.zon, then the branch and its tag pushed at once over SSH",
         .options = .{
             .dry_run = .{ .help = "Print the version, the section as it will be written and the plan; change nothing" },
+            .no_push = .{ .help = "Commit and gate, and push nothing: the gated commit is held here for a later bay release to push without gating it again" },
             .gate_bundle = .{ .hidden = true, .value_name = "DIRECTORY", .help = "A machine's side of a release: the commit on stdin, gated in a repository at DIRECTORY" },
             .package = .{ .hidden = true, .help = "With --gate-bundle, the package's directory in the repository" },
         },
@@ -292,10 +294,11 @@ fn releaseCommand(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Ma
     if (args.gate_bundle) |directory| return machines.receive(io, a, environ, directory, args.package);
     if (cli.workspace) {
         if (cli.jobs != null) try say.fail(io, "a train releases one member at a time: --jobs is for other commands", .{});
+        if (args.no_push) try say.fail(io, "a train pushes each release before the next member pins it: --no-push is for one package", .{});
         const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
         return release.train(.{ .io = io, .a = a, .environ = environ, .package = here }, .{ .dry_run = args.dry_run });
     }
-    _ = try release.run(.{ .io = io, .a = a, .environ = environ, .package = try findPackage(io, a) }, .{ .dry_run = args.dry_run });
+    _ = try release.run(.{ .io = io, .a = a, .environ = environ, .package = try findPackage(io, a) }, .{ .dry_run = args.dry_run, .no_push = args.no_push });
     return 0;
 }
 

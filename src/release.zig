@@ -34,6 +34,9 @@ pub const Options = struct {
     /// With an empty section and commits the remote has not (a train's development
     /// pins), gate them and push the branch with no tag.
     push_unreleased: bool = false,
+    /// Commit and gate, and push nothing: the gated commit waits, recorded, for a later
+    /// `bay release` (another person's, it may be) to push it without gating it again.
+    no_push: bool = false,
 };
 
 pub const Outcome = union(enum) {
@@ -41,6 +44,8 @@ pub const Outcome = union(enum) {
     nothing,
     /// The branch pushed with no release.
     pushed,
+    /// Gated green and held here, for a later run to push.
+    held: std.SemanticVersion,
     released: std.SemanticVersion,
 };
 
@@ -235,7 +240,7 @@ pub fn run(c: Context, options: Options) !Outcome {
     };
     const gate_machines = try machines.load(c.io, c.a, c.environ);
     if (options.dry_run) {
-        try dryRun(c, up, plan, gate_machines);
+        try dryRun(c, up, plan, gate_machines, options);
         return .nothing;
     }
     if (plan.cut) |cut| {
@@ -259,6 +264,10 @@ pub fn run(c: Context, options: Options) !Outcome {
         _ = try must(c, &.{ "reset", "--quiet", "--keep", plan.start });
         try say.fail(c.io, "the gate is red: nothing was tagged or pushed, and {s} is back at {s}", .{ up.branch, plan.start[0..12] });
     } else _ = try must(c, &.{ "update-ref", gated, commit });
+    if (options.no_push) {
+        try say.note(c.io, "{s} at {s} is gated green and held here: bay release pushes it, with no gate again", .{ plan.tag, commit[0..12] });
+        return .{ .held = plan.version };
+    }
     try push(c, up, commit, plan.tag);
     _ = try must(c, &.{ "update-ref", "-d", gated });
     try say.note(c.io, "released {s} {s} at {s}: {s} and the tag on {s}", .{ parsed.name, plan.tag, commit[0..12], up.branch, up.remote });
@@ -361,7 +370,7 @@ fn pushUnreleased(c: Context, up: Upstream, head: []const u8, options: Options) 
     return .pushed;
 }
 
-fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.Machine) !void {
+fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.Machine, options: Options) !void {
     if (plan.cut) |cut| {
         try say.out(c.io, "{f} -> {f} ({t})\n\n## [{f}] - {s}\n\n", .{ cut.from, plan.version, cut.section.change(), plan.version, try changelog.today(c.a, c.io) });
         var out: Io.Writer.Allocating = .init(c.a);
@@ -371,7 +380,9 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
     } else try say.out(c.io, "{s} under way at HEAD\n", .{plan.tag});
     try say.out(c.io, "gate it here", .{});
     for (gate_machines) |machine| try say.out(c.io, ", on {s}", .{machine.name});
-    try say.out(c.io, "\npush {s} and {s} to {s} ({s}) at once\n", .{ up.branch, plan.tag, up.remote, up.url });
+    if (options.no_push) {
+        try say.out(c.io, "\nhold it here, gated, for a later bay release to push\n", .{});
+    } else try say.out(c.io, "\npush {s} and {s} to {s} ({s}) at once\n", .{ up.branch, plan.tag, up.remote, up.url });
 }
 
 /// `bay --workspace release`: the train. Members one at a time, each after the
@@ -407,6 +418,7 @@ pub fn train(c: Context, options: Options) !u8 {
             }) {
                 .nothing => .nothing,
                 .pushed => .pushed,
+                .held => unreachable, // unreachable: a train pushes each release before the next pins it
                 .released => |v| released: {
                     version.* = v;
                     break :released .released;

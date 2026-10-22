@@ -376,12 +376,23 @@ test "a release stopped after its commit or its push is finished, and never tags
     try std.testing.expect(contains(pushed.stderr, "was gated green; pushing it"));
     try std.testing.expectEqual(1, try w.gated(second));
     try std.testing.expectEqualStrings(second, try w.remoteAt("lib", "refs/tags/v0.1.2"));
+    // Held with --no-push: gated, recorded, nothing on the remote; the next run pushes it ungated.
+    try w.change("lib", "### Fixed\n\n- A held fix.\n");
+    const held = try w.releaseIn("lib", &.{"--no-push"});
+    try std.testing.expect(succeeded(held));
+    try std.testing.expect(contains(held.stderr, "v0.1.3 at"));
+    const third = try w.head("lib");
+    try std.testing.expectEqualStrings(third, try w.out("lib", &.{ "rev-parse", "refs/bay/gated/v0.1.3" }));
+    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.3"));
+    try std.testing.expect(succeeded(try w.releaseIn("lib", &.{})));
+    try std.testing.expectEqual(1, try w.gated(third));
+    try std.testing.expectEqualStrings(third, try w.remoteAt("lib", "refs/tags/v0.1.3"));
     // Pushed, with the tag here lost before the read-back: the remote's is taken.
-    try w.git("lib", &.{ "tag", "--delete", "v0.1.2" });
+    try w.git("lib", &.{ "tag", "--delete", "v0.1.3" });
     const confirmed = try w.releaseIn("lib", &.{});
     try std.testing.expect(succeeded(confirmed));
-    try std.testing.expect(contains(confirmed.stderr, "v0.1.2 is on origin at"));
-    try std.testing.expectEqualStrings(second, try w.out("lib", &.{ "rev-parse", "v0.1.2^{commit}" }));
+    try std.testing.expect(contains(confirmed.stderr, "v0.1.3 is on origin at"));
+    try std.testing.expectEqualStrings(third, try w.out("lib", &.{ "rev-parse", "v0.1.3^{commit}" }));
     // A stopped release under later commits is refused, naming it; so is a tag made here and never pushed.
     try w.change("lib", "### Fixed\n\n- A third fix.\n");
     try refusePushes(&w, hook);
@@ -392,14 +403,14 @@ test "a release stopped after its commit or its push is finished, and never tags
     try w.git("lib", &.{ "commit", "--quiet", "-m", "Later" });
     const buried = try w.releaseIn("lib", &.{});
     try std.testing.expect(refused(buried));
-    try std.testing.expect(contains(buried.stderr, "CHANGELOG.md releases 0.1.3, and no tag names it"));
-    try w.git("lib", &.{ "reset", "--quiet", "--hard", "v0.1.2" });
+    try std.testing.expect(contains(buried.stderr, "CHANGELOG.md releases 0.1.4, and no tag names it"));
+    try w.git("lib", &.{ "reset", "--quiet", "--hard", "v0.1.3" });
     try w.change("lib", "### Fixed\n\n- A fourth fix.\n");
-    try w.git("lib", &.{ "tag", "v0.1.3" });
+    try w.git("lib", &.{ "tag", "v0.1.4" });
     const local = try w.releaseIn("lib", &.{});
     try std.testing.expect(refused(local));
     try std.testing.expect(contains(local.stderr, "is tagged here already"));
-    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.3"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.4"));
 }
 
 /// The remote of `lib` refuses every push while its pre-receive hook is there.

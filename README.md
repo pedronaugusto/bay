@@ -220,7 +220,9 @@ anything else the last number. An empty section releases nothing. The section be
 gated by the package's own `gate` step (preflight's, from its development build), and only
 when the gate is green do the branch and the tag `vX.Y.Z` go to the branch's remote, in
 one atomic push over SSH, read back before the tag is made here. A red gate leaves the
-branch where it was. `bay release --dry-run` prints the version, the section and the plan.
+branch where it was. `bay release --dry-run` prints the version, the section and the plan;
+`bay release --no-push` commits and gates, and holds the gated commit for a later `bay
+release`, someone else's it may be, to push without gating it again.
 
 It refuses a tree with changes, a branch behind its remote or with none, a remote that is
 not SSH, a version already tagged, a manifest and a changelog at different releases, and a
@@ -296,7 +298,7 @@ with no remote reachable.
 | `bay licenses [--dev]` | Each package a build contains, with the license its files state; `--dev` adds the development tools |
 | `bay audit` | Each package the builds select, checked against its repository's published security advisories (GitHub; `GITHUB_TOKEN` when set) and its own retractions; fails on any finding |
 | `bay vendor` | Every package the graph reads, into `zig-pkg` |
-| `bay release [--dry-run]` | Release the package from its CHANGELOG's `[Unreleased]` section: commit, gate here and on the machines in `machines.zon`, push the branch and its tag at once over SSH |
+| `bay release [--dry-run] [--no-push]` | Release the package from its CHANGELOG's `[Unreleased]` section: commit, gate here and on the machines in `machines.zon`, push the branch and its tag at once over SSH |
 | `bay --workspace release` | Release every member that changed, in dependency order, each pinned at the releases before it |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
 | `bay fetch` | Fetch every dependency of both kinds |
