@@ -77,6 +77,34 @@ pub fn run(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map
     return if (failed == 0) 0 else 1;
 }
 
+/// A member as a train takes it: after each member it needs, which are
+/// indices of the train before it.
+pub const Car = struct { directory: []const u8, name: []const u8, needs: []const usize };
+
+/// The workspace's members one after another, each after the members it ships
+/// and is developed with, as `run` orders them.
+pub fn train(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]const Car {
+    const members = try order(io, a, directories);
+    // Where each member stands in the train, once placed.
+    const place = try a.alloc(?usize, members.len);
+    @memset(place, null);
+    const cars = try a.alloc(Car, members.len);
+    var placed: usize = 0;
+    while (placed < members.len) {
+        // The rings are refused by `order`, so each round places a member.
+        for (members, 0..) |member, index| {
+            if (place[index] != null) continue;
+            const waits = try a.alloc(usize, member.needs.len);
+            for (member.needs, waits) |need, *at| at.* = place[need] orelse break else {
+                cars[placed] = .{ .directory = member.directory, .name = member.name, .needs = waits };
+                place[index] = placed;
+                placed += 1;
+            }
+        }
+    }
+    return cars;
+}
+
 /// The members with what each depends on among them; a ring is refused, since
 /// no member of it could go first.
 fn order(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]Member {

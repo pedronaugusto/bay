@@ -251,6 +251,35 @@ pub fn remove(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind, name: []
     return format(gpa, try splice(a, source, range, ""));
 }
 
+/// `source` with the package's `.version` set to `version`, nothing else moved:
+/// only the string is replaced, so the file keeps its layout and comments.
+pub fn setVersion(gpa: std.mem.Allocator, source: [:0]const u8, version: std.SemanticVersion) ![:0]u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tree = try Ast.parse(a, source, .{ .mode = .zon });
+    if (tree.errors.len != 0) return error.InvalidManifest;
+    var buffer: [2]Ast.Node.Index = undefined;
+    const root = tree.fullStructInit(&buffer, tree.nodeData(.root).node) orelse return error.InvalidManifest;
+    for (root.ast.fields) |field| {
+        if (!std.mem.eql(u8, fieldName(tree, field), "version")) continue;
+        const token = tree.firstToken(field);
+        if (tree.tokenTag(token) != .string_literal or tree.lastToken(field) != token) return error.InvalidManifest;
+        const start = tree.tokenStart(token);
+        const edited = try splice(a, source, .{ .start = start, .end = start + tree.tokenSlice(token).len }, try a.print("\"{f}\"", .{version}));
+        return gpa.dupeSentinel(u8, edited, 0);
+    }
+    return error.InvalidManifest;
+}
+
+test "a manifest's version is set and nothing else moves" {
+    const a = std.testing.allocator;
+    const text = try setVersion(a, ".{\n    .name = .x, // the name\n    .version = \"0.1.0\",\n    .dependencies = .{ .d = .{ .url = \"u\", .hash = \"d-0.1.0-x\" } },\n}\n", .{ .major = 0, .minor = 2, .patch = 0 });
+    defer a.free(text);
+    try std.testing.expectEqualStrings(".{\n    .name = .x, // the name\n    .version = \"0.2.0\",\n    .dependencies = .{ .d = .{ .url = \"u\", .hash = \"d-0.1.0-x\" } },\n}\n", text);
+    try std.testing.expectError(error.InvalidManifest, setVersion(a, ".{ .name = .x }", .{ .major = 0, .minor = 1, .patch = 0 }));
+}
+
 /// A path as a manifest holds it: escaped as a ZON string, with `/` between its
 /// parts on every host, so a manifest written on Windows reads the same elsewhere.
 pub fn portable(path: []const u8) std.fmt.Alt([]const u8, writePortable) {

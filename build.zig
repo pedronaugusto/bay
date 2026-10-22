@@ -1,7 +1,8 @@
 const std = @import("std");
 const zon = @import("build.zig.zon");
 
-/// The bay program: std, aegis and ensign. Its tests are its development build's (`bay test`).
+/// The bay program: std, aegis and ensign; and the `changelog` module, std only. Its tests are
+/// its development build's (`bay test`).
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -9,6 +10,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     b.step("run", "Run bay").dependOn(&b.addRunArtifact(exe).step);
     dist(b);
+    // CHANGELOG.md as bay releases it, for a tool that checks a package against it (preflight).
+    _ = b.addModule("changelog", .{ .root_source_file = b.path("src/changelog.zig"), .target = target, .optimize = optimize });
 }
 
 /// The programs a release carries, one per host bay runs on, built ReleaseSafe
@@ -48,12 +51,12 @@ pub fn dev(b: *std.Build, tools: type) void {
 fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize) *std.Build.Module {
     const aegis = package.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const ensign = package.dependency("ensign", .{ .target = target, .optimize = optimize }).module("ensign");
-    const release = b.addOptions();
-    release.addOption([]const u8, "version", zon.version);
+    const own = b.addOptions();
+    own.addOption([]const u8, "version", zon.version);
     return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "aegis", .module = aegis },
         .{ .name = "ensign", .module = ensign },
-        .{ .name = "release", .module = release.createModule() },
+        .{ .name = "own", .module = own.createModule() },
     } });
 }
 
@@ -71,20 +74,26 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
     options.addOptionPath("bay", exe.getEmittedBin());
     options.addOption([]const u8, "zig", b.graph.zig_exe);
     options.addOption([]const u8, "version", zon.version);
-    const end_to_end = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = package.path("test/resolution.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "options", .module = options.createModule() }},
-    }) });
-    check.dependOn(&end_to_end.step);
-    // End to end, bay runs the Zig that builds it, which runs on this host alone: a
-    // build for another machine (the riscv64 kernel's leg) runs the unit tests there.
+    // The release tests push over git's SSH transport through this stand-in for ssh.
+    const ssh = b.addExecutable(.{ .name = "ssh", .root_module = b.createModule(.{ .root_source_file = package.path("test/ssh.zig"), .target = target, .optimize = optimize }) });
+    check.dependOn(&ssh.step);
+    options.addOptionPath("ssh", ssh.getEmittedBin());
     const host = b.graph.host.result;
-    if (target.result.cpu.arch != host.cpu.arch or target.result.os.tag != host.os.tag) return;
-    // The tests run bay, Zig and git on packages they write, none of which is an input
-    // Zig tracks: a run is never taken from the cache.
-    const run_end_to_end = b.addRunArtifact(end_to_end);
-    run_end_to_end.has_side_effects = true;
-    step.dependOn(&run_end_to_end.step);
+    for ([_][]const u8{ "test/resolution.zig", "test/release.zig" }) |root| {
+        const end_to_end = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = package.path(root),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "options", .module = options.createModule() }},
+        }) });
+        check.dependOn(&end_to_end.step);
+        // End to end, bay runs the Zig that builds it, which runs on this host alone: a
+        // build for another machine (the riscv64 kernel's leg) runs the unit tests there.
+        if (target.result.cpu.arch != host.cpu.arch or target.result.os.tag != host.os.tag) continue;
+        // The tests run bay, Zig and git on packages they write, none of which is an input
+        // Zig tracks: a run is never taken from the cache.
+        const run_end_to_end = b.addRunArtifact(end_to_end);
+        run_end_to_end.has_side_effects = true;
+        step.dependOn(&run_end_to_end.step);
+    }
 }

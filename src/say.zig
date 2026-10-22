@@ -35,3 +35,8 @@ fn write(io: Io, file: Io.File, comptime format: []const u8, args: anytype) Io.W
     try writer.interface.print(format, args);
     try writer.interface.flush();
 }
+
+/// Passes on a line another machine's bay wrote, after the machine's name.
+pub fn named(io: Io, name: []const u8, text: []const u8) Io.Writer.Error!void {
+    try write(io, Io.File.stderr(), "{s}: {s}\n", .{ name, text });
+}

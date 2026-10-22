@@ -18,7 +18,9 @@ const store = @import("store.zig");
 const licenses = @import("licenses.zig");
 const audit = @import("audit.zig");
 const say = @import("say.zig");
-const release = @import("release");
+const own = @import("own");
+const release = @import("release.zig");
+const machines = @import("machines.zig");
 const aegis = @import("aegis");
 const ensign = @import("ensign");
 
@@ -48,6 +50,7 @@ pub const Cli = struct {
         init,
         install: install.Args,
         uninstall: install.Uninstall,
+        release: Release,
         version,
         completions: Completions,
         step: ensign.External,
@@ -55,7 +58,7 @@ pub const Cli = struct {
 
     pub const spec: ensign.Spec(@This()) = .{
         .name = "bay",
-        .version = release.version,
+        .version = own.version,
         .about = "Dependencies for Zig packages, on Zig's own package manager",
         .description = "Each package builds with the exact Zig it names, which bay installs; ZIG names another by hand.",
         .options = .{
@@ -83,7 +86,8 @@ pub const Cli = struct {
         .examples = &.{
             .{ .command = "bay add https://github.com/pedronaugusto/aegis", .help = "Pin a dependency at its newest release" },
             .{ .command = "bay test -Dtest-filter=parse", .help = "Run a step, with arguments for zig build" },
-            .{ .command = "bay --workspace --jobs 4 land", .help = "Land every member of a workspace, in order" },
+            .{ .command = "bay release --dry-run", .help = "The version the CHANGELOG's [Unreleased] section makes, and what releasing it does" },
+            .{ .command = "bay --workspace release", .help = "Release every member of a workspace that changed, in order, each pinned at the releases before it" },
         },
     };
 };
@@ -108,6 +112,20 @@ const Add = struct {
             .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
             .name = .{ .help = "The name to pin the one source given under" },
             .sources = .{ .positional = true, .value_name = "URL-OR-DIRECTORY", .hint = .directory, .help = "A repository's URL (pinned at its newest release), a git URL with a ref, an archive URL, or a directory" },
+        },
+    };
+};
+
+const Release = struct {
+    dry_run: bool = false,
+    gate_bundle: ?[]const u8 = null,
+    package: []const u8 = ".",
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed, gated here and on the machines in bay's machines.zon, then the branch and its tag pushed at once over SSH",
+        .options = .{
+            .dry_run = .{ .help = "Print the version, the section as it will be written and the plan; change nothing" },
+            .gate_bundle = .{ .hidden = true, .value_name = "DIRECTORY", .help = "A machine's side of a release: the commit on stdin, gated in a repository at DIRECTORY" },
+            .package = .{ .hidden = true, .help = "With --gate-bundle, the package's directory in the repository" },
         },
     };
 };
@@ -180,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
         return w.interface.flush();
     };
     switch (command) {
-        .version => return Io.File.stdout().writeStreamingAll(io, "bay " ++ release.version ++ "\n"),
+        .version => return Io.File.stdout().writeStreamingAll(io, "bay " ++ own.version ++ "\n"),
         .completions => |c| {
             var buffer: [4096]u8 = undefined;
             var w = Io.File.stdout().writer(io, &buffer);
@@ -214,6 +232,7 @@ fn deferTidy(cli: *Cli) bool {
 fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli: Cli) !u8 {
     const command = cli.command.?; // safe: main answered a command line without one
     if (cli.jobs != null and !cli.workspace) try say.fail(io, "--jobs is for --workspace", .{});
+    if (command == .release) return releaseCommand(io, a, environ, cli, command.release);
     // Each member runs this bay with the same command, --locked kept.
     if (cli.workspace) {
         var member = cli;
@@ -264,8 +283,20 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         .build => |args| zigBuild(env, .package, &.{}, args.args),
         .dev => |args| zigBuild(env, .development, &.{}, args.args),
         .step => |args| step(env, args.name, args.args),
-        .init, .new, .install, .uninstall, .version, .completions => unreachable, // unreachable: answered above
+        .init, .new, .install, .uninstall, .version, .completions, .release => unreachable, // unreachable: answered above
     };
+}
+
+/// `bay release`, its train with `--workspace`, and a machine's side of either.
+fn releaseCommand(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli: Cli, args: Release) !u8 {
+    if (args.gate_bundle) |directory| return machines.receive(io, a, environ, directory, args.package);
+    if (cli.workspace) {
+        if (cli.jobs != null) try say.fail(io, "a train releases one member at a time: --jobs is for other commands", .{});
+        const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
+        return release.train(.{ .io = io, .a = a, .environ = environ, .package = here }, .{ .dry_run = args.dry_run });
+    }
+    _ = try release.run(.{ .io = io, .a = a, .environ = environ, .package = try findPackage(io, a) }, .{ .dry_run = args.dry_run });
+    return 0;
 }
 
 const Env = struct {
@@ -913,6 +944,7 @@ test "a step is found in zig build -l's listing" {
 
 // Every file's tests, each named: one left out would never run.
 test {
+    _ = @import("changelog.zig");
     _ = @import("dirs.zig");
     _ = @import("download.zig");
     _ = each;
@@ -922,9 +954,11 @@ test {
     _ = install;
     _ = licenses;
     _ = audit;
+    _ = machines;
     _ = manifest;
     _ = @import("minisign.zig");
     _ = published;
+    _ = release;
     _ = remotes;
     _ = resolve;
     _ = root;

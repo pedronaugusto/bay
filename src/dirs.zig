@@ -12,3 +12,12 @@ pub fn data(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
     if (environ.get("XDG_DATA_HOME")) |home| return std.fs.path.join(a, &.{ home, "bay" });
     return std.fs.path.join(a, &.{ environ.get("HOME") orelse try say.fail(io, "HOME is not set", .{}), ".local", "share", "bay" });
 }
+
+/// bay's configuration directory, for what the person sets once for every
+/// package (the machines a release is gated on): `$XDG_CONFIG_HOME/bay`,
+/// `~/.config/bay`, or `%APPDATA%\bay` on Windows.
+pub fn config(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map) ![]const u8 {
+    if (builtin.os.tag == .windows) return std.fs.path.join(a, &.{ environ.get("APPDATA") orelse try say.fail(io, "APPDATA is not set", .{}), "bay" });
+    if (environ.get("XDG_CONFIG_HOME")) |home| return std.fs.path.join(a, &.{ home, "bay" });
+    return std.fs.path.join(a, &.{ environ.get("HOME") orelse try say.fail(io, "HOME is not set", .{}), ".config", "bay" });
+}
