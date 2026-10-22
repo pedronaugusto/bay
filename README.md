@@ -163,9 +163,8 @@ same workspace), and members with nothing between them at once (`--jobs <n>` at 
 one per CPU by default). A development dependency that would close a ring, as a tool
 developed with a released copy of a package that ships it, is left out of the order:
 that member uses the release it pins. A member that fails skips the members that
-depend on it, and the rest go on. A workspace whose members land with a release step
-(preflight's `land`) lands with `bay --workspace land`: each member pins the releases
-of the members before it.
+depend on it, and the rest go on. `bay --workspace release` releases them in that order
+(below).
 
 ```sh
 bay --workspace test
@@ -198,6 +197,64 @@ bay writes the commit's tree as git stores it and has Zig hash it, so the pin is
 hash Zig gives the same commit over https, and Zig's cache keeps the package, where
 every build finds it. `git+file://` works the same for a repository on disk. Tags,
 `update` and `outdated` read such a remote through git too.
+
+## Releasing
+
+`bay release` releases the package from its `CHANGELOG.md`, written as
+[Keep a Changelog](https://keepachangelog.com) writes one: each change that reaches users
+adds a line under `## [Unreleased]`, in its group.
+
+```markdown
+## [Unreleased]
+
+### Fixed
+
+- A manifest that is not UTF-8 is refused.
+```
+
+The version is what the section asks for: `### Breaking` and `### Removed` move the minor
+below 1.0 and the major from it, `### Added` and `### Deprecated` the minor from 1.0, and
+anything else the last number. An empty section releases nothing. The section becomes
+`## [X.Y.Z] - date` (its groups in order, a group written twice made one), the manifest's
+`.version` takes the version, and both are committed as `Release vX.Y.Z`. That commit is
+gated by the package's own `gate` step (preflight's, from its development build), and only
+when the gate is green do the branch and the tag `vX.Y.Z` go to the branch's remote, in
+one atomic push over SSH, read back before the tag is made here. A red gate leaves the
+branch where it was. `bay release --dry-run` prints the version, the section and the plan.
+
+It refuses a tree with changes, a branch behind its remote or with none, a remote that is
+not SSH, a version already tagged, a manifest and a changelog at different releases, and a
+line under no group. A release stopped after its commit is finished by the next `bay
+release`, which gates the commit again; one whose push failed after a green gate is pushed
+without gating it again; one pushed whose tag never reached this clone is tagged here.
+
+Two branches adding lines under one group merge with no conflict when git merges
+CHANGELOG.md with its `union` driver:
+
+```text
+# .gitattributes
+CHANGELOG.md merge=union
+```
+
+A gate runs what its machine can run (a Mac its macOS suites, Linux its own). The machines
+a release is gated on besides this one are named in `machines.zon` in bay's configuration
+directory (`$XDG_CONFIG_HOME/bay`, `~/.config/bay`, `%APPDATA%\bay`), each with the command
+that runs bay there and a directory there for its copies:
+
+```zig
+.{
+    .{ .name = "linux", .bay = .{ "ssh", "linux-box", "bay" }, .directory = "/home/me/bay" },
+}
+```
+
+The release commit reaches each as a git bundle on that command's stdin, and every machine
+gates at once with this one, its lines named; the tag waits for all of them.
+
+`bay --workspace release` is the train: the members in dependency order, one at a time.
+Each is pinned at the releases of the members before it (as `bay tidy` pins them), its
+re-pinned dependencies named in its CHANGELOG (`- Pins a 0.3.1.` under `### Changed`) and
+committed, then released. A member whose only change is development pins is gated and
+pushed with no tag; a member that fails stops the members that depend on it.
 
 ## The exact Zig
 
@@ -239,6 +296,8 @@ with no remote reachable.
 | `bay licenses [--dev]` | Each package a build contains, with the license its files state; `--dev` adds the development tools |
 | `bay audit` | Each package the builds select, checked against its repository's published security advisories (GitHub; `GITHUB_TOKEN` when set) and its own retractions; fails on any finding |
 | `bay vendor` | Every package the graph reads, into `zig-pkg` |
+| `bay release [--dry-run]` | Release the package from its CHANGELOG's `[Unreleased]` section: commit, gate here and on the machines in `machines.zon`, push the branch and its tag at once over SSH |
+| `bay --workspace release` | Release every member that changed, in dependency order, each pinned at the releases before it |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
 | `bay fetch` | Fetch every dependency of both kinds |
 | `bay install [--prefix <dir>] [--name <name>] [--force] [<url or dir>]` | Build a package's programs (ReleaseSafe) into `<dir>/bin`, `~/.local/bin` by default; with no source, the package here |

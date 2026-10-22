@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `bay release`: the version the CHANGELOG's `[Unreleased]` section makes (Breaking and Removed the minor below 1.0, the major from it; Added and Deprecated the minor from 1.0; the rest the patch), the section cut into the release and the manifest's `.version` set, committed as `Release vX.Y.Z`, gated by the package's own `gate` step on that commit, then the branch and its tag pushed in one atomic push over SSH and read back. It refuses a tree with changes, a branch behind its remote, a remote that is not SSH, a version already tagged, a manifest and a changelog at different releases, and an entry under no group. A red gate puts the branch back; a stopped release is finished by the next run; `--dry-run` prints the version, the section and the plan.
+- The machines a release is gated on besides this one, in `machines.zon` in bay's configuration directory: the release commit goes to each as a git bundle on the command that runs bay there, and each gates it at once with this one.
+- `bay --workspace release`: the members in dependency order, each pinned at the releases of the members before it, the re-pins named under `### Changed`, then released.
+- The `changelog` module: CHANGELOG.md read as bay releases from it, for a tool that checks a package against it.
+
 ### Changed
 
 - Development: the lint gates the aegis pack, glint's A001-A005 (`ci/preflight.json`).
