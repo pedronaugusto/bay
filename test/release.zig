@@ -289,8 +289,12 @@ test "a red gate tags nothing, pushes nothing, and puts the branch back" {
     const start = try w.head("lib");
     const remote_main = try w.remoteAt("lib", "refs/heads/main");
     const result = try w.releaseIn("lib", &.{});
-    try std.testing.expect(refused(result));
-    try std.testing.expect(contains(result.stderr, "the gate is red: nothing was tagged or pushed"));
+    // Refused is exit 1, never 0: a script reads the code, not the sentence.
+    try std.testing.expect(result.term == .exited and result.term.exited == 1);
+    try std.testing.expect(contains(result.stderr, "the gate is red here (its output: "));
+    try std.testing.expect(contains(result.stderr, "gate-here.log): nothing was tagged or pushed"));
+    // The log holds the red gate's own output.
+    try std.testing.expect(contains(try w.read("lib", ".zig-cache/bay/release/gate-here.log"), "error: Red"));
     try std.testing.expectEqualStrings(start, try w.head("lib"));
     try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
     try std.testing.expect(contains(try w.read("lib", "CHANGELOG.md"), "## [Unreleased]\n\n### Fixed\n\n- A fix.\n"));
@@ -445,7 +449,9 @@ test "a machine gates the release beside this one, and its red stops it" {
     const start = try w.head("lib");
     const red = try w.releaseIn("lib", &.{});
     try std.testing.expect(refused(red));
-    try std.testing.expect(contains(red.stderr, "gate on broken: red"));
+    try std.testing.expect(red.term == .exited and red.term.exited == 1);
+    try std.testing.expect(contains(red.stderr, "the gate is red on broken (its output: "));
+    try std.testing.expect(contains(red.stderr, "gate-broken.log)"));
     try std.testing.expectEqualStrings(start, try w.head("lib"));
     try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.2"));
 }

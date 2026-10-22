@@ -77,9 +77,18 @@ test "machines are read with their command and directory, and a name twice is re
 
 /// The terminal the machines' lines share, each written whole.
 pub const Terminal = aegis.BlockingGuarded(struct {
-    /// The first write that failed: the run has failed, whatever the machines did.
-    unwritten: ?Io.Writer.Error = null,
+    /// The first write that failed, to the terminal or a log: the run has failed,
+    /// whatever the machines did.
+    unwritten: ?anyerror = null,
 });
+
+/// Where one gate's lines go: the terminal, after the machine's name (none for this
+/// machine's), and the gate's log, whole, where a red gate's output is read after.
+pub const Output = struct {
+    name: ?[]const u8,
+    log: Io.File,
+    terminal: *Terminal,
+};
 
 /// What gating on one machine needs: the bundle holding the release commit and
 /// tags, and where the package is in the repository.
@@ -91,15 +100,50 @@ pub const Request = struct {
     package: []const u8,
 };
 
-/// Gates the bundle's commit on `machine`; whether its gate is green. What it
-/// says comes back on `terminal`, each line after the machine's name.
-pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, machine: Machine, request: Request, terminal: *Terminal) !bool {
+/// Gates the commit at HEAD of the package at `package` on this machine, with its
+/// `gate` step; whether it is green. Its lines go to `output`.
+pub fn local(io: Io, environ: *const std.process.Environ.Map, package: []const u8, output: *Output) !bool {
+    const bay = environ.get("BAY").?; // safe: main sets BAY before any command
+    var child = try std.process.spawn(io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = package }, .environ_map = environ, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe });
+    const streams = [_]Io.File{ child.stdout.?, child.stderr.? }; // safe: spawned with pipes
+    child.stdout = null;
+    child.stderr = null;
+    try relayAll(io, &child, &streams, null, output);
+    const term = try child.wait(io);
+    return term == .exited and term.exited == 0;
+}
+
+/// Both streams relayed at once, until they end: either alone could fill its pipe and
+/// stop the child. `fed`, given, writes the child's stdin meanwhile.
+fn relayAll(io: Io, child: *std.process.Child, streams: []const Io.File, fed: ?*Feed, output: *Output) !void {
+    var group: Io.Group = .init;
+    var started: usize = 0;
+    const unavailable: ?Io.ConcurrentError = start: {
+        if (fed) |feed| group.concurrent(io, Feed.run, .{feed}) catch |err| break :start err;
+        for (streams) |stream| {
+            group.concurrent(io, relay, .{ io, stream, output }) catch |err| break :start err;
+            started += 1;
+        }
+        break :start null;
+    };
+    if (unavailable) |err| {
+        child.kill(io);
+        if (fed) |feed| if (started == 0) feed.file.close(io);
+        for (streams[started..]) |stream| stream.close(io);
+        try group.await(io);
+        return err;
+    }
+    try group.await(io);
+}
+
+/// Gates the bundle's commit on `machine`; whether its gate is green. Its lines go to `output`.
+pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, machine: Machine, request: Request, output: *Output) !bool {
     const bundle = try Io.Dir.cwd().readFileAlloc(io, request.bundle, a, .unlimited);
     // The machine's paths are its own: joined with `/`, which Windows takes too.
     const copy = try a.print("{s}/{s}", .{ std.mem.trimEnd(u8, machine.directory, "/\\"), request.repository });
     const argv = try std.mem.concat(a, []const u8, &.{ machine.bay, &.{ "release", "--gate-bundle", copy, "--package", request.package } });
     var child = std.process.spawn(io, .{ .argv = argv, .environ_map = environ, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe }) catch |err| {
-        try line(io, terminal, machine.name, try a.print("could not run {s}: {t}", .{ machine.bay[0], err }));
+        try line(io, output, try a.print("could not run {s}: {t}", .{ machine.bay[0], err }));
         return false;
     };
     var fed: Feed = .{ .io = io, .file = child.stdin.?, .bytes = bundle }; // safe: spawned with a pipe
@@ -107,28 +151,9 @@ pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
     child.stdin = null;
     child.stdout = null;
     child.stderr = null;
-    // The bundle goes in while the output comes out: either alone could fill a pipe and stop both ends.
-    var group: Io.Group = .init;
-    var started: usize = 0;
-    const unavailable: ?Io.ConcurrentError = start: {
-        group.concurrent(io, Feed.run, .{&fed}) catch |err| break :start err;
-        started += 1;
-        for (streams) |stream| {
-            group.concurrent(io, relay, .{ io, stream, machine.name, terminal }) catch |err| break :start err;
-            started += 1;
-        }
-        break :start null;
-    };
-    if (unavailable) |err| {
-        child.kill(io);
-        if (started == 0) fed.file.close(io);
-        for (streams[started -| 1..]) |stream| stream.close(io);
-        try group.await(io);
-        return err;
-    }
-    try group.await(io);
+    try relayAll(io, &child, &streams, &fed, output);
     const term = try child.wait(io);
-    if (fed.failed) |err| try line(io, terminal, machine.name, try a.print("the release commit did not reach it: {t}", .{err}));
+    if (fed.failed) |err| try line(io, output, try a.print("the release commit did not reach it: {t}", .{err}));
     return term == .exited and term.exited == 0 and fed.failed == null;
 }
 
@@ -147,8 +172,8 @@ const Feed = struct {
     }
 };
 
-/// Each line `file` gives, after `name`, until it ends.
-fn relay(io: Io, file: Io.File, name: []const u8, terminal: *Terminal) void {
+/// Each line `file` gives, to `output`, until it ends.
+fn relay(io: Io, file: Io.File, output: *Output) void {
     defer file.close(io);
     var buffer: [16 << 10]u8 = undefined;
     var reader = file.readerStreaming(io, &buffer);
@@ -157,25 +182,35 @@ fn relay(io: Io, file: Io.File, name: []const u8, terminal: *Terminal) void {
             // A line longer than the buffer goes in parts.
             error.StreamTooLong => {
                 const part = reader.interface.buffered();
-                line(io, terminal, name, part) catch return;
+                line(io, output, part) catch return;
                 reader.interface.toss(part.len);
                 continue;
             },
             error.ReadFailed => return,
         } orelse return;
-        line(io, terminal, name, std.mem.trimEnd(u8, text, "\r")) catch return;
+        line(io, output, std.mem.trimEnd(u8, text, "\r")) catch return;
     }
 }
 
-fn line(io: Io, terminal: *Terminal, name: []const u8, text: []const u8) Io.Writer.Error!void {
-    var guard = terminal.acquireUncancelable(io);
+/// One line to the terminal, after the machine's name, and to the gate's log, whole.
+fn line(io: Io, output: *Output, text: []const u8) !void {
+    var guard = output.terminal.acquireUncancelable(io);
     defer guard.deinit(io);
     const state = guard.value();
     if (state.unwritten != null) return;
-    say.named(io, name, text) catch |err| {
+    write(io, output, text) catch |err| {
         state.unwritten = err;
         return err;
     };
+}
+
+fn write(io: Io, output: *Output, text: []const u8) !void {
+    if (output.name) |name| try say.named(io, name, text) else {
+        try say.relay(io, text);
+        try say.relay(io, "\n");
+    }
+    try output.log.writeStreamingAll(io, text);
+    try output.log.writeStreamingAll(io, "\n");
 }
 
 /// The machine's side of `gate`: the bundle on stdin fetched into the

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A red release names each red gate and the log that holds its whole output (`.zig-cache/bay/release/gate-<machine>.log`, `gate-here.log` for this machine's): "the gate is red on bench (its output: ...)". This machine's gate is relayed and logged as the machines' are. A refused release exits 1, as before; the test now holds the code itself.
+
 ## [0.1.16] - 2026-10-22
 
 ### Added

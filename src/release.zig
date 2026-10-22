@@ -260,9 +260,9 @@ pub fn run(c: Context, options: Options) !Outcome {
     const recorded = (try git(c, &.{ "rev-parse", "-q", "--verify", gated })).out;
     if (std.mem.eql(u8, recorded, commit)) {
         try say.note(c.io, "{s} at {s} was gated green; pushing it", .{ plan.tag, commit[0..12] });
-    } else if (!try gateEverywhere(c, gate_machines)) {
+    } else if (try gateEverywhere(c, gate_machines)) |red| {
         _ = try must(c, &.{ "reset", "--quiet", "--keep", plan.start });
-        try say.fail(c.io, "the gate is red: nothing was tagged or pushed, and {s} is back at {s}", .{ up.branch, plan.start[0..12] });
+        try say.fail(c.io, "the gate is red {s}: nothing was tagged or pushed, and {s} is back at {s}", .{ red, up.branch, plan.start[0..12] });
     } else _ = try must(c, &.{ "update-ref", gated, commit });
     if (options.no_push) {
         try say.note(c.io, "{s} at {s} is gated green and held here: bay release pushes it, with no gate again", .{ plan.tag, commit[0..12] });
@@ -274,15 +274,17 @@ pub fn run(c: Context, options: Options) !Outcome {
     return .{ .released = plan.version };
 }
 
-/// Gates the commit at HEAD here and on every machine at once; whether all are green.
-fn gateEverywhere(c: Context, gate_machines: []const machines.Machine) !bool {
+/// Gates the commit at HEAD here and on every machine at once, each gate's output
+/// also kept whole in a log of its own under `.zig-cache/bay/release`. Null when all
+/// are green; else each red gate and where its log is, for the refusal to name.
+fn gateEverywhere(c: Context, gate_machines: []const machines.Machine) !?[]const u8 {
     var terminal: machines.Terminal = .init(.{});
+    const cache = try std.fs.path.join(c.a, &.{ c.package, ".zig-cache", "bay", "release" });
+    try Io.Dir.cwd().createDirPath(c.io, cache);
     var request: machines.Request = .{ .bundle = "", .repository = "", .package = "." };
     if (gate_machines.len != 0) {
         const top = try must(c, &.{ "rev-parse", "--show-toplevel" });
         const prefix = (try git(c, &.{ "rev-parse", "--show-prefix" })).out;
-        const cache = try std.fs.path.join(c.a, &.{ c.package, ".zig-cache", "bay", "release" });
-        try Io.Dir.cwd().createDirPath(c.io, cache);
         request = .{
             .bundle = try std.fs.path.join(c.a, &.{ cache, "release.bundle" }),
             .repository = std.fs.path.basename(top),
@@ -290,43 +292,47 @@ fn gateEverywhere(c: Context, gate_machines: []const machines.Machine) !bool {
         };
         _ = try must(c, &.{ "bundle", "create", "--quiet", request.bundle, "HEAD", "--tags" });
     }
-    const results = try c.a.alloc(Result, gate_machines.len + 1);
-    @memset(results, .{});
+    const gates = try c.a.alloc(Gate, gate_machines.len + 1);
+    for (gates, 0..) |*one, index| {
+        const name = if (index == 0) "here" else gate_machines[index - 1].name;
+        const log = try std.fs.path.join(c.a, &.{ cache, try c.a.print("gate-{s}.log", .{name}) });
+        one.* = .{ .where = if (index == 0) "here" else try c.a.print("on {s}", .{name}), .log = log, .output = .{
+            .name = if (index == 0) null else name,
+            .log = try Io.Dir.cwd().createFile(c.io, log, .{}),
+            .terminal = &terminal,
+        } };
+    }
+    defer for (gates) |one| one.output.log.close(c.io);
     var group: Io.Group = .init;
-    group.async(c.io, gateHere, .{ c, &results[0] });
-    for (gate_machines, results[1..]) |machine, *result| group.async(c.io, gateThere, .{ c, machine, request, &terminal, result });
+    group.async(c.io, gateHere, .{ c, &gates[0] });
+    for (gate_machines, gates[1..]) |machine, *one| group.async(c.io, gateThere, .{ c, machine, request, one });
     try group.await(c.io);
     if (terminal.teardown().unwritten) |err| return err;
-    var green = true;
-    for (results, 0..) |result, index| {
-        const where = if (index == 0) "here" else try c.a.print("on {s}", .{gate_machines[index - 1].name});
-        if (result.failed) |err| try say.note(c.io, "gate {s}: could not run: {t}", .{ where, err });
-        try say.note(c.io, "gate {s}: {s}", .{ where, if (result.green) "green" else "red" });
-        green = green and result.green;
+    var red: std.ArrayList([]const u8) = .empty;
+    for (gates) |one| {
+        if (one.failed) |err| try say.note(c.io, "gate {s}: could not run: {t}", .{ one.where, err });
+        try say.note(c.io, "gate {s}: {s}", .{ one.where, if (one.green) "green" else "red" });
+        if (!one.green) try red.append(c.a, try c.a.print("{s} (its output: {s})", .{ one.where, one.log }));
     }
-    return green;
+    if (red.items.len == 0) return null;
+    return try std.mem.join(c.a, "; ", red.items);
 }
 
-const Result = struct { green: bool = false, failed: ?anyerror = null };
+/// One gate: where it runs, its log and its output, and how it ended.
+const Gate = struct { where: []const u8, log: []const u8, output: machines.Output, green: bool = false, failed: ?anyerror = null };
 
-fn gateHere(c: Context, result: *Result) void {
-    const bay = c.environ.get("BAY").?; // safe: main sets BAY before any command
-    var child = std.process.spawn(c.io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err| {
-        result.failed = err;
+fn gateHere(c: Context, one: *Gate) void {
+    one.green = machines.local(c.io, c.environ, c.package, &one.output) catch |err| {
+        one.failed = err;
         return;
     };
-    const term = child.wait(c.io) catch |err| {
-        result.failed = err;
-        return;
-    };
-    result.green = term == .exited and term.exited == 0;
 }
 
-fn gateThere(c: Context, machine: machines.Machine, request: machines.Request, terminal: *machines.Terminal, result: *Result) void {
+fn gateThere(c: Context, machine: machines.Machine, request: machines.Request, one: *Gate) void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
     defer arena.deinit();
-    result.green = machines.gate(c.io, arena.allocator(), c.environ, machine, request, terminal) catch |err| {
-        result.failed = err;
+    one.green = machines.gate(c.io, arena.allocator(), c.environ, machine, request, &one.output) catch |err| {
+        one.failed = err;
         return;
     };
 }
@@ -364,7 +370,7 @@ fn pushUnreleased(c: Context, up: Upstream, head: []const u8, options: Options) 
         try say.out(c.io, "nothing to release; the commits {s} has not would be gated and pushed with no tag\n", .{up.remote});
         return .nothing;
     }
-    if (!try gateEverywhere(c, try machines.load(c.io, c.a, c.environ))) try say.fail(c.io, "the gate is red: nothing was pushed", .{});
+    if (try gateEverywhere(c, try machines.load(c.io, c.a, c.environ))) |red| try say.fail(c.io, "the gate is red {s}: nothing was pushed", .{red});
     try push(c, up, head, null);
     try say.note(c.io, "nothing to release; {s} pushed to {s} at {s}", .{ up.branch, up.remote, head[0..12] });
     return .pushed;
