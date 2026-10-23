@@ -163,9 +163,13 @@ test "a release cuts the section, gates that commit, and pushes the branch and i
     defer w.deinit();
     try w.package("lib", "0.1.0", "");
     try w.change("lib", "### Fixed\n\n- A fix.\n");
+    // Released from a branch named other than the one it moves on the remote.
+    try w.git("lib", &.{ "branch", "-m", "main", "road" });
     const before = try w.head("lib");
-    try std.testing.expect(succeeded(try w.releaseIn("lib", &.{})));
+    const released = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(released));
     const commit = try w.head("lib");
+    try std.testing.expect(contains(released.stderr, try w.f.a.print("released lib v0.1.1 at {s}: origin/main and the tag v0.1.1 on origin", .{commit[0..12]})));
     try std.testing.expect(!std.mem.eql(u8, before, commit));
     try std.testing.expectEqualStrings(before, try w.out("lib", &.{ "rev-parse", "HEAD^" }));
     try std.testing.expectEqualStrings("Release v0.1.1", try w.out("lib", &.{ "log", "-1", "--format=%s" }));
@@ -174,6 +178,7 @@ test "a release cuts the section, gates that commit, and pushes the branch and i
     // The gate saw that commit, once; the remote holds it as main and as the tag, and so does the clone.
     try std.testing.expectEqual(1, try w.gated(commit));
     try std.testing.expectEqualStrings(commit, try w.remoteAt("lib", "refs/heads/main"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/heads/road"));
     try std.testing.expectEqualStrings(commit, try w.remoteAt("lib", "refs/tags/v0.1.1"));
     try std.testing.expectEqualStrings(commit, try w.out("lib", &.{ "rev-parse", "v0.1.1^{commit}" }));
     try std.testing.expectEqualStrings("", try w.out("lib", &.{ "for-each-ref", "refs/bay" }));
@@ -205,6 +210,7 @@ test "the version is the section's largest change, and a dry run changes nothing
         try std.testing.expect(succeeded(dry));
         try std.testing.expect(contains(dry.stdout, case.version));
         try std.testing.expect(contains(dry.stdout, "gate it here"));
+        try std.testing.expect(contains(dry.stdout, "push it to origin/main and the tag v"));
         // Nothing moved: the commit, the tree, the tags, the remote.
         try std.testing.expectEqualStrings(start, try w.head(case.dir));
         try std.testing.expectEqualStrings("", try w.out(case.dir, &.{ "status", "--porcelain" }));

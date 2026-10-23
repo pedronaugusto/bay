@@ -95,6 +95,8 @@ const Upstream = struct {
     merge: []const u8,
     /// Its remote-tracking ref here.
     tracking: []const u8,
+    /// The branch on the remote as people name it, `<remote>/<name>`.
+    onto: []const u8,
 };
 
 fn upstream(c: Context) !Upstream {
@@ -106,7 +108,7 @@ fn upstream(c: Context) !Upstream {
     const url = try must(c, &.{ "remote", "get-url", "--push", remote });
     if (!isSsh(url)) try say.fail(c.io, "{s} pushes to {s}, which is not SSH: a release goes over SSH (git remote set-url --push {s} <user>@<host>:<path>)", .{ remote, url, remote });
     const name = if (std.mem.startsWith(u8, merge, "refs/heads/")) merge["refs/heads/".len..] else merge;
-    return .{ .branch = branch, .remote = remote, .url = url, .merge = merge, .tracking = try c.a.print("refs/remotes/{s}/{s}", .{ remote, name }) };
+    return .{ .branch = branch, .remote = remote, .url = url, .merge = merge, .tracking = try c.a.print("refs/remotes/{s}/{s}", .{ remote, name }), .onto = try c.a.print("{s}/{s}", .{ remote, name }) };
 }
 
 /// The commit a tag names here, or null.
@@ -270,7 +272,7 @@ pub fn run(c: Context, options: Options) !Outcome {
     }
     try push(c, up, commit, plan.tag);
     _ = try must(c, &.{ "update-ref", "-d", gated });
-    try say.note(c.io, "released {s} {s} at {s}: {s} and the tag on {s}", .{ parsed.name, plan.tag, commit[0..12], up.branch, up.remote });
+    try say.note(c.io, "released {s} {s} at {s}: {s} and the tag {s} on {s}", .{ parsed.name, plan.tag, commit[0..12], up.onto, plan.tag, up.remote });
     return .{ .released = plan.version };
 }
 
@@ -367,12 +369,12 @@ fn push(c: Context, up: Upstream, commit: []const u8, tag: ?[]const u8) !void {
 /// the branch pushed with no tag.
 fn pushUnreleased(c: Context, up: Upstream, head: []const u8, options: Options) !Outcome {
     if (options.dry_run) {
-        try say.out(c.io, "nothing to release; the commits {s} has not would be gated and pushed with no tag\n", .{up.remote});
+        try say.out(c.io, "nothing to release; the commits {s} has not would be gated and pushed with no tag\n", .{up.onto});
         return .nothing;
     }
     if (try gateEverywhere(c, try machines.load(c.io, c.a, c.environ))) |red| try say.fail(c.io, "the gate is red {s}: nothing was pushed", .{red});
     try push(c, up, head, null);
-    try say.note(c.io, "nothing to release; {s} pushed to {s} at {s}", .{ up.branch, up.remote, head[0..12] });
+    try say.note(c.io, "nothing to release; {s} is at {s}, pushed with no tag", .{ up.onto, head[0..12] });
     return .pushed;
 }
 
@@ -388,7 +390,7 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
     for (gate_machines) |machine| try say.out(c.io, ", on {s}", .{machine.name});
     if (options.no_push) {
         try say.out(c.io, "\nhold it here, gated, for a later bay release to push\n", .{});
-    } else try say.out(c.io, "\npush {s} and {s} to {s} ({s}) at once\n", .{ up.branch, plan.tag, up.remote, up.url });
+    } else try say.out(c.io, "\npush it to {s} and the tag {s} on {s} at once ({s})\n", .{ up.onto, plan.tag, up.remote, up.url });
 }
 
 /// `bay --workspace release`: the train. Members one at a time, each after the

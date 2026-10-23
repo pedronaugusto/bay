@@ -9,6 +9,8 @@
 ### Changed
 
 - A red release names each red gate and the log that holds its whole output (`.zig-cache/bay/release/gate-<machine>.log`, `gate-here.log` for this machine's): "the gate is red on bench (its output: ...)". This machine's gate is relayed and logged as the machines' are. A refused release exits 1, as before; the test now holds the code itself.
+- A release names the branch it moved on the remote: "released bay v0.1.17 at ...: origin/main and the tag v0.1.17 on origin", where it named the local branch, which need not be the remote's.
+- Pins ensign 0.2.3.
 
 ## [0.1.16] - 2026-10-22
 
