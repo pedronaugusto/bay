@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-10-23
+
 ### Added
 
 - The train's closing pass: a member whose development pin would close a ring goes first (a tool developed with a release of a member that ships it); once every release is out, it pins the releases made after it, and is gated and pushed with no tag (`bay --workspace release`).
@@ -191,7 +193,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.16...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.17...HEAD
+[0.1.17]: https://github.com/pedronaugusto/bay/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/pedronaugusto/bay/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/pedronaugusto/bay/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/pedronaugusto/bay/compare/v0.1.13...v0.1.14
