@@ -191,6 +191,34 @@ test "a package archived under one top directory, with a package nested by path,
     try std.testing.expect(std.mem.find(u8, built.stderr, "t 1.0.0") != null);
 }
 
+test "a lazy pin with no manifest is not fetched to resolve, as it pins nothing to select" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // Files with no build.zig.zon, as a machine image is (preflight pins Alpine's root
+    // file system lazily for its riscv64 machine): Zig names such a hash N-V-. Its archive
+    // is gone and so is Zig's copy, so a fetch fails; a build that never asks for it must
+    // not need it. Before, resolution fetched every pin it reached, so any host that could
+    // not unpack such an archive (Windows refuses its symlinks without the privilege)
+    // could build nothing that reached it.
+    try f.tmp.dir.createDirPath(f.io, "image/etc");
+    try f.write("image", "etc/os-release", "NAME=image\n");
+    const hashed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "image" }) }, .environ_map = &f.env });
+    try std.testing.expect(succeeded(hashed));
+    const hash = std.mem.trim(u8, hashed.stdout, "\r\n");
+    try std.testing.expect(std.mem.startsWith(u8, hash, "N-V-"));
+    const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
+    const pin = try f.a.print(".image = .{{ .url = \"{s}\", .hash = \"{s}\", .lazy = true }},", .{ try Fixture.fileUrl(f.a, try std.fs.path.join(f.a, &.{ f.root, "image.tar.gz" })), hash });
+    try f.application("app", pin, &.{}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"built without the image\\n\", .{}); }");
+    const built = try f.bay("app", &.{ "build", "run" });
+    if (!succeeded(built)) std.debug.print("{s}\n", .{built.stderr});
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "built without the image") != null);
+}
+
 /// An application on the diamond whose manifest, before its last brace, is
 /// returned, for a test to add a field to it.
 fn overridden(f: *Fixture) ![]const u8 {

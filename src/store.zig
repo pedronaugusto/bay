@@ -40,7 +40,9 @@ pub const Store = struct {
     /// The revision at a place, for selection: fetched and read.
     pub fn load(store: *Store, place: select.Place) !select.Revision {
         const directory = switch (place) {
-            .remote => |remote| try store.directoryOf(remote),
+            // A package with no manifest pins nothing and is known by its place, so it
+            // has nothing to select and is not fetched: Zig fetches it when a build asks.
+            .remote => |remote| if (unnamed(remote.hash)) return placed(place) else try store.directoryOf(remote),
             .directory => |directory| directory,
         };
         return revisionAt(store.io, store.a, directory, place);
@@ -172,7 +174,7 @@ pub fn developedAt(io: Io, a: std.mem.Allocator, directory: []const u8) !select.
 fn read(io: Io, a: std.mem.Allocator, directory: []const u8, place: select.Place, developed: bool) !select.Revision {
     const path = try std.fs.path.join(a, &.{ directory, "build.zig.zon" });
     const text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch |err| switch (err) {
-        error.FileNotFound => return .{ .identity = .{ .name = place.key(), .fingerprint = 0 }, .version = .{ .major = 0, .minor = 0, .patch = 0 }, .place = place, .pins = &.{} },
+        error.FileNotFound => return placed(place),
         else => |e| return e,
     };
     const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
@@ -197,6 +199,25 @@ pub fn revisionOf(io: Io, a: std.mem.Allocator, directory: []const u8, place: se
         .pins = try std.mem.concat(a, select.Pin, &.{ shipped, developing }),
         .retracted = parsed.retracted,
     };
+}
+
+/// The revision of a package with no manifest: it pins nothing and is known by its place.
+fn placed(place: select.Place) select.Revision {
+    return .{ .identity = .{ .name = place.key(), .fingerprint = 0 }, .version = .{ .major = 0, .minor = 0, .patch = 0 }, .place = place, .pins = &.{} };
+}
+
+/// Whether `hash` is one Zig gives a package with no manifest: `N-V-`, for no
+/// name and no version (Zig 0.17, `Fetch.computedPackageHash`). A name is a Zig
+/// identifier and a version a semantic one, so no package with a manifest has it.
+fn unnamed(hash: []const u8) bool {
+    return std.mem.startsWith(u8, hash, "N-V-");
+}
+
+test unnamed {
+    try std.testing.expect(unnamed("N-V-__8AAIMAbQDh5mA2AUF0Pyrm-UxpzkldsIiukdrGCem4"));
+    try std.testing.expect(!unnamed("aegis-0.1.17-rsxouvg5CABaJmNEkRXQIkVJ6JqVOG7NN60ctSBvSzO_"));
+    try std.testing.expect(!unnamed("N-0.1.0-rsxouvg5CABaJmNEkRXQIkVJ6JqVOG7NN60ctSBvSzO_"));
+    try std.testing.expect(!unnamed("1220aabbccdd"));
 }
 
 /// A manifest's dependencies as places, a path one made absolute against `directory`.

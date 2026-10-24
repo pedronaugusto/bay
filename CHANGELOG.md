@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A pin of files with no manifest (Zig names its hash `N-V-`) is not fetched while bay resolves the graph: it pins nothing and has no version to select, and Zig fetches it when a build asks for it. bay fetched every pin it reached, lazy ones included, so a host that cannot unpack such an archive could build nothing that reached it: preflight's lazy riscv64 machine image, whose symlinks Windows refuses an account without the symlink privilege, stopped every development build on such a host.
+
 ## [0.1.19] - 2026-10-24
 
 ### Changed
