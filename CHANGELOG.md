@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- A train runs a member's `generate` step after moving its pins, when its build or its development build has one, and commits what it makes with the re-pin: preflight's makes the CI caller, which names the preflight the member pins, so a train that moves preflight keeps every caller current.
+
+### Fixed
+
+- `bay --workspace release --dry-run` prints the train's whole plan: each member's release and what makes it (its `[Unreleased]` section, the pins that move, to releases there now or made earlier in the train), the members whose development pins alone move, and the closing pass. It printed "nothing to release" for a member whose shipped pins would move, which the train releases.
+
 ## [0.1.17] - 2026-10-23
 
 ### Added

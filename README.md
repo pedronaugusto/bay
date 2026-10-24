@@ -254,9 +254,14 @@ gates at once with this one, its lines named; the tag waits for all of them.
 
 `bay --workspace release` is the train: the members in dependency order, one at a time.
 Each is pinned at the releases of the members before it (as `bay tidy` pins them), its
-re-pinned dependencies named in its CHANGELOG (`- Pins a 0.3.1.` under `### Changed`) and
-committed, then released. A member whose only change is development pins is gated and
-pushed with no tag; a member that fails stops the members that depend on it.
+re-pinned dependencies named in its CHANGELOG (`- Pins a 0.3.1.` under `### Changed`), what
+its build makes from its pins made again (its `generate` step, when either build has one:
+preflight's makes the CI caller, which names the preflight the member pins), and committed,
+then released. A member whose only change is development pins is gated and pushed with no
+tag; a member that fails stops the members that depend on it. A development pin that would
+close a ring (a tool developed with a member that ships it) moves last, once the release it
+waits for is out. `--dry-run` prints the plan and changes nothing: each member's release and
+what makes it, its section or the pins that move, the train's own releases included.
 
 ## The exact Zig
 

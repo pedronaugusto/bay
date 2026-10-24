@@ -19,6 +19,7 @@ const machines = @import("machines.zig");
 const say = @import("say.zig");
 const workspace = @import("workspace.zig");
 const each = @import("each.zig");
+const steps = @import("steps.zig");
 
 pub const Context = struct {
     io: Io,
@@ -402,6 +403,7 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
 pub fn train(c: Context, options: Options) !u8 {
     const directories = try workspace.all(c.io, c.a, c.package) orelse try say.fail(c.io, "no {s} here or in any directory above", .{workspace.file_name});
     const cars = try each.train(c.io, c.a, directories);
+    if (options.dry_run) return trainPlan(c, cars);
     const done = try c.a.alloc(Done, cars.len);
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
     @memset(versions, null);
@@ -411,16 +413,16 @@ pub fn train(c: Context, options: Options) !u8 {
                 try say.note(c.io, "{s}: skipped, since {s} did not release", .{ car.name, cars[need].name });
                 break .skipped;
             }
-        } else try ride(c, car, options, .always, version);
+        } else try ride(c, car, .always, version);
     }
     // A development pin that would close a ring is left out of the order (a tool developed
     // with a release of a member that ships it): its member went first, and now pins the
     // release made after it, gated again and pushed.
-    if (!options.dry_run) for (cars, done, versions) |car, *outcome, *version| {
+    for (cars, done, versions) |car, *outcome, *version| {
         if (outcome.* == .failed or outcome.* == .skipped) continue;
-        const again = try ride(c, car, options, .when_repinned, version);
+        const again = try ride(c, car, .when_repinned, version);
         if (again == .failed or again == .released or again == .pushed) outcome.* = again;
-    };
+    }
     var failed = false;
     for (cars, done, versions) |car, outcome, version| {
         if (version) |v| try say.note(c.io, "{s}: released {f}", .{ car.name, v }) else try say.note(c.io, "{s}: {t}", .{ car.name, outcome });
@@ -433,16 +435,16 @@ const Done = enum { released, pushed, nothing, failed, skipped };
 
 /// One member's turn: pinned at the releases before it, then released, or gated and pushed
 /// with development pins alone. `.when_repinned` takes a turn only when the pins moved.
-fn ride(c: Context, car: each.Car, options: Options, when: enum { always, when_repinned }, version: *?std.SemanticVersion) !Done {
+fn ride(c: Context, car: each.Car, when: enum { always, when_repinned }, version: *?std.SemanticVersion) !Done {
     var member = c;
     member.package = car.directory;
-    const pins_moved = repinned(member, options) catch |err| switch (err) {
+    const pins_moved = repinned(member) catch |err| switch (err) {
         error.Reported => return .failed,
         else => return err,
     };
     if (when == .when_repinned and !pins_moved) return .nothing;
     try say.note(c.io, "{s}: {s}", .{ car.name, car.directory });
-    return switch (run(member, .{ .dry_run = options.dry_run, .push_unreleased = true }) catch |err| switch (err) {
+    return switch (run(member, .{ .push_unreleased = true }) catch |err| switch (err) {
         error.Reported => return .failed,
         else => return err,
     }) {
@@ -457,30 +459,20 @@ fn ride(c: Context, car: each.Car, options: Options, when: enum { always, when_r
 }
 
 /// The member pinned at the releases of the members it depends on, as `bay tidy`
-/// pins them in a workspace; its normal dependencies' re-pins named in its
-/// CHANGELOG, and the change committed; whether anything moved. A dry run says what
-/// would move, and moves nothing.
-fn repinned(c: Context, options: Options) !bool {
-    const bay = c.environ.get("BAY").?; // safe: main sets BAY before any command
-    if (options.dry_run) {
-        // --locked names what would move and writes nothing; a refusal to write is its answer.
-        var child = try std.process.spawn(c.io, .{ .argv = &.{ bay, "--locked", "tidy" }, .cwd = .{ .path = c.package }, .environ_map = c.environ });
-        _ = try child.wait(c.io);
-        return false;
-    }
+/// pins them in a workspace, and what its build makes from its pins made again (its
+/// `generate` step: preflight's caller names the preflight it pins); its normal
+/// dependencies' re-pins named in its CHANGELOG, and the change committed; whether
+/// anything moved.
+fn repinned(c: Context) !bool {
     const before_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
-    var child = std.process.spawn(c.io, .{ .argv = &.{ bay, "tidy" }, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
-        try say.fail(c.io, "could not run bay tidy: {t}", .{err});
-    switch (try child.wait(c.io)) {
-        .exited => |code| if (code != 0) try say.fail(c.io, "bay tidy failed in {s}", .{c.package}),
-        else => try say.fail(c.io, "bay tidy failed in {s}", .{c.package}),
-    }
+    try bayIn(c, &.{"tidy"});
     const after_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
     if (std.mem.eql(u8, before_text, after_text)) return false;
+    if (try hasStep(c, "generate")) try bayIn(c, &.{"generate"});
     const before = try manifest.parse(c.a, before_text);
     const after = try manifest.parse(c.a, after_text);
-    const shipped = try moved(c.a, before.normal, after.normal);
-    const developed = try moved(c.a, before.dev, after.dev);
+    const shipped = (try moved(c.a, before.normal, after.normal)).items;
+    const developed = (try moved(c.a, before.dev, after.dev)).items;
     if (shipped.len != 0) {
         const log = try read(c, "CHANGELOG.md") orelse try say.fail(c.io, "no CHANGELOG.md: a re-pin is named in it", .{});
         const entry = try c.a.print("- Pins {s}.", .{try listed(c.a, shipped)});
@@ -489,14 +481,108 @@ fn repinned(c: Context, options: Options) !bool {
             else => try say.fail(c.io, "CHANGELOG.md has no `## [Unreleased]` section to name the re-pins in", .{}),
         });
     }
-    _ = try must(c, &.{ "add", "--", "build.zig.zon", "CHANGELOG.md" });
+    // The tree was clean (a release refuses one that is not): what changed is the re-pin's.
+    _ = try must(c, &.{ "add", "--all" });
     const all = try std.mem.concat(c.a, []const u8, &.{ shipped, developed });
     _ = try must(c, &.{ "commit", "--quiet", "-m", try c.a.print("Pin {s}", .{try listed(c.a, all)}) });
     return true;
 }
 
+/// This bay run in the package with `args`; a failure stops the member.
+fn bayIn(c: Context, args: []const []const u8) !void {
+    const bay = c.environ.get("BAY").?; // safe: main sets BAY before any command
+    const argv = try std.mem.concat(c.a, []const u8, &.{ &.{bay}, args });
+    var child = std.process.spawn(c.io, .{ .argv = argv, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
+        try say.fail(c.io, "could not run bay {s}: {t}", .{ args[0], err });
+    switch (try child.wait(c.io)) {
+        .exited => |code| if (code != 0) try say.fail(c.io, "bay {s} failed in {s}", .{ args[0], c.package }),
+        else => try say.fail(c.io, "bay {s} failed in {s}", .{ args[0], c.package }),
+    }
+}
+
+/// Whether the package's build or its development build has the step `name`.
+fn hasStep(c: Context, name: []const u8) !bool {
+    const bay = c.environ.get("BAY").?; // safe: main sets BAY before any command
+    for ([_][]const u8{ "build", "dev" }) |build| {
+        const listing = std.process.run(c.a, c.io, .{ .argv = &.{ bay, build, "-l" }, .cwd = .{ .path = c.package }, .environ_map = c.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+            try say.fail(c.io, "could not run bay {s} -l: {t}", .{ build, err });
+        if (listing.term == .exited and listing.term.exited == 0 and steps.listed(listing.stdout, name)) return true;
+    }
+    return false;
+}
+
+/// What a train would do, member by member, changing nothing: each member pinned at the
+/// releases before it, those there now and those the train makes; the release its section
+/// and its moved pins make; and the development pins the closing pass moves after it.
+fn trainPlan(c: Context, cars: []const each.Car) !u8 {
+    const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
+    @memset(versions, null);
+    const developed_with = try c.a.alloc([]const manifest.Dependency, cars.len);
+    for (cars, versions, developed_with, 1..) |car, *version, *dev, number| {
+        var member = c;
+        member.package = car.directory;
+        const before_text = try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory});
+        // Tidied as the train tidies it, then put back as it was.
+        const tidied = std.process.run(c.a, c.io, .{ .argv = &.{ c.environ.get("BAY").?, "tidy" }, .cwd = .{ .path = car.directory }, .environ_map = c.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+            try say.fail(c.io, "could not run bay tidy: {t}", .{err});
+        const after_text = try read(member, "build.zig.zon") orelse before_text;
+        try write(member, "build.zig.zon", before_text);
+        if (tidied.term != .exited or tidied.term.exited != 0) {
+            try say.relay(c.io, tidied.stderr);
+            try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name});
+        }
+        const before = try manifest.parse(c.a, before_text);
+        const after = try manifest.parse(c.a, after_text);
+        dev.* = after.dev;
+        var shipped = try moved(c.a, before.normal, after.normal);
+        var developed = try moved(c.a, before.dev, after.dev);
+        // The members before it that the train releases: pinned at those releases.
+        for (car.needs) |need| if (versions[need]) |v| {
+            const name = cars[need].name;
+            const pin = try c.a.print("{s} {f}", .{ name, v });
+            if (pinned(after.normal, name)) try put(c.a, &shipped, name, pin) else if (pinned(after.dev, name)) try put(c.a, &developed, name, pin);
+        };
+        const log = try read(member, "CHANGELOG.md") orelse try say.fail(c.io, "{s}: no CHANGELOG.md", .{car.name});
+        const unreleased = try section(member, log);
+        const change = if (shipped.items.len != 0) unreleased.change().max(.fix) else unreleased.change();
+        const current = changelog.parseVersion(before.version) orelse try say.fail(c.io, "{s}: .version \"{s}\" is not major.minor.patch", .{ car.name, before.version });
+        try say.out(c.io, "{d}. {s} {f}", .{ number, car.name, current });
+        if (change != .none) {
+            version.* = changelog.next(current, change);
+            try say.out(c.io, " -> {f} ({t}):", .{ version.*.?, change });
+            if (!unreleased.empty()) try say.out(c.io, " its [Unreleased] section", .{});
+            if (shipped.items.len != 0) try say.out(c.io, "{s} pins {s}", .{ if (unreleased.empty()) "" else ", and", try listed(c.a, shipped.items) });
+        } else try say.out(c.io, ": nothing to release", .{});
+        if (developed.items.len != 0) try say.out(c.io, "; develops with {s}{s}", .{ try listed(c.a, developed.items), if (change == .none) ", gated and pushed with no tag" else "" });
+        try say.out(c.io, "\n", .{});
+    }
+    // The closing pass: a development pin left out of the order, on a member after it.
+    for (cars, developed_with) |car, dev| for (cars, versions) |later, version| {
+        const v = version orelse continue;
+        if (!pinned(dev, later.name) or std.mem.eql(u8, later.name, car.name)) continue;
+        for (car.needs) |need| {
+            if (std.mem.eql(u8, cars[need].name, later.name)) break;
+        } else try say.out(c.io, "then {s} develops with {s} {f}, gated and pushed with no tag\n", .{ car.name, later.name, v });
+    };
+    return 0;
+}
+
+fn pinned(dependencies: []const manifest.Dependency, name: []const u8) bool {
+    for (dependencies) |dependency| if (std.mem.eql(u8, dependency.name, name)) return true;
+    return false;
+}
+
+/// `pin` in `list` in place of what names `name`, or added.
+fn put(a: std.mem.Allocator, list: *std.ArrayList([]const u8), name: []const u8, pin: []const u8) !void {
+    for (list.items) |*item| if (std.mem.startsWith(u8, item.*, name) and item.*.len > name.len and item.*[name.len] == ' ') {
+        item.* = pin;
+        return;
+    };
+    try list.append(a, pin);
+}
+
 /// `name version` of each dependency `after` pins at another hash than `before`.
-fn moved(a: std.mem.Allocator, before: []const manifest.Dependency, after: []const manifest.Dependency) ![]const []const u8 {
+fn moved(a: std.mem.Allocator, before: []const manifest.Dependency, after: []const manifest.Dependency) !std.ArrayList([]const u8) {
     var out: std.ArrayList([]const u8) = .empty;
     for (after) |dependency| {
         const now = switch (dependency.source) {
@@ -516,7 +602,7 @@ fn moved(a: std.mem.Allocator, before: []const manifest.Dependency, after: []con
         };
         try out.append(a, try a.print("{s} {f}", .{ dependency.name, named.version }));
     }
-    return out.items;
+    return out;
 }
 
 /// "a", "a and b", "a, b and c".

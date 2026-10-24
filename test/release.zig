@@ -30,6 +30,8 @@ const gate_program =
     \\
 ;
 
+/// The package's build: its gate, and a file made from its pins (`generate`), as
+/// preflight makes a caller naming the preflight a package pins.
 const gate_build =
     \\const std = @import("std");
     \\pub fn build(b: *std.Build) void {
@@ -38,6 +40,9 @@ const gate_build =
     \\    run.setCwd(b.path("."));
     \\    run.has_side_effects = true;
     \\    b.step("gate", "Gate the package").dependOn(&run.step);
+    \\    const generated = b.addUpdateSourceFiles();
+    \\    generated.addCopyFileToSource(b.path("build.zig.zon"), "pins.txt");
+    \\    b.step("generate", "Make what follows from the pins").dependOn(&generated.step);
     \\}
     \\
 ;
@@ -486,6 +491,23 @@ test "a workspace's train releases its members in order, each pinned at the rele
     try w.git("a", &.{ "push", "--quiet", "origin", "main" });
     try w.f.write(".", "bay.work", ".{ .members = .{ \"c\", \"b\", \"a\" } }\n");
     try w.change("a", "### Fixed\n\n- A fix.\n");
+    // The plan, changing nothing: each release, the pins that make it, the closing pass.
+    const heads = [_][]const u8{ try w.head("a"), try w.head("b"), try w.head("c") };
+    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    try std.testing.expect(succeeded(plan));
+    for ([_][]const u8{
+        "1. a 0.1.0 -> 0.1.1 (fix): its [Unreleased] section\n",
+        "2. b 0.1.0 -> 0.1.1 (fix): pins a 0.1.1\n",
+        "3. c 0.1.0 -> 0.1.1 (fix): pins b 0.1.1\n",
+        "then a develops with c 0.1.1, gated and pushed with no tag\n",
+    }) |line| if (!contains(plan.stdout, line)) {
+        std.debug.print("expected the line:\n{s}in the plan:\n{s}\n", .{ line, plan.stdout });
+        return error.TestUnexpectedResult;
+    };
+    for ([_][]const u8{ "a", "b", "c" }, heads) |dir, head| {
+        try std.testing.expectEqualStrings(head, try w.head(dir));
+        try std.testing.expectEqualStrings("", try w.out(dir, &.{ "status", "--porcelain" }));
+    }
     const train = try w.f.bay(".", &.{ "--workspace", "release" });
     try std.testing.expect(succeeded(train));
     // In order: a, then b pinning it, then c pinning b; each released and pushed with its tag.
@@ -495,6 +517,8 @@ test "a workspace's train releases its members in order, each pinned at the rele
     for ([_][]const u8{ "b", "c" }) |dir| try std.testing.expectEqualStrings(try w.head(dir), try w.remoteAt(dir, "refs/tags/v0.1.1"));
     for ([_][]const u8{ "b", "c" }, [_][]const u8{ "a", "b" }) |dir, dependency| {
         try std.testing.expect(contains(try w.read(dir, "build.zig.zon"), "?ref=v0.1.1#"));
+        // What follows from the pins made again with them, in the re-pin's commit.
+        try std.testing.expectEqualStrings(try w.out(dir, &.{ "show", "HEAD^:build.zig.zon" }), try w.out(dir, &.{ "show", "HEAD^:pins.txt" }));
         try std.testing.expect(contains(try w.read(dir, "CHANGELOG.md"), try w.f.a.print("## [0.1.1] - {s}\n\n### Changed\n\n- Pins {s} 0.1.1.\n", .{ try today(w.f.a), dependency })));
         try std.testing.expectEqualStrings("Release v0.1.1", try w.out(dir, &.{ "log", "-1", "--format=%s" }));
         try std.testing.expectEqualStrings(try w.f.a.print("Pin {s} 0.1.1", .{dependency}), try w.out(dir, &.{ "log", "-1", "--format=%s", "HEAD^" }));
