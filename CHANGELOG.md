@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-10-24
+
 ### Fixed
 
 - A pin of files with no manifest (Zig names its hash `N-V-`) is not fetched while bay resolves the graph: it pins nothing and has no version to select, and Zig fetches it when a build asks for it. bay fetched every pin it reached, lazy ones included, so a host that cannot unpack such an archive could build nothing that reached it: preflight's lazy riscv64 machine image, whose symlinks Windows refuses an account without the symlink privilege, stopped every development build on such a host.
@@ -215,7 +217,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.20...HEAD
+[0.1.20]: https://github.com/pedronaugusto/bay/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/pedronaugusto/bay/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/pedronaugusto/bay/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/pedronaugusto/bay/compare/v0.1.16...v0.1.17
