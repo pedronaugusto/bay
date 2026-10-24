@@ -5,6 +5,10 @@ const std = @import("std");
 const Io = std.Io;
 const options = @import("options");
 
+/// Where bay reads its configuration in a fixture, as `dirs.config` finds it on this
+/// host: `%APPDATA%\bay` on Windows, `$XDG_CONFIG_HOME/bay` elsewhere.
+pub const config_dir = if (@import("builtin").os.tag == .windows) "appdata/bay" else "config/bay";
+
 pub const Fixture = struct {
     a: std.mem.Allocator,
     io: Io,

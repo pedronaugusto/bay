@@ -443,9 +443,9 @@ test "a machine gates the release beside this one, and its red stops it" {
     var w: World = try .init(arena.allocator());
     defer w.deinit();
     try w.package("lib", "0.1.0", "");
-    try w.f.tmp.dir.createDirPath(w.f.io, "config/bay");
+    try w.f.tmp.dir.createDirPath(w.f.io, fixture.config_dir);
     const machine = try std.mem.replaceOwned(u8, w.f.a, try w.path("machine"), "\\", "/");
-    try w.f.write("config/bay", "machines.zon", try w.f.a.print(".{{ .{{ .name = \"elsewhere\", .bay = .{{\"{s}\"}}, .directory = \"{s}\" }} }}\n", .{ try std.mem.replaceOwned(u8, w.f.a, w.f.bay_path, "\\", "\\\\"), machine }));
+    try w.f.write(fixture.config_dir, "machines.zon", try w.f.a.print(".{{ .{{ .name = \"elsewhere\", .bay = .{{\"{s}\"}}, .directory = \"{s}\" }} }}\n", .{ try std.mem.replaceOwned(u8, w.f.a, w.f.bay_path, "\\", "\\\\"), machine }));
     try w.change("lib", "### Fixed\n\n- A fix.\n");
     const result = try w.releaseIn("lib", &.{});
     try std.testing.expect(succeeded(result));
@@ -459,7 +459,7 @@ test "a machine gates the release beside this one, and its red stops it" {
         return error.TestUnexpectedResult;
     }
     // A machine whose gate is red: nothing is tagged.
-    try w.f.write("config/bay", "machines.zon", ".{ .{ .name = \"broken\", .bay = .{ \"git\", \"no-such-command\" }, .directory = \"/nowhere\" } }\n");
+    try w.f.write(fixture.config_dir, "machines.zon", ".{ .{ .name = \"broken\", .bay = .{ \"git\", \"no-such-command\" }, .directory = \"/nowhere\" } }\n");
     try w.change("lib", "### Fixed\n\n- Another fix.\n");
     const start = try w.head("lib");
     const red = try w.releaseIn("lib", &.{});

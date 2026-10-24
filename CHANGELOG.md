@@ -5,6 +5,7 @@
 ### Fixed
 
 - A pin of files with no manifest (Zig names its hash `N-V-`) is not fetched while bay resolves the graph: it pins nothing and has no version to select, and Zig fetches it when a build asks for it. bay fetched every pin it reached, lazy ones included, so a host that cannot unpack such an archive could build nothing that reached it: preflight's lazy riscv64 machine image, whose symlinks Windows refuses an account without the symlink privilege, stopped every development build on such a host.
+- Development: the test of a release gated on a machine writes `machines.zon` where bay reads its configuration on the host, `%APPDATA%ay` on Windows. It wrote the XDG path on every host, so on Windows bay read no machines and the test failed after a release gated here alone.
 
 ## [0.1.19] - 2026-10-24
 
