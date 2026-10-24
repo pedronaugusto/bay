@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-10-24
+
 ### Added
 
 - A train runs a member's `generate` step after moving its pins, when its build or its development build has one, and commits what it makes with the re-pin: preflight's makes the CI caller, which names the preflight the member pins, so a train that moves preflight keeps every caller current.
@@ -202,7 +204,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.17...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.18...HEAD
+[0.1.18]: https://github.com/pedronaugusto/bay/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/pedronaugusto/bay/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/pedronaugusto/bay/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/pedronaugusto/bay/compare/v0.1.14...v0.1.15

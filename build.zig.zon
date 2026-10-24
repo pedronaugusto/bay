@@ -1,6 +1,6 @@
 .{
     .name = .bay,
-    .version = "0.1.17",
+    .version = "0.1.18",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0xe12d5522677902bb,
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
