@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Development: each test is held to 300 s, not 120 s: an end-to-end test builds its fixtures' packages with Zig from cold, which a hosted Windows runner (windows-latest, Debug) or a shared machine took past two minutes.
 - `bay --workspace release --dry-run` prints the train's whole plan: each member's release and what makes it (its `[Unreleased]` section, the pins that move, to releases there now or made earlier in the train), the members whose development pins alone move, and the closing pass. It printed "nothing to release" for a member whose shipped pins would move, which the train releases.
 
 ## [0.1.17] - 2026-10-23
