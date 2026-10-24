@@ -426,7 +426,8 @@ test "a release stopped after its commit or its push is finished, and never tags
 /// The remote of `lib` refuses every push while its pre-receive hook is there.
 fn refusePushes(w: *World, hook: []const u8) !void {
     try w.f.write(".", hook, "#!/bin/sh\nexit 1\n");
-    const file = try w.f.tmp.dir.openFile(w.f.io, hook, .{});
+    // Opened for writing: Windows changes a file's attributes only through a handle that may write them.
+    const file = try w.f.tmp.dir.openFile(w.f.io, hook, .{ .mode = .read_write });
     defer file.close(w.f.io);
     try file.setPermissions(w.f.io, .executable_file);
 }
@@ -445,10 +446,13 @@ test "a machine gates the release beside this one, and its red stops it" {
     try std.testing.expect(succeeded(result));
     const commit = try w.head("lib");
     // Gated here and there, the machine's lines named.
-    try std.testing.expectEqual(2, try w.gated(commit));
     try std.testing.expect(contains(result.stderr, "elsewhere: bay: gating"));
     try std.testing.expect(contains(result.stderr, "gate on elsewhere: green"));
     try std.testing.expectEqualStrings(commit, try w.out("machine/lib", &.{ "rev-parse", "HEAD" }));
+    if (try w.gated(commit) != 2) {
+        std.debug.print("{s} gated {d} times; bay said:\n{s}\n", .{ commit, try w.gated(commit), result.stderr });
+        return error.TestUnexpectedResult;
+    }
     // A machine whose gate is red: nothing is tagged.
     try w.f.write("config/bay", "machines.zon", ".{ .{ .name = \"broken\", .bay = .{ \"git\", \"no-such-command\" }, .directory = \"/nowhere\" } }\n");
     try w.change("lib", "### Fixed\n\n- Another fix.\n");
