@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Pins aegis 0.1.17 and ensign 0.2.4.
+
 ## [0.1.18] - 2026-10-24
 
 ### Added
