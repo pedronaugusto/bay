@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenPGP detached signatures are verified as RFC 9580 verifies a version 4 signature over a binary document, on std alone: RSA (PKCS #1 v1.5) or Ed25519 over SHA-256, SHA-384 or SHA-512, by a key from a file, binary or armored, every block of a keyring file read. The file is the only trust: no keyring, web of trust or key server is consulted. SHA-1, text signatures and a hashed critical subpacket bay does not know are refused. MSYS2 signs its packages so (RSA over SHA-512); its signature over `mingw-w64-clang-x86_64-vulkan-validation-layers-1.4.363.0-1` verifies with MSYS2's keyring.
+
 ### Fixed
 
 - `bay install` takes a repository's URL as `bay add` does: `https://github.com/owner/repo`, as a browser shows it, is the git repository there, and a git URL that names no ref installs the newest release. It handed the page's URL to Zig's fetch, which refused the HTML, and installed a bare git URL from the default branch's head. Both commands now find the source one way, and a `git+ssh` or `git+file` URL with no ref takes the newest release too, where `bay add` pinned its default branch.
