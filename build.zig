@@ -65,8 +65,14 @@ fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget,
 /// The unit tests, their properties on `shakedown`, and bay end to end over real packages,
 /// run with the Zig that builds it. `step` runs them; `check` only compiles them, and the program.
 fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize, shakedown: *std.Build.Module, step: *std.Build.Step, check: *std.Build.Step) void {
+    // The tests' one way of linking a folder, tested on its own.
+    const link = b.createModule(.{ .root_source_file = package.path("test/link.zig"), .target = target, .optimize = optimize });
+    const link_test = b.addTest(.{ .root_module = link });
+    step.dependOn(&b.addRunArtifact(link_test).step);
+    check.dependOn(&link_test.step);
     const unit_module = program(b, package, target, optimize);
     unit_module.addImport("shakedown", shakedown);
+    unit_module.addImport("link", link);
     const unit = b.addTest(.{ .root_module = unit_module });
     step.dependOn(&b.addRunArtifact(unit).step);
     check.dependOn(&unit.step);
@@ -86,7 +92,7 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
             .root_source_file = package.path(root),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "options", .module = options.createModule() }},
+            .imports = &.{ .{ .name = "options", .module = options.createModule() }, .{ .name = "link", .module = link } },
         }) });
         check.dependOn(&end_to_end.step);
         // End to end, bay runs the Zig that builds it, which runs on this host alone: a

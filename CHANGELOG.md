@@ -26,7 +26,7 @@
 ### Fixed
 
 - Reading a dependency's manifest fetches the dependency and what it needs to build, not its lazy dependencies. bay fetched it with `zig build --fetch=all`, which unpacked every lazy package below it: preflight pins Alpine's riscv64 root file system for its machine, whose links Windows makes only for an account with SeCreateSymbolicLinkPrivilege, so on any other Windows account no package developed with preflight resolved ("could not fetch … as it is pinned").
-- Development: the tests that link a folder make a junction on Windows, which any account makes, where a symbolic link needs SeCreateSymbolicLinkPrivilege; the test of a Zig found where bay keeps toolchains links that Zig's folder there, not its program. Both failed with `PermissionDenied` on an account without the privilege.
+- Development: the tests that link a folder make a junction on Windows, which any account makes, where a symbolic link needs SeCreateSymbolicLinkPrivilege, through one helper of their own that sets the mount point with the Windows API (`FSCTL_SET_REPARSE_POINT`), run by no shell, and tested itself; the test of a Zig found where bay keeps toolchains links that Zig's folder there, not its program. Both failed with `PermissionDenied` on an account without the privilege.
 
 ## [0.2.0] - 2026-10-25
 
