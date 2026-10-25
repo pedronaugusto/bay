@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Writing pins makes again what the build makes from them: `bay tidy` runs the package's `generate` step after it, the package build's or else the development build's, so `add`, `remove`, `update`, `upgrade` and a train's re-pin write the pins and what follows from them together. preflight's `generate` writes the CI caller naming the preflight pinned; `bay update preflight` left the caller naming the old pin, which only the release gate found ("not what generate makes"). `bay tidy` runs it even when no pin moves (pins written with `--no-tidy` or by hand); `--locked` runs nothing; a build that does not configure with the pins written is named and left to the next `bay tidy`. A train commits a caller made again with no pin moved, and its `--dry-run` tidies in memory, changing no file.
+
 ## [0.1.21] - 2026-10-25
 
 ### Changed
