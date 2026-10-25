@@ -2,13 +2,15 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Windows: `bay install` replaces a program that is running, bay itself among them, so bay updates itself. The program moves aside to `<file>.old` by airlock's rename, which asks only to delete the name, as a running image allows; std's asks to write it too, which the image refuses, so the install failed with `FileBusy` and left the old program in place. Each step of a replacement that fails names itself and its path, and an earlier `.old` still running is named as such, `FileBusy` as well as `AccessDenied`.
+## [0.2.1] - 2026-10-25
 
 ### Changed
 
 - Pins airlock 0.5.5.
+
+### Fixed
+
+- Windows: `bay install` replaces a program that is running, bay itself among them, so bay updates itself. The program moves aside to `<file>.old` by airlock's rename, which asks only to delete the name, as a running image allows; std's asks to write it too, which the image refuses, so the install failed with `FileBusy` and left the old program in place. Each step of a replacement that fails names itself and its path, and an earlier `.old` still running is named as such, `FileBusy` as well as `AccessDenied`.
 
 ## [0.2.0] - 2026-10-25
 
@@ -243,7 +245,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/pedronaugusto/bay/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/pedronaugusto/bay/compare/v0.1.21...v0.2.0
 [0.1.21]: https://github.com/pedronaugusto/bay/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/pedronaugusto/bay/compare/v0.1.19...v0.1.20
