@@ -1,7 +1,7 @@
 const std = @import("std");
 const zon = @import("build.zig.zon");
 
-/// The bay program: std, aegis and ensign; and the `changelog` module, std only. Its tests are
+/// The bay program: std, aegis, airlock and ensign; and the `changelog` module, std only. Its tests are
 /// its development build's (`bay test`).
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -47,14 +47,16 @@ pub fn dev(b: *std.Build, tools: type) void {
     tools.preflight.addCi(b, package, .{ .tests = step, .test_timeout = .{ .bound = .{ .limit = .fromSeconds(300), .reason = "an end-to-end test builds its fixtures' packages with Zig from cold, a build runner each, which a hosted Windows runner or a shared machine takes past two minutes" } }, .hardened = .{ .fuzz_step = "test", .tsan_step = "test" } });
 }
 
-/// bay's root module from `package`'s sources, built in `b`, with aegis and ensign.
+/// bay's root module from `package`'s sources, built in `b`, with aegis, airlock and ensign.
 fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize) *std.Build.Module {
     const aegis = package.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
+    const airlock = package.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock");
     const ensign = package.dependency("ensign", .{ .target = target, .optimize = optimize }).module("ensign");
     const own = b.addOptions();
     own.addOption([]const u8, "version", zon.version);
     return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "aegis", .module = aegis },
+        .{ .name = "airlock", .module = airlock },
         .{ .name = "ensign", .module = ensign },
         .{ .name = "own", .module = own.createModule() },
     } });

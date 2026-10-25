@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows: `bay install` replaces a program that is running, bay itself among them, so bay updates itself. The program moves aside to `<file>.old` by airlock's rename, which asks only to delete the name, as a running image allows; std's asks to write it too, which the image refuses, so the install failed with `FileBusy` and left the old program in place. Each step of a replacement that fails names itself and its path, and an earlier `.old` still running is named as such, `FileBusy` as well as `AccessDenied`.
+
+### Changed
+
+- Pins airlock 0.5.5.
+
 ## [0.2.0] - 2026-10-25
 
 ### Breaking

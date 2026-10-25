@@ -6,6 +6,7 @@
 //! ref an install came from.
 const std = @import("std");
 const aegis = @import("aegis");
+const airlock = @import("airlock");
 const ensign = @import("ensign");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -297,6 +298,8 @@ fn moveAside(c: Context, dir: Io.Dir, file: []const u8) !void {
         error.AccessDenied, error.FileBusy => try say.fail(c.io, "{s} still runs from an earlier install: end it and install again", .{aside}),
         else => |e| try say.fail(c.io, "could not remove {s}, which an earlier install moved aside: {t}", .{ aside, e }),
     };
-    dir.rename(file, dir, aside, c.io) catch |err|
+    // airlock's rename asks only to delete the name, which a running image allows;
+    // std's asks to write it as well, which the image refuses (FileBusy).
+    _ = airlock.rename(c.io, dir, file, dir, aside, .{}) catch |err|
         try say.fail(c.io, "could not move {s} aside to {s} to replace it: {t}", .{ file, aside, err });
 }
