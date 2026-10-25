@@ -11,6 +11,10 @@
 ### Fixed
 
 - Windows: `bay install` replaces a program that is running, bay itself among them, so bay updates itself. The program moves aside to `<file>.old` by airlock's rename, which asks only to delete the name, as a running image allows; std's asks to write it too, which the image refuses, so the install failed with `FileBusy` and left the old program in place. Each step of a replacement that fails names itself and its path, and an earlier `.old` still running is named as such, `FileBusy` as well as `AccessDenied`.
+### Fixed
+
+- The development build uses the cache Zig picks for the package build, `ZIG_LOCAL_CACHE_DIR` when it is set, as it says it shares the package's. It named `<package>/.zig-cache` always, so under that variable the two builds compiled into two caches.
+- Development: the tests share one cache for what Zig compiles, so a fixture's package cloned, checked out to gate or copied to a machine builds once, as do the build runners fixtures share. On GitHub's macOS runner (Debug) the suite took 423 s, not 493 s; on Windows it gained little, its tests' times summing to 687 s, not 704 s. Its slowest tests still build with Zig from cold, 108 s on macOS and 111 s on Windows, so each stays held to 300 s.
 
 ## [0.2.0] - 2026-10-25
 

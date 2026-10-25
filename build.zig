@@ -44,7 +44,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     tests(b, package, target, optimize, shakedown, step, check);
     // The release tier fuzzes the properties and runs the suite under ThreadSanitizer: a
     // workspace runs its members on threads of its own.
-    tools.preflight.addCi(b, package, .{ .tests = step, .hardened = .{ .fuzz_step = "test", .tsan_step = "test" } });
+    tools.preflight.addCi(b, package, .{ .tests = step, .test_timeout = .{ .bound = .{ .limit = .fromSeconds(300), .reason = "an end-to-end test builds its fixtures' packages with Zig from cold, a build runner each, which a hosted Windows runner or a shared machine takes past two minutes" } }, .hardened = .{ .fuzz_step = "test", .tsan_step = "test" } });
 }
 
 /// bay's root module from `package`'s sources, built in `b`, with aegis, airlock and ensign.
