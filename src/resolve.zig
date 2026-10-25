@@ -397,6 +397,7 @@ pub fn copyTree(io: Io, a: std.mem.Allocator, from: []const u8, to: []const u8) 
                     error.FileNotFound => false, // a link to nothing is kept as a link to a file
                     else => |e| return e,
                 };
+                // aegis: no-danger: the copy's path is the walker's entry, which names what the walk found inside the directory it walks
                 try Io.Dir.cwd().symLink(io, buffer[0..link], target, .{ .is_directory = to_directory });
             },
             else => {},

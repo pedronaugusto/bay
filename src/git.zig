@@ -119,27 +119,26 @@ fn checkout(io: Io, a: std.mem.Allocator, repository: []const u8, commit: []cons
 }
 
 fn write(io: Io, a: std.mem.Allocator, listing: []const u8, out: Io.Dir, reader: *Objects) !void {
-    const Link = struct { path: []const u8, target: []const u8 };
+    const Link = struct { path: []const u8, target: LinkTarget };
     var links: std.ArrayList(Link) = .empty;
     var entries = std.mem.tokenizeScalar(u8, listing, 0);
-    while (entries.next()) |entry| {
-        // `<mode> <type> <object>\t<path>`
-        const tab = std.mem.findScalar(u8, entry, '\t') orelse return error.UnexpectedGitOutput;
-        var fields = std.mem.tokenizeScalar(u8, entry[0..tab], ' ');
-        const mode = fields.next() orelse return error.UnexpectedGitOutput;
-        _ = fields.next() orelse return error.UnexpectedGitOutput;
-        const object = fields.next() orelse return error.UnexpectedGitOutput;
-        const path = entry[tab + 1 ..];
-        if (std.mem.eql(u8, mode, "160000")) continue;
-        if (!contained(path)) try say.fail(io, "the commit names a file outside its own tree, which no package may: {s}", .{path});
-        const data = try reader.blob(object);
-        if (std.mem.eql(u8, mode, "120000")) {
-            try links.append(a, .{ .path = path, .target = data });
+    while (entries.next()) |line| {
+        // What git lists is the remote's to choose: each entry parsed, its path checked, before
+        // anything is written.
+        const entry = aegis.input.Untrusted([]const u8).init(line).parse({}, Entry.parse) catch |err| switch (err) {
+            error.UnexpectedGitOutput => |e| return e,
+            error.OutsideTree => try say.fail(io, "the commit names a file outside its own tree, which no package may: {s}", .{line[(std.mem.findScalar(u8, line, '\t') orelse 0)..]}),
+        };
+        if (entry.kind == .submodule) continue;
+        const data = try reader.blob(entry.object);
+        const path = entry.path.text;
+        if (entry.kind == .link) {
+            const target = try aegis.input.Untrusted([]const u8).init(data).parse(LinkTarget.Where{ .a = a, .link = path }, LinkTarget.parse);
+            try links.append(a, .{ .path = path, .target = target });
             continue;
         }
         if (std.fs.path.dirname(path)) |parent| try out.createDirPath(io, parent);
-        const executable = std.mem.eql(u8, mode, "100755");
-        try out.writeFile(io, .{ .sub_path = path, .data = data, .flags = .{ .permissions = if (executable) .executable_file else .default_file } });
+        try out.writeFile(io, .{ .sub_path = path, .data = data, .flags = .{ .permissions = if (entry.kind == .executable) .executable_file else .default_file } });
     }
     // Links last, so no file is ever written through one.
     for (links.items) |link| {
@@ -149,15 +148,73 @@ fn write(io: Io, a: std.mem.Allocator, listing: []const u8, out: Io.Dir, reader:
             if (try throughLink(io, out, parent)) try say.fail(io, "the commit names a link inside another link, which would leave its tree: {s}", .{link.path});
             try out.createDirPath(io, parent);
         }
-        // Windows makes a link to a directory apart from one to a file: what it reaches in the tree says which.
-        const reached = try std.fs.path.join(a, &.{ std.fs.path.dirname(link.path) orelse ".", link.target });
-        const to_directory = if (out.statFile(io, reached, .{})) |stat| stat.kind == .directory else |err| switch (err) {
+        // Windows makes a link to a directory apart from one to a file: what it reaches in the
+        // tree says which, and a link that leaves the tree is kept as a link to a file.
+        const to_directory = if (link.target.within) |reached| if (out.statFile(io, reached, .{})) |stat| stat.kind == .directory else |err| switch (err) {
             error.FileNotFound => false, // a link to nothing in the tree is kept as a link to a file
             else => |e| return e,
-        };
-        try out.symLink(io, link.target, link.path, .{ .is_directory = to_directory });
+        } else false;
+        try out.symLink(io, link.target.text, link.path, .{ .is_directory = to_directory });
     }
 }
+
+/// A path a tree names, which stays inside the tree (`contained`).
+const TreePath = struct { text: []const u8 };
+
+/// An entry of `git ls-tree -z`, `<mode> <type> <object>\t<path>`: what it is, its
+/// object, and its path inside the tree.
+const Entry = struct {
+    kind: enum { file, executable, link, submodule },
+    object: []const u8,
+    path: TreePath,
+
+    const Error = error{ UnexpectedGitOutput, OutsideTree };
+
+    fn parse(_: void, line: []const u8) Error!Entry {
+        const tab = std.mem.findScalar(u8, line, '\t') orelse return error.UnexpectedGitOutput;
+        var fields = std.mem.tokenizeScalar(u8, line[0..tab], ' ');
+        const mode = fields.next() orelse return error.UnexpectedGitOutput;
+        _ = fields.next() orelse return error.UnexpectedGitOutput;
+        const object = fields.next() orelse return error.UnexpectedGitOutput;
+        const path = line[tab + 1 ..];
+        if (!contained(path)) return error.OutsideTree;
+        const kind: @FieldType(Entry, "kind") = if (std.mem.eql(u8, mode, "160000"))
+            .submodule
+        else if (std.mem.eql(u8, mode, "120000"))
+            .link
+        else if (std.mem.eql(u8, mode, "100755"))
+            .executable
+        else
+            .file;
+        return .{ .kind = kind, .object = object, .path = .{ .text = path } };
+    }
+};
+
+/// A link's target as the tree stores it, written as it is, and the path inside the
+/// tree it reaches when it stays inside: `..` and `.` resolved by name from the link's
+/// folder. A target that leaves the tree, or is absolute, reaches nothing here.
+const LinkTarget = struct {
+    text: []const u8,
+    within: ?[]const u8,
+
+    const Where = struct { a: std.mem.Allocator, link: []const u8 };
+
+    fn parse(where: Where, text: []const u8) error{OutOfMemory}!LinkTarget {
+        if (text.len == 0 or text[0] == '/' or std.mem.findAny(u8, text, "\\:") != null) return .{ .text = text, .within = null };
+        var reached: std.ArrayList([]const u8) = .empty;
+        var folders = std.mem.splitScalar(u8, std.fs.path.dirname(where.link) orelse "", '/');
+        while (folders.next()) |folder| if (folder.len != 0) try reached.append(where.a, folder);
+        var names = std.mem.splitScalar(u8, text, '/');
+        while (names.next()) |name| {
+            if (name.len == 0 or std.mem.eql(u8, name, ".")) continue;
+            if (std.mem.eql(u8, name, "..")) {
+                if (reached.pop() == null) return .{ .text = text, .within = null };
+            } else try reached.append(where.a, name);
+        }
+        const within = try std.mem.join(where.a, "/", reached.items);
+        return .{ .text = text, .within = if (within.len == 0 or !contained(within)) null else within };
+    }
+};
 
 /// Whether a path a tree names stays inside the tree: relative, with no empty,
 /// `.` or `..` part, no `.git`, and nothing a Windows path reads as a drive or
@@ -172,6 +229,9 @@ fn contained(path: []const u8) bool {
     }
     return true;
 }
+
+/// The most one file of a package holds, as git gives it: a larger one is refused, not read.
+const blob_limit: usize = 1 << 30;
 
 /// Blobs read through one `git cat-file --batch`, a request and its answer at a time.
 const Objects = struct {
@@ -210,6 +270,7 @@ const Objects = struct {
         const space = std.mem.findScalarLast(u8, header, ' ') orelse return error.UnexpectedGitOutput;
         if (std.mem.find(u8, header, " blob ") == null) return error.UnexpectedGitOutput;
         const size = std.fmt.parseUnsigned(usize, header[space + 1 ..], 10) catch return error.UnexpectedGitOutput;
+        if (size > blob_limit) return error.BlobTooLarge;
         const data = try objects.a.alloc(u8, size);
         try reader.readSliceAll(data);
         if (try reader.takeByte() != '\n') return error.UnexpectedGitOutput;
@@ -261,6 +322,27 @@ test "a tree's path stays inside the tree" {
     try std.testing.expect(contained("a/.gitignore"));
     for ([_][]const u8{ "", "/etc/passwd", "../x", "a/../../x", "a//b", "./a", ".git/hooks/pre-commit", "a/.GIT/config", "C:x", "a\\b" }) |path|
         try std.testing.expect(!contained(path));
+}
+
+test "a link's target reaches a path inside the tree, or nothing when it leaves it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { link: []const u8, target: []const u8, within: ?[]const u8 };
+    for ([_]Case{
+        .{ .link = "a/b/link", .target = "../c", .within = "a/c" },
+        .{ .link = "a/link", .target = "./x/../y", .within = "a/y" },
+        .{ .link = "link", .target = "src", .within = "src" },
+        .{ .link = "a/link", .target = "../../outside", .within = null },
+        .{ .link = "a/link", .target = "..", .within = null },
+        .{ .link = "link", .target = "/etc", .within = null },
+        .{ .link = "link", .target = "C:x", .within = null },
+        .{ .link = "link", .target = "a/.git/config", .within = null },
+    }) |case| {
+        const target = try LinkTarget.parse(.{ .a = a, .link = case.link }, case.target);
+        try std.testing.expectEqualStrings(case.target, target.text);
+        if (case.within) |within| try std.testing.expectEqualStrings(within, target.within.?) else try std.testing.expectEqual(null, target.within);
+    }
 }
 
 /// Whether a folder on `path`, as `dir` resolves it, is a link.

@@ -217,6 +217,7 @@ fn check(io: Io, archive: []const u8, build: Build, verifier: *minisign.Verifier
     var reader = file.readerStreaming(io, &.{});
     var sha256: Sha256 = .init(.{});
     while (true) {
+        try io.checkCancel();
         const n = reader.interface.readSliceShort(&buffer) catch return reader.err orelse error.ReadFailed;
         sha256.update(buffer[0..n]);
         verifier.update(buffer[0..n]);
