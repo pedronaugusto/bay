@@ -255,8 +255,18 @@ pub fn run(c: Context, options: Options) !Outcome {
             else => try say.fail(c.io, "CHANGELOG.md:{d}: {s}", .{ problem.line, problem.what }),
         };
         try write(c, "CHANGELOG.md", cut_log);
-        try write(c, "build.zig.zon", try manifest.setVersion(c.a, cut.manifest, plan.version));
-        _ = try must(c, &.{ "add", "--", "CHANGELOG.md", "build.zig.zon" });
+        const released = try manifest.setVersion(c.a, cut.manifest, plan.version);
+        try write(c, "build.zig.zon", released);
+        // What the build makes from the manifest, made again for the version it names now, in
+        // the release commit. A release moves no pin: a tidy that would is refused, and the
+        // tree, clean when the release began, is put back.
+        try bayIn(c, &.{"tidy"});
+        if (!std.mem.eql(u8, try read(c, "build.zig.zon") orelse "", released)) {
+            _ = try must(c, &.{ "checkout", "--quiet", "--", "." });
+            _ = try must(c, &.{ "clean", "--quiet", "-fd" });
+            try say.fail(c.io, "build.zig.zon is not tidy: bay tidy moves its pins, which a release does not; tidy and commit it first", .{});
+        }
+        _ = try must(c, &.{ "add", "--all" });
         _ = try must(c, &.{ "commit", "--quiet", "-m", try c.a.print("Release {s}", .{plan.tag}) });
         try say.note(c.io, "{s} {f} -> {f}: committed as Release {s}", .{ parsed.name, cut.from, plan.version, plan.tag });
     }
