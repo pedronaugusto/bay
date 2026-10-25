@@ -21,6 +21,7 @@ const say = @import("say.zig");
 const steps = @import("steps.zig");
 const own = @import("own");
 const release = @import("release.zig");
+const tidying = @import("tidy.zig");
 const machines = @import("machines.zig");
 const aegis = @import("aegis");
 const ensign = @import("ensign");
@@ -317,6 +318,10 @@ const Env = struct {
         return Io.Dir.cwd().openDir(env.io, env.package, .{});
     }
 
+    fn input(env: Env) tidying.Input {
+        return .{ .io = env.io, .a = env.a, .zig = env.zig, .package = env.package };
+    }
+
     fn readManifest(env: Env) ![:0]const u8 {
         var dir_handle = try env.dir();
         defer dir_handle.close(env.io);
@@ -353,7 +358,7 @@ fn zigBuild(env: Env, where: Where, before: []const []const u8, after: []const [
 fn buildable(env: Env, parsed: manifest.Manifest) !resolve.Resolution {
     const resolution = try resolveHere(env, parsed);
     if (resolution.raises.len != 0) {
-        for (resolution.raises) |raise| try say.note(env.io, "{s} is pinned below the selection: {s}", .{ raise.from.name, try describe(resolution, raise.to) });
+        for (resolution.raises) |raise| try say.note(env.io, "{s} is pinned below the selection: {s}", .{ raise.from.name, try tidying.describe(resolution, raise.to) });
         try say.fail(env.io, "build.zig.zon disagrees with the selection; bay tidy writes it", .{});
     }
     return resolution;
@@ -361,6 +366,29 @@ fn buildable(env: Env, parsed: manifest.Manifest) !resolve.Resolution {
 
 /// Runs zig build over a resolved graph.
 fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where, before: []const []const u8, after: []const []const u8) !u8 {
+    const argv = try buildArgv(env, parsed, resolution, where, before, after);
+    var child = std.process.spawn(env.io, .{ .argv = argv, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
+        try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
+    return switch (try child.wait(env.io)) {
+        .exited => |code| code,
+        else => 1,
+    };
+}
+
+/// Zig's listing of the steps of the package's build (`.package`) or its development
+/// build: `configured` false when the build does not configure, its error in `stderr`.
+const Listing = struct { configured: bool, stdout: []const u8, stderr: []const u8 };
+
+fn stepsOf(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where) !Listing {
+    const argv = try buildArgv(env, parsed, resolution, where, &.{"-l"}, &.{});
+    const listed = std.process.run(env.a, env.io, .{ .argv = argv, .cwd = .{ .path = env.package }, .environ_map = env.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+        try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
+    return .{ .configured = listed.term == .exited and listed.term.exited == 0, .stdout = listed.stdout, .stderr = listed.stderr };
+}
+
+/// The zig build command line over a resolved graph: `before` ahead of the
+/// development build's own arguments, `after` behind them.
+fn buildArgv(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where, before: []const []const u8, after: []const []const u8) ![]const []const u8 {
     // Zig runs in the package's directory, as Cargo runs a crate's tests in its own:
     // what a build runs (a test, a tool) reads the package's files by their path in
     // it, as under plain `zig build`, whichever root builds it. The development root
@@ -390,12 +418,7 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
         });
     }
     try argv.appendSlice(env.a, after);
-    var child = std.process.spawn(env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
-        try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
-    return switch (try child.wait(env.io)) {
-        .exited => |code| code,
-        else => 1,
-    };
+    return argv.items;
 }
 
 /// `bay locate [--dev]`: the package's directory, or its development root, on
@@ -421,12 +444,13 @@ fn licensesCommand(env: Env, dev: bool) !u8 {
 }
 
 /// A writing command's manifest (null: it failed, having said why), tidied
-/// when `tidy_after`, then written once. A graph the edit cannot resolve is
-/// refused before anything is written.
+/// when `tidy_after`, then written once, and what the build makes from the pins
+/// with it. A graph the edit cannot resolve is refused before anything is written;
+/// untidied, the pins wait for a `bay tidy`, which makes what follows from them.
 fn afterEdit(env: Env, tidy_after: bool, text_or_failed: ?[:0]const u8) !u8 {
     const text = text_or_failed orelse return 1;
-    if (tidy_after) return writeTidied(env, text);
-    try writeChanged(env, text);
+    if (tidy_after) return writeTidied(env, text, .when_written);
+    _ = try writeChanged(env, text);
     return 0;
 }
 
@@ -461,58 +485,61 @@ fn writeManifest(env: Env, text: []const u8) !void {
 /// `bay tidy`: the package's manifest pins each workspace member at its release
 /// and each package at its one hash, as Go writes go.mod; what moves is named,
 /// and nothing to write says nothing. Only this manifest is written: every
-/// member's is its own (`bay --workspace tidy` tidies them all).
+/// member's is its own (`bay --workspace tidy` tidies them all). What the build
+/// makes from the pins is made again even when nothing moves here: the pins may
+/// have been written by a command told not to tidy, or by hand.
 fn tidy(env: Env) !u8 {
-    return writeTidied(env, try env.readManifest());
+    return writeTidied(env, try env.readManifest(), .always);
 }
 
 /// `text`, the package's manifest, tidied in memory and written when that
 /// changes what is on disk: nothing is written unless the graph resolves.
-fn writeTidied(env: Env, text: [:0]const u8) !u8 {
-    var tidied = text;
-    const others = try workspace.members(env.io, env.a, env.package);
-    if (others.len != 0) {
-        // Releases first: what they pin is then part of the selection.
-        const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
-        const owner: published.Owned = .{ .directory = env.package, .parsed = try manifest.parse(env.a, tidied) };
-        const syncs = try published.syncs(env.io, env.a, env.zig, try store.Store.init(env.io, env.a, env.zig, env.package), scratch, &.{owner}, try std.mem.concat(env.a, []const u8, &.{ &.{env.package}, others }));
-        tidied = try repin(env, tidied, syncs, "pinned at its release", null);
-    }
-    const resolution = try resolveHere(env, try manifest.parse(env.a, tidied));
-    tidied = try repin(env, tidied, resolution.raises, "raised to", resolution);
-    try writeChanged(env, tidied);
+/// Then what the build makes from the pins, `always` or `when_written`.
+fn writeTidied(env: Env, text: [:0]const u8, generate: enum { always, when_written }) !u8 {
+    const tidied = try tidying.tidied(env.input(), text);
+    for (tidied.moves) |move| try say.note(env.io, "{s} {s}{s} {s}", .{ move.name, if (env.locked) "would be " else "", switch (move.how) {
+        .released => "pinned at its release",
+        .raised => "raised to",
+    }, move.to });
+    const written = try writeChanged(env, tidied.text);
+    if (written or generate == .always) try regenerate(env);
     return 0;
 }
 
-/// `text` with each entry put in, saying what moved (`--locked`: what would).
-fn repin(env: Env, text: [:0]const u8, pins: []const manifest.Repin, verb: []const u8, resolution: ?resolve.Resolution) ![:0]const u8 {
-    var out = text;
-    for (pins) |pin| {
-        std.debug.assert(std.mem.eql(u8, pin.directory, env.package)); // tidy writes only the package's manifest
-        const to = if (resolution) |r| try describe(r, pin.to) else pin.to.source.remote.hash;
-        try say.note(env.io, "{s} {s}{s} {s}", .{ pin.from.name, if (env.locked) "would be " else "", verb, to });
-        out = try manifest.put(env.a, out, pin.kind, pin.to);
-    }
-    return out;
+/// Writes `text` as the package's manifest unless it is what is there; whether it wrote.
+fn writeChanged(env: Env, text: []const u8) !bool {
+    if (std.mem.eql(u8, text, try env.readManifest())) return false;
+    try writeManifest(env, text);
+    return true;
 }
 
-/// Writes `text` as the package's manifest unless it is what is there.
-fn writeChanged(env: Env, text: []const u8) !void {
-    if (std.mem.eql(u8, text, try env.readManifest())) return;
-    try writeManifest(env, text);
+/// What the package's build makes from its pins, made again once they are written:
+/// its `generate` step, the package's or its development build's (preflight's writes
+/// the CI caller, which names the preflight pinned), so the pins and what follows
+/// from them are never committed apart. A package with no such step makes nothing;
+/// `--locked` writes nothing. A build that does not configure with the pins written
+/// (a dependency removed that build.zig still names) is said to, and left to the
+/// `bay tidy` after it is fixed.
+fn regenerate(env: Env) !void {
+    if (env.locked) return;
+    const parsed = try manifest.parse(env.a, try env.readManifest());
+    const resolution = try buildable(env, parsed);
+    const builds: []const Where = if (parsed.dev.len == 0) &.{.package} else &.{ .package, .development };
+    const where = for (builds) |build| {
+        const listed = try stepsOf(env, parsed, resolution, build);
+        if (!listed.configured) {
+            try say.note(env.io, "the {s} build does not configure with these pins, so what it makes from them (its `generate` step) is not made again: bay tidy makes it once it configures", .{if (build == .development) "development" else "package"});
+            return;
+        }
+        if (steps.listed(listed.stdout, "generate")) break build;
+    } else return;
+    if (try built(env, parsed, resolution, where, &.{"generate"}, &.{}) != 0)
+        try say.fail(env.io, "the pins are written, but `generate` failed: what the build makes from them is not", .{});
 }
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.
 fn resolveHere(env: Env, parsed: manifest.Manifest) !resolve.Resolution {
-    return resolve.resolve(.{ .io = env.io, .a = env.a, .zig = env.zig, .package = env.package, .parsed = parsed, .members = try workspace.members(env.io, env.a, env.package) });
-}
-
-/// A dependency's selected revision as a person reads it: name, version, hash.
-fn describe(resolution: resolve.Resolution, dependency: manifest.Dependency) ![]const u8 {
-    const a = resolution.input.a;
-    const hash = dependency.source.remote.hash;
-    const revision = resolution.graph.read.get(hash) orelse return a.print("{s} {s}", .{ dependency.name, hash });
-    return a.print("{s} {f} ({s})", .{ revision.identity.name, revision.version, hash });
+    return tidying.resolved(env.input(), parsed);
 }
 
 /// `bay <step>`: the package's own steps are what ships and come first; a step
@@ -522,12 +549,8 @@ fn step(env: Env, name: []const u8, args: []const []const u8) !u8 {
     // package there, a fork's and a git-fetched one's too, as the build will.
     const parsed = try manifest.parse(env.a, try env.readManifest());
     const resolution = try buildable(env, parsed);
-    var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(env.a, &.{ env.zig, "build", "-l" });
-    try argv.appendSlice(env.a, try resolution.forks(.package));
-    const listed = std.process.run(env.a, env.io, .{ .argv = argv.items, .cwd = .{ .path = env.package }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
-        try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
-    if (listed.term != .exited or listed.term.exited != 0) {
+    const listed = try stepsOf(env, parsed, resolution, .package);
+    if (!listed.configured) {
         try say.relay(env.io, listed.stderr);
         return 1;
     }

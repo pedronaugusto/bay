@@ -346,6 +346,66 @@ test "a repository's release line is followed by update, a new line and a retrac
     try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "lib 0.1.2 is retracted by its release 0.2.0") != null);
 }
 
+test "a re-pin makes again what the development build makes from the pins, a tidy after an untidied write too, and --locked makes nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const repository = try gitRepository(&f);
+    // The app developed with lib, its development build's `generate` writing a file from
+    // the pins, as preflight's writes the CI caller naming the preflight pinned.
+    try f.write("app", "gen.zig",
+        \\const std = @import("std");
+        \\pub fn main(init: std.process.Init) !void {
+        \\    const pins = try std.Io.Dir.cwd().readFileAlloc(init.io, "build.zig.zon", init.arena.allocator(), .limited(1 << 16));
+        \\    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = "pins.txt", .data = pins });
+        \\}
+        \\
+    );
+    try f.write("app", "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b;
+        \\}
+        \\pub fn dev(b: *std.Build, tools: type) void {
+        \\    _ = tools;
+        \\    const package = b.dependency("app", .{}).builder;
+        \\    const exe = b.addExecutable(.{ .name = "gen", .root_module = b.createModule(.{ .root_source_file = package.path("gen.zig"), .target = b.graph.host }) });
+        \\    const run = b.addRunArtifact(exe);
+        \\    run.setCwd(package.path("."));
+        \\    run.has_side_effects = true;
+        \\    b.step("generate", "Make what follows from the pins").dependOn(&run.step);
+        \\}
+        \\
+    );
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "remove", "lib" })));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", "--dev", try f.a.print("{s}#v0.1.0", .{repository.url}) })));
+    const generated = struct {
+        fn current(fx: *Fixture) !bool {
+            const pins = fx.tmp.dir.readFileAlloc(fx.io, "app/pins.txt", fx.a, .limited(1 << 16)) catch |err| switch (err) {
+                error.FileNotFound => return false,
+                else => return err,
+            };
+            return std.mem.eql(u8, pins, try fx.tmp.dir.readFileAlloc(fx.io, "app/build.zig.zon", fx.a, .limited(1 << 16)));
+        }
+    };
+    try std.testing.expect(try generated.current(&f));
+    // A release on the line, taken by update: the file follows the pin it moved.
+    try releaseLib(&f, &.{"0.1.1"}, null);
+    try std.testing.expect(succeeded(try f.bay("app", &.{"update"})));
+    try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, "app/pins.txt", f.a, .limited(1 << 16)), "?ref=v0.1.1#") != null);
+    try std.testing.expect(try generated.current(&f));
+    // Pinned with no tidy, the file waits; the tidy after makes it, though it moves no pin.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", "--no-tidy", try f.a.print("{s}#v0.1.0", .{repository.url}) })));
+    try std.testing.expect(!try generated.current(&f));
+    try std.testing.expect(succeeded(try f.bay("app", &.{"tidy"})));
+    try std.testing.expect(try generated.current(&f));
+    // --locked writes nothing, the file made from the pins included.
+    try f.tmp.dir.deleteFile(f.io, "app/pins.txt");
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
+    try std.testing.expect(!try generated.current(&f));
+}
+
 test "upgrade takes the newest release that its newest release does not retract" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

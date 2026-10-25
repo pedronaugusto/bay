@@ -19,7 +19,8 @@ const machines = @import("machines.zig");
 const say = @import("say.zig");
 const workspace = @import("workspace.zig");
 const each = @import("each.zig");
-const steps = @import("steps.zig");
+const tidying = @import("tidy.zig");
+const toolchain = @import("toolchain.zig");
 
 pub const Context = struct {
     io: Io,
@@ -459,16 +460,16 @@ fn ride(c: Context, car: each.Car, when: enum { always, when_repinned }, version
 }
 
 /// The member pinned at the releases of the members it depends on, as `bay tidy`
-/// pins them in a workspace, and what its build makes from its pins made again (its
-/// `generate` step: preflight's caller names the preflight it pins); its normal
-/// dependencies' re-pins named in its CHANGELOG, and the change committed; whether
-/// anything moved.
+/// pins them in a workspace, which makes again what the build makes from the pins
+/// (preflight's caller names the preflight it pins); its normal dependencies'
+/// re-pins named in its CHANGELOG, and the change committed; whether anything moved,
+/// a pin or a file made from the pins.
 fn repinned(c: Context) !bool {
     const before_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
     try bayIn(c, &.{"tidy"});
     const after_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
-    if (std.mem.eql(u8, before_text, after_text)) return false;
-    if (try hasStep(c, "generate")) try bayIn(c, &.{"generate"});
+    // The tree was clean (a release refuses one that is not): what changed is the tidy's.
+    if ((try must(c, &.{ "status", "--porcelain" })).len == 0) return false;
     const before = try manifest.parse(c.a, before_text);
     const after = try manifest.parse(c.a, after_text);
     const shipped = (try moved(c.a, before.normal, after.normal)).items;
@@ -481,10 +482,10 @@ fn repinned(c: Context) !bool {
             else => try say.fail(c.io, "CHANGELOG.md has no `## [Unreleased]` section to name the re-pins in", .{}),
         });
     }
-    // The tree was clean (a release refuses one that is not): what changed is the re-pin's.
     _ = try must(c, &.{ "add", "--all" });
     const all = try std.mem.concat(c.a, []const u8, &.{ shipped, developed });
-    _ = try must(c, &.{ "commit", "--quiet", "-m", try c.a.print("Pin {s}", .{try listed(c.a, all)}) });
+    const message = if (all.len == 0) "What the build makes from the pins, made again" else try c.a.print("Pin {s}", .{try listed(c.a, all)});
+    _ = try must(c, &.{ "commit", "--quiet", "-m", message });
     return true;
 }
 
@@ -500,17 +501,6 @@ fn bayIn(c: Context, args: []const []const u8) !void {
     }
 }
 
-/// Whether the package's build or its development build has the step `name`.
-fn hasStep(c: Context, name: []const u8) !bool {
-    const bay = c.environ.get("BAY").?; // safe: main sets BAY before any command
-    for ([_][]const u8{ "build", "dev" }) |build| {
-        const listing = std.process.run(c.a, c.io, .{ .argv = &.{ bay, build, "-l" }, .cwd = .{ .path = c.package }, .environ_map = c.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
-            try say.fail(c.io, "could not run bay {s} -l: {t}", .{ build, err });
-        if (listing.term == .exited and listing.term.exited == 0 and steps.listed(listing.stdout, name)) return true;
-    }
-    return false;
-}
-
 /// What a train would do, member by member, changing nothing: each member pinned at the
 /// releases before it, those there now and those the train makes; the release its section
 /// and its moved pins make; and the development pins the closing pass moves after it.
@@ -522,15 +512,13 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         var member = c;
         member.package = car.directory;
         const before_text = try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory});
-        // Tidied as the train tidies it, then put back as it was.
-        const tidied = std.process.run(c.a, c.io, .{ .argv = &.{ c.environ.get("BAY").?, "tidy" }, .cwd = .{ .path = car.directory }, .environ_map = c.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
-            try say.fail(c.io, "could not run bay tidy: {t}", .{err});
-        const after_text = try read(member, "build.zig.zon") orelse before_text;
-        try write(member, "build.zig.zon", before_text);
-        if (tidied.term != .exited or tidied.term.exited != 0) {
-            try say.relay(c.io, tidied.stderr);
-            try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name});
-        }
+        // Tidied as the train tidies it, in memory: the dry run writes nothing.
+        const zig = try toolchain.forPackage(c.io, c.a, c.environ, car.directory);
+        const tidied = tidying.tidied(.{ .io = c.io, .a = c.a, .zig = zig, .package = car.directory }, before_text) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name}),
+            else => return err,
+        };
+        const after_text = tidied.text;
         const before = try manifest.parse(c.a, before_text);
         const after = try manifest.parse(c.a, after_text);
         dev.* = after.dev;
