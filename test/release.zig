@@ -481,13 +481,16 @@ test "a workspace's train releases its members in order, each pinned at the rele
     for ([_][]const u8{ "b", "c" }, [_][]const u8{ "a", "b" }) |dir, dependency| {
         try w.package(dir, "0.1.0", "");
         try std.testing.expect(succeeded(try w.f.bay(dir, &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl(dependency)}) })));
-        try w.git(dir, &.{ "commit", "--quiet", "-am", "Pin" });
+        // The pins and what the build makes from them, committed together.
+        try w.git(dir, &.{ "add", "." });
+        try w.git(dir, &.{ "commit", "--quiet", "-m", "Pin" });
         try w.git(dir, &.{ "push", "--quiet", "origin", "main" });
     }
     // a is developed with c, which ships b, which ships a: that pin would close a ring, so a
     // goes first and pins c's new release once c has one.
     try std.testing.expect(succeeded(try w.f.bay("a", &.{ "add", "--dev", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("c")}) })));
-    try w.git("a", &.{ "commit", "--quiet", "-am", "Develop with c" });
+    try w.git("a", &.{ "add", "." });
+    try w.git("a", &.{ "commit", "--quiet", "-m", "Develop with c" });
     try w.git("a", &.{ "push", "--quiet", "origin", "main" });
     try w.f.write(".", "bay.work", ".{ .members = .{ \"c\", \"b\", \"a\" } }\n");
     try w.change("a", "### Fixed\n\n- A fix.\n");
