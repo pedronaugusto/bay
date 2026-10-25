@@ -209,7 +209,8 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
     defer prefix_dir.close(c.io);
     for (files) |file| {
         try moveAside(c, prefix_dir, file);
-        try stage_dir.copyFile(file, prefix_dir, file, c.io, .{ .make_path = true });
+        stage_dir.copyFile(file, prefix_dir, file, c.io, .{ .make_path = true }) catch |err|
+            try say.fail(c.io, "could not put {s} in {s}: {t}", .{ file, prefix, err });
     }
     const record: Record = .{ .name = name, .source = recorded, .prefix = prefix, .files = files };
     if (previous) |index| records.items[index] = record else try records.append(c.a, record);
@@ -293,8 +294,9 @@ fn moveAside(c: Context, dir: Io.Dir, file: []const u8) !void {
     const aside = try c.a.print("{s}.old", .{file});
     dir.deleteFile(c.io, aside) catch |err| switch (err) {
         error.FileNotFound => {},
-        error.AccessDenied => try say.fail(c.io, "{s} still runs from an earlier install: end it and install again", .{aside}),
-        else => |e| return e,
+        error.AccessDenied, error.FileBusy => try say.fail(c.io, "{s} still runs from an earlier install: end it and install again", .{aside}),
+        else => |e| try say.fail(c.io, "could not remove {s}, which an earlier install moved aside: {t}", .{ aside, e }),
     };
-    try dir.rename(file, dir, aside, c.io);
+    dir.rename(file, dir, aside, c.io) catch |err|
+        try say.fail(c.io, "could not move {s} aside to {s} to replace it: {t}", .{ file, aside, err });
 }

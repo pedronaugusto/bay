@@ -845,6 +845,47 @@ test "an install builds what the package ships, whatever its development pins" {
     try f.tmp.dir.access(f.io, if (@import("builtin").os.tag == .windows) "prefix/bin/app.exe" else "prefix/bin/app", .{});
 }
 
+test "an install replaces a program that is running, and names what still runs from the install before" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // The app runs until its stdin closes, so it is running while bay installs over it,
+    // as bay is when it installs itself.
+    const waits =
+        \\const std = @import("std");
+        \\pub fn main(init: std.process.Init) void {
+        \\    var buffer: [64]u8 = undefined;
+        \\    var stdin = std.Io.File.stdin().readerStreaming(init.io, &buffer);
+        \\    while (true) _ = stdin.interface.takeByte() catch return;
+        \\}
+        \\
+    ;
+    try f.application("app", "", &.{}, waits);
+    const prefix = try std.fs.path.join(f.a, &.{ f.root, "prefix" });
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "install", "--prefix", prefix })));
+    const windows = @import("builtin").os.tag == .windows;
+    const program = try std.fs.path.join(f.a, &.{ prefix, "bin", if (windows) "app.exe" else "app" });
+    var first = try std.process.spawn(f.io, .{ .argv = &.{program}, .stdin = .pipe });
+    defer {
+        if (first.stdin) |stdin| stdin.close(f.io);
+        first.stdin = null;
+        _ = first.wait(f.io) catch {};
+    }
+    // Changed, so the install places a program of its own.
+    try f.write("app", "src/main.zig", waits ++ "// again\n");
+    const again = try f.bay("app", &.{ "install", "--prefix", prefix });
+    if (!succeeded(again)) std.debug.print("bay said:\n{s}\n", .{again.stderr});
+    try std.testing.expect(succeeded(again));
+    try f.tmp.dir.access(f.io, if (windows) "prefix/bin/app.exe" else "prefix/bin/app", .{});
+    if (!windows) return;
+    // On Windows the first program, moved aside, runs on: a third install says it does.
+    try f.write("app", "src/main.zig", waits ++ "// a third time\n");
+    const third = try f.bay("app", &.{ "install", "--prefix", prefix });
+    try std.testing.expect(refused(third));
+    try std.testing.expect(std.mem.find(u8, third.stderr, "app.exe.old still runs from an earlier install") != null);
+}
+
 test "bay names its version, the one its manifest gives" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
