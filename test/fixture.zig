@@ -77,6 +77,15 @@ pub const Fixture = struct {
         try f.write(dir, "src/main.zig", main);
     }
 
+    /// A link at `link` to the folder `target`, absolute, which any account makes: on
+    /// Windows a junction, which needs no privilege where a symbolic link needs
+    /// SeCreateSymbolicLinkPrivilege; elsewhere a symbolic link.
+    pub fn folderLink(f: *Fixture, target: []const u8, link: []const u8) !void {
+        if (@import("builtin").os.tag != .windows) return f.tmp.dir.symLink(f.io, target, link, .{ .is_directory = true });
+        const made = try std.process.run(f.a, f.io, .{ .argv = &.{ "cmd.exe", "/c", "mklink", "/J", try std.fs.path.join(f.a, &.{ f.root, link }), target } });
+        try std.testing.expect(succeeded(made));
+    }
+
     pub fn write(f: *Fixture, dir: []const u8, name: []const u8, data: []const u8) !void {
         try f.tmp.dir.writeFile(f.io, .{ .sub_path = try std.fs.path.join(f.a, &.{ dir, name }), .data = data });
     }

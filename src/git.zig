@@ -364,7 +364,20 @@ test "a folder that is a link is found on a path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "real/inner");
-    try tmp.dir.symLink(io, "real", "link", .{ .is_directory = true });
+    // A link to a folder any account makes: on Windows a junction, which needs no
+    // privilege where a symbolic link needs SeCreateSymbolicLinkPrivilege; std's stat
+    // takes either for a link, as it takes any name-surrogate reparse point.
+    if (@import("builtin").os.tag == .windows) {
+        const a = std.testing.allocator;
+        const where = try tmp.dir.realPathFileAlloc(io, ".", a);
+        defer a.free(where);
+        const target = try std.fs.path.join(a, &.{ where, "real" });
+        defer a.free(target);
+        const made = try std.process.run(a, io, .{ .argv = &.{ "cmd.exe", "/c", "mklink", "/J", "link", target }, .cwd = .{ .path = where } });
+        defer a.free(made.stdout);
+        defer a.free(made.stderr);
+        try std.testing.expect(made.term == .exited and made.term.exited == 0);
+    } else try tmp.dir.symLink(io, "real", "link", .{ .is_directory = true });
     try std.testing.expect(try throughLink(io, tmp.dir, "link"));
     try std.testing.expect(try throughLink(io, tmp.dir, "link/inner"));
     try std.testing.expect(!try throughLink(io, tmp.dir, "real/inner"));
