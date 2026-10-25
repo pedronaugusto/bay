@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-25
+
 ### Breaking
 
 - The `changelog` module no longer has `today`: the module reads and writes CHANGELOG.md and reads no clock. A release dates its section itself.
@@ -10,7 +12,6 @@
 
 - A machine in `machines.zon` gates a release with `PREFLIGHT_PORTABLE=elsewhere`, so the jobs that say the same on any machine (the source checks, the compiles of named targets) run once, on the machine making the release. preflight 0.18.1's gate runs them there by default; earlier ones ran them only where the hosted gate's runner system was, Linux, so a release gated on one Mac ran no source checks, as bay 0.1.21's did.
 - bay's source checks pass under the aegis pack of the glint its preflight pins, and bay holds what it shares and owns as aegis does. A file is read whole by aegis's `readFile`, which returns a cancel that lands on the file's length, and a release bundle is read to a stated limit of 1 GiB. A workspace's members publish how they ended through one guarded board that the members waiting on them watch, and the runs `--jobs` allows are counted there too, where an event, a semaphore and an outcome written in two places did it. `machines.zon` names why it is refused without a variable any thread could reach. git's `cat-file`, a gate's stdin and the package's directory each have one owner that releases them, and the test signer's key is held as a secret. Nothing is left reported: what `git ls-tree` lists is parsed before any path in it is written (a path outside the tree refused, as before), a link's target is followed to tell a folder from a file only where it stays inside the tree, a blob git says is past 1 GiB is refused before it is read, and checking a downloaded Zig stops when it is canceled.
-
 - Writing pins makes again what the build makes from them: `bay tidy` runs the package's `generate` step after it, the package build's or else the development build's, so `add`, `remove`, `update`, `upgrade` and a train's re-pin write the pins and what follows from them together. preflight's `generate` writes the CI caller naming the preflight pinned; `bay update preflight` left the caller naming the old pin, which only the release gate found ("not what generate makes"). `bay tidy` runs it even when no pin moves (pins written with `--no-tidy` or by hand); `--locked` runs nothing; a build that does not configure with the pins written is named and left to the next `bay tidy`. A release's cut makes it again for the version it names, in the release commit, and refuses a manifest whose tidy would move a pin; a train commits what is made again with no pin moved, and its `--dry-run` tidies in memory, changing no file.
 
 ## [0.1.21] - 2026-10-25
@@ -234,7 +235,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.21...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/pedronaugusto/bay/compare/v0.1.21...v0.2.0
 [0.1.21]: https://github.com/pedronaugusto/bay/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/pedronaugusto/bay/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/pedronaugusto/bay/compare/v0.1.18...v0.1.19
