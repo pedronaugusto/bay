@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-10-25
+
 ### Changed
 
 - Pins aegis 0.1.18 and ensign 0.3.0.
@@ -221,7 +223,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.20...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.1.21...HEAD
+[0.1.21]: https://github.com/pedronaugusto/bay/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/pedronaugusto/bay/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/pedronaugusto/bay/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/pedronaugusto/bay/compare/v0.1.17...v0.1.18
