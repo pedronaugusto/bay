@@ -414,10 +414,12 @@ fn buildArgv(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution
             error.PinnedTwiceDifferently => try say.fail(env.io, "a name is pinned differently in .dependencies and .dev_dependencies: one name is one dependency", .{}),
             else => |e| return e,
         };
-        // The development build shares the package's cache and installs where the package does.
+        // The development build shares the package's cache, the one Zig picks for the
+        // package build (ZIG_LOCAL_CACHE_DIR when set), and installs where the package does.
+        if (env.environ.get("ZIG_LOCAL_CACHE_DIR") == null)
+            try argv.appendSlice(env.a, &.{ "--cache-dir", try std.fs.path.join(env.a, &.{ env.package, ".zig-cache" }) });
         try argv.appendSlice(env.a, &.{
             "--build-file", try std.fs.path.join(env.a, &.{ build_root, "build.zig" }),
-            "--cache-dir",  try std.fs.path.join(env.a, &.{ env.package, ".zig-cache" }),
             "--prefix",     try std.fs.path.join(env.a, &.{ env.package, "zig-out" }),
             // One package directory for both builds: what the package build or `bay vendor` put there.
             // Relative to the package, where Zig runs: under an absolute one, Zig 0.17 refuses

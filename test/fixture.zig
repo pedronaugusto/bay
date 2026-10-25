@@ -25,6 +25,10 @@ pub const Fixture = struct {
         try env.put("ZIG", options.zig);
         // One cache for every run, apart from the person's: packages are kept by content, so tests share it safely.
         try env.put("ZIG_GLOBAL_CACHE_DIR", try std.fs.path.join(a, &.{ try Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", a), ".zig-cache", "bay-test-packages" }));
+        // And one for what Zig compiles: a fixture's package cloned, checked out to gate or
+        // copied to a machine builds once, not once per directory, as do the build runners
+        // fixtures share. Zig keys it by content and locks it, so runs share it safely.
+        try env.put("ZIG_LOCAL_CACHE_DIR", try std.fs.path.join(a, &.{ try Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", a), ".zig-cache", "bay-test-builds" }));
         try env.put("HOME", try std.fs.path.join(a, &.{ root, "home" }));
         try env.put("XDG_DATA_HOME", try std.fs.path.join(a, &.{ root, "data" }));
         // bay's configuration (the machines a release is gated on) is the fixture's: none unless a test writes one.
