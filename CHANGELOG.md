@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenPGP detached signatures are verified as RFC 9580 verifies a version 4 signature over a binary document, on std alone: RSA (PKCS #1 v1.5) or Ed25519 over SHA-256, SHA-384 or SHA-512, by a key from a file, binary or armored, every block of a keyring file read. The file is the only trust: no keyring, web of trust or key server is consulted. SHA-1, text signatures and a hashed critical subpacket bay does not know are refused. MSYS2 signs its packages so (RSA over SHA-512); its signature over `mingw-w64-clang-x86_64-vulkan-validation-layers-1.4.363.0-1` verifies with MSYS2's keyring.
+
 ## [0.2.0] - 2026-10-25
 
 ### Breaking

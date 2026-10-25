@@ -970,6 +970,7 @@ test {
     _ = machines;
     _ = manifest;
     _ = @import("minisign.zig");
+    _ = @import("openpgp.zig");
     _ = published;
     _ = release;
     _ = remotes;
