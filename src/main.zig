@@ -304,6 +304,13 @@ fn releaseCommand(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Ma
     return 0;
 }
 
+/// An open directory, which its one owner closes.
+const OpenDir = aegis.own.OwnedIo(Io.Dir, closeDir);
+
+fn closeDir(dir: *Io.Dir, io: Io) void {
+    dir.close(io);
+}
+
 const Env = struct {
     io: Io,
     a: std.mem.Allocator,
@@ -314,8 +321,9 @@ const Env = struct {
     /// `--locked`: no manifest may change, as in CI.
     locked: bool = false,
 
-    fn dir(env: Env) !Io.Dir {
-        return Io.Dir.cwd().openDir(env.io, env.package, .{});
+    /// The package's directory, open; its owner closes it.
+    fn dir(env: Env) !OpenDir {
+        return .init(try Io.Dir.cwd().openDir(env.io, env.package, .{}));
     }
 
     fn input(env: Env) tidying.Input {
@@ -323,9 +331,9 @@ const Env = struct {
     }
 
     fn readManifest(env: Env) ![:0]const u8 {
-        var dir_handle = try env.dir();
-        defer dir_handle.close(env.io);
-        const text = try dir_handle.readFileAlloc(env.io, "build.zig.zon", env.a, .limited(1 << 20));
+        var package_dir = try env.dir();
+        defer package_dir.deinit(env.io);
+        const text = try aegis.own.readFile(env.io, package_dir.lend().get(), "build.zig.zon", env.a, .fromRaw(1 << 20));
         return env.a.dupeSentinel(u8, text, 0);
     }
 };
@@ -400,8 +408,8 @@ fn buildArgv(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution
     try argv.appendSlice(env.a, before);
     if (where == .development) {
         var dir = try env.dir();
-        defer dir.close(env.io);
-        root.write(env.io, env.a, dir, parsed, resolution.packagePin()) catch |err| switch (err) {
+        defer dir.deinit(env.io);
+        root.write(env.io, env.a, dir.lend().get(), parsed, resolution.packagePin()) catch |err| switch (err) {
             error.DevDependencyNamedAsPackage => try say.fail(env.io, "a dev dependency is named {s}, the package's own name", .{parsed.name}),
             error.PinnedTwiceDifferently => try say.fail(env.io, "a name is pinned differently in .dependencies and .dev_dependencies: one name is one dependency", .{}),
             else => |e| return e,
@@ -475,11 +483,12 @@ fn graphCommand(env: Env, comptime which: enum { outdated, vendor }) !u8 {
 fn writeManifest(env: Env, text: []const u8) !void {
     if (env.locked) try say.fail(env.io, "--locked: build.zig.zon would change", .{});
     var dir = try env.dir();
-    defer dir.close(env.io);
+    defer dir.deinit(env.io);
+    const package = dir.lend().get();
     // Written beside and renamed over: a member resolving at the same moment reads
     // the old manifest or the new one, never half of one.
-    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon.bay-partial", .data = text });
-    try dir.rename("build.zig.zon.bay-partial", dir, "build.zig.zon", env.io);
+    try package.writeFile(env.io, .{ .sub_path = "build.zig.zon.bay-partial", .data = text });
+    try package.rename("build.zig.zon.bay-partial", package, "build.zig.zon", env.io);
 }
 
 /// `bay tidy`: the package's manifest pins each workspace member at its release
@@ -652,7 +661,7 @@ fn local(env: Env, path: []const u8, name: ?[]const u8) !manifest.Dependency {
     if (name) |given| return .{ .name = given, .source = .{ .path = relative } };
     var dir = try Io.Dir.cwd().openDir(env.io, absolute, .{});
     defer dir.close(env.io);
-    const text = dir.readFileAlloc(env.io, "build.zig.zon", env.a, .limited(1 << 20)) catch try say.fail(env.io, "{s} has no build.zig.zon; name it with --name", .{path});
+    const text = aegis.own.readFile(env.io, dir, "build.zig.zon", env.a, .fromRaw(1 << 20)) catch try say.fail(env.io, "{s} has no build.zig.zon; name it with --name", .{path});
     const parsed = try manifest.parse(env.a, try env.a.dupeSentinel(u8, text, 0));
     return .{ .name = parsed.name, .source = .{ .path = relative } };
 }
@@ -851,9 +860,9 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
             else => return 1,
         }
     }
-    const text = try dir.readFileAlloc(io, "build.zig.zon", a, .limited(1 << 20));
+    const text = try aegis.own.readFile(io, dir, "build.zig.zon", a, .fromRaw(1 << 20));
     if (try manifest.ensureList(a, try a.dupeSentinel(u8, text, 0), .dev)) |edited| try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = edited });
-    const build = dir.readFileAlloc(io, "build.zig", a, .limited(1 << 20)) catch |err| switch (err) {
+    const build = aegis.own.readFile(io, dir, "build.zig", a, .fromRaw(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => try say.fail(io, "build.zig.zon has no build.zig beside it", .{}),
         else => return err,
     };

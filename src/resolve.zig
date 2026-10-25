@@ -10,6 +10,7 @@
 //! with only its manifest's pins rewritten. `zig build --fork=<dir>` substitutes
 //! each by name and fingerprint.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
@@ -175,7 +176,7 @@ fn coexisting(input: Input) ![]const []const u8 {
     if (contains(input.parsed.coexist, input.parsed.name)) try say.fail(input.io, "{s} names itself in .coexist; a package builds one line of itself", .{input.parsed.name});
     for (input.members) |member| {
         const path = try std.fs.path.join(a, &.{ member, "build.zig.zon" });
-        const text = try Io.Dir.cwd().readFileAlloc(input.io, path, a, .limited(1 << 20));
+        const text = try aegis.own.readFile(input.io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20));
         const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
             error.InvalidManifest => try say.fail(input.io, "{s} is not a manifest bay can read", .{path}),
             error.OutOfMemory => |e| return e,
@@ -364,7 +365,7 @@ fn materialize(input: Input, source: []const u8, directory: []const u8, rewrites
     try Io.Dir.cwd().deleteTree(input.io, partial);
     try copyTree(input.io, a, source, partial);
     const manifest_path = try std.fs.path.join(a, &.{ partial, "build.zig.zon" });
-    var text = try a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(input.io, manifest_path, a, .limited(1 << 20)), 0);
+    var text = try a.dupeSentinel(u8, try aegis.own.readFile(input.io, Io.Dir.cwd(), manifest_path, a, .fromRaw(1 << 20)), 0);
     for (rewrites) |rewrite| text = try manifest.put(a, text, .normal, rewrite);
     try Io.Dir.cwd().writeFile(input.io, .{ .sub_path = manifest_path, .data = text });
     try Io.Dir.cwd().deleteTree(input.io, directory);

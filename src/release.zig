@@ -12,6 +12,7 @@
 //! green whose push did not go, so the next run pushes it without gating it
 //! again. No tag is ever made on a commit no gate passed.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const changelog = @import("changelog.zig");
 const manifest = @import("manifest.zig");
@@ -152,7 +153,7 @@ fn gatedRef(c: Context, tag: []const u8) ![]const u8 {
 fn read(c: Context, name: []const u8) !?[:0]const u8 {
     var dir = try Io.Dir.cwd().openDir(c.io, c.package, .{});
     defer dir.close(c.io);
-    const text = dir.readFileAlloc(c.io, name, c.a, .limited(16 << 20)) catch |err| switch (err) {
+    const text = aegis.own.readFile(c.io, dir, name, c.a, .fromRaw(16 << 20)) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -249,7 +250,7 @@ pub fn run(c: Context, options: Options) !Outcome {
     }
     if (plan.cut) |cut| {
         var problem: changelog.Problem = undefined;
-        const cut_log = changelog.cut(c.a, cut.text, plan.version, try changelog.today(c.a, c.io), &problem) catch |err| switch (err) {
+        const cut_log = changelog.cut(c.a, cut.text, plan.version, try today(c.a, c.io), &problem) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => try say.fail(c.io, "CHANGELOG.md:{d}: {s}", .{ problem.line, problem.what }),
         };
@@ -382,7 +383,7 @@ fn pushUnreleased(c: Context, up: Upstream, head: []const u8, options: Options) 
 
 fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.Machine, options: Options) !void {
     if (plan.cut) |cut| {
-        try say.out(c.io, "{f} -> {f} ({t})\n\n## [{f}] - {s}\n\n", .{ cut.from, plan.version, cut.section.change(), plan.version, try changelog.today(c.a, c.io) });
+        try say.out(c.io, "{f} -> {f} ({t})\n\n## [{f}] - {s}\n\n", .{ cut.from, plan.version, cut.section.change(), plan.version, try today(c.a, c.io) });
         var out: Io.Writer.Allocating = .init(c.a);
         try cut.section.write(&out.writer);
         try say.out(c.io, "{s}\n", .{out.written()});
@@ -591,6 +592,16 @@ fn moved(a: std.mem.Allocator, before: []const manifest.Dependency, after: []con
         try out.append(a, try a.print("{s} {f}", .{ dependency.name, named.version }));
     }
     return out;
+}
+
+/// `YYYY-MM-DD` of the current UTC day, which a release is dated with.
+fn today(a: std.mem.Allocator, io: Io) ![]const u8 {
+    const now = try aegis.units.Instant(.real, .second, i64).fromTimestamp(Io.Clock.real.now(io), .down);
+    // The epoch's calendar counts seconds from 1970 up: a clock set before it reads as 1970.
+    const seconds: u64 = @intCast(@max(0, now.raw())); // safe: clamped to zero and up
+    const day = (std.time.epoch.EpochSeconds{ .secs = seconds }).getEpochDay().calculateYearDay();
+    const month_day = day.calculateMonthDay();
+    return a.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ day.year, month_day.month.numeric(), month_day.day_index + 1 });
 }
 
 /// "a", "a and b", "a, b and c".

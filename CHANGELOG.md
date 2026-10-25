@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- The `changelog` module no longer has `today`: the module reads and writes CHANGELOG.md and reads no clock. A release dates its section itself.
+
 ### Fixed
+
+- bay's source checks pass under the aegis pack of the glint its preflight pins, and bay holds what it shares and owns as aegis does. A file is read whole by aegis's `readFile`, which returns a cancel that lands on the file's length, and a release bundle is read to a stated limit of 1 GiB. A workspace's members publish how they ended through one guarded board that the members waiting on them watch, and the runs `--jobs` allows are counted there too, where an event, a semaphore and an outcome written in two places did it. `machines.zon` names why it is refused without a variable any thread could reach. git's `cat-file`, a gate's stdin and the package's directory each have one owner that releases them, and the test signer's key is held as a secret.
 
 - Writing pins makes again what the build makes from them: `bay tidy` runs the package's `generate` step after it, the package build's or else the development build's, so `add`, `remove`, `update`, `upgrade` and a train's re-pin write the pins and what follows from them together. preflight's `generate` writes the CI caller naming the preflight pinned; `bay update preflight` left the caller naming the old pin, which only the release gate found ("not what generate makes"). `bay tidy` runs it even when no pin moves (pins written with `--no-tidy` or by hand); `--locked` runs nothing; a build that does not configure with the pins written is named and left to the next `bay tidy`. A train commits a caller made again with no pin moved, and its `--dry-run` tidies in memory, changing no file.
 

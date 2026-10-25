@@ -3,6 +3,7 @@
 //! bay's own unpacked copy of an archive in Zig's global cache (`p/<hash>.tar.gz`);
 //! else fetched by Zig itself, whose hash must be the pin's.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
@@ -173,7 +174,7 @@ pub fn developedAt(io: Io, a: std.mem.Allocator, directory: []const u8) !select.
 
 fn read(io: Io, a: std.mem.Allocator, directory: []const u8, place: select.Place, developed: bool) !select.Revision {
     const path = try std.fs.path.join(a, &.{ directory, "build.zig.zon" });
-    const text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch |err| switch (err) {
+    const text = aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => return placed(place),
         else => |e| return e,
     };

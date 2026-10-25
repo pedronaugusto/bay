@@ -5,6 +5,7 @@
 //! directory, so `bay uninstall` removes exactly that and `--update` follows the
 //! ref an install came from.
 const std = @import("std");
+const aegis = @import("aegis");
 const ensign = @import("ensign");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -132,7 +133,7 @@ pub fn uninstall(c: Context, name: []const u8) !u8 {
 fn buildCommand(c: Context, work: []const u8, stage: []const u8, cache: []const u8) ![]const []const u8 {
     const zig = try toolchain.forPackage(c.io, c.a, c.environ, work);
     const manifest_path = try std.fs.path.join(c.a, &.{ work, "build.zig.zon" });
-    var text = try c.a.dupeSentinel(u8, try Io.Dir.cwd().readFileAlloc(c.io, manifest_path, c.a, .limited(1 << 20)), 0);
+    var text = try c.a.dupeSentinel(u8, try aegis.own.readFile(c.io, Io.Dir.cwd(), manifest_path, c.a, .fromRaw(1 << 20)), 0);
     const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text), .development = false });
     for (resolution.raises) |raise| text = try manifest.put(c.a, text, raise.kind, raise.to);
     try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = manifest_path, .data = text });
@@ -158,7 +159,7 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
         const packages = try store.Store.init(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }));
         break :directory try packages.directoryOf(.{ .url = dependency.source.remote.url, .hash = dependency.source.remote.hash });
     };
-    const package_text = Io.Dir.cwd().readFileAlloc(c.io, try std.fs.path.join(c.a, &.{ package_dir, "build.zig.zon" }), c.a, .limited(1 << 20)) catch
+    const package_text = aegis.own.readFile(c.io, Io.Dir.cwd(), try std.fs.path.join(c.a, &.{ package_dir, "build.zig.zon" }), c.a, .fromRaw(1 << 20)) catch
         try say.fail(c.io, "{s} has no build.zig.zon", .{source});
     const name = given_name orelse (try manifest.parse(c.a, try c.a.dupeSentinel(u8, package_text, 0))).name;
     // The name names directories bay writes and deletes: it must be a Zig identifier, as a manifest's is.
@@ -248,7 +249,7 @@ fn defaultPrefix(c: Context) ![]const u8 {
 fn load(c: Context) !std.ArrayList(Record) {
     const path = try std.fs.path.join(c.a, &.{ try dirs.data(c.io, c.a, c.environ), "installed.zon" });
     var diagnostics: std.zon.parse.Diagnostics = undefined;
-    const text = Io.Dir.cwd().readFileAlloc(c.io, path, c.a, .limited(1 << 24)) catch |err| switch (err) {
+    const text = aegis.own.readFile(c.io, Io.Dir.cwd(), path, c.a, .fromRaw(1 << 24)) catch |err| switch (err) {
         error.FileNotFound => return .empty,
         else => return err,
     };

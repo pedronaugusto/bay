@@ -3,6 +3,7 @@
 //! build runs the package's `pub fn dev(b: *std.Build, tools: type) void`.
 //! Zig fetches, hashes and caches it like any other package.
 const std = @import("std");
+const aegis = @import("aegis");
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
 
@@ -125,7 +126,7 @@ pub fn write(io: std.Io, a: std.mem.Allocator, package_dir: std.Io.Dir, package:
 }
 
 fn writeIfChanged(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, text: []const u8) !void {
-    if (dir.readFileAlloc(io, name, a, .limited(1 << 20))) |old| {
+    if (aegis.own.readFile(io, dir, name, a, .fromRaw(1 << 20))) |old| {
         if (std.mem.eql(u8, old, text)) return;
     } else |err| switch (err) {
         error.FileNotFound => {},

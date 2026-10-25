@@ -369,14 +369,6 @@ fn links(a: std.mem.Allocator, text: []const u8, version: std.SemanticVersion) s
     return result.written();
 }
 
-/// `YYYY-MM-DD` of the current UTC day.
-pub fn today(a: std.mem.Allocator, io: std.Io) ![]const u8 {
-    const seconds: u64 = @intCast(@max(0, std.Io.Clock.real.now(io).toSeconds())); // safe: clamped to zero and up
-    const day = (std.time.epoch.EpochSeconds{ .secs = seconds }).getEpochDay().calculateYearDay();
-    const month_day = day.calculateMonthDay();
-    return a.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ day.year, month_day.month.numeric(), month_day.day_index + 1 });
-}
-
 // Tests ------------------------------------------------------------------
 
 const sample =

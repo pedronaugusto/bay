@@ -4,6 +4,7 @@
 //! and a global signature over that signature and the trusted comment, so the
 //! comment cannot be changed either.
 const std = @import("std");
+const aegis = @import("aegis");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Blake2b512 = std.crypto.hash.blake2.Blake2b512;
 const base64 = std.base64.standard.Decoder;
@@ -139,26 +140,30 @@ const encoder = std.base64.standard.Encoder;
 
 /// A minisign key and the text of a signature it makes, as minisign writes them.
 const Signer = struct {
-    pair: Ed25519.KeyPair,
+    pair: aegis.Secret(Ed25519.KeyPair),
     id: [8]u8,
 
     fn init(seed: u8, id: [8]u8) !Signer {
-        return .{ .pair = try .generateDeterministic(@splat(seed)), .id = id };
+        return .{ .pair = .init(try .generateDeterministic(@splat(seed))), .id = id };
     }
 
-    fn publicKey(signer: Signer, buffer: []u8) []const u8 {
-        return encoder.encode(buffer, &("Ed".* ++ signer.id ++ signer.pair.public_key.toBytes()));
+    fn deinit(signer: *Signer) void {
+        signer.pair.deinit();
     }
 
-    fn sign(signer: Signer, a: std.mem.Allocator, file: []const u8, algorithm: Algorithm, comment: []const u8) ![]u8 {
+    fn publicKey(signer: *const Signer, buffer: []u8) []const u8 {
+        return encoder.encode(buffer, &("Ed".* ++ signer.id ++ signer.pair.expose().public_key.toBytes()));
+    }
+
+    fn sign(signer: *const Signer, a: std.mem.Allocator, file: []const u8, algorithm: Algorithm, comment: []const u8) ![]u8 {
         var digest: [Blake2b512.digest_length]u8 = undefined;
         Blake2b512.hash(file, &digest, .{});
         const signed = switch (algorithm) {
             .prehashed => &digest,
             .legacy => file,
         };
-        const signature = (try signer.pair.sign(signed, null)).toBytes();
-        const global = (try signer.pair.sign(try std.mem.concat(a, u8, &.{ &signature, comment }), null)).toBytes();
+        const signature = (try signer.pair.expose().sign(signed, null)).toBytes();
+        const global = (try signer.pair.expose().sign(try std.mem.concat(a, u8, &.{ &signature, comment }), null)).toBytes();
         const tag = switch (algorithm) {
             .prehashed => "ED",
             .legacy => "Ed",
@@ -177,7 +182,8 @@ test "a file signed by the key verifies, prehashed and legacy" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const signer: Signer = try .init(7, "keyid-01".*);
+    var signer: Signer = try .init(7, "keyid-01".*);
+    defer signer.deinit();
     var key_buffer: [64]u8 = undefined;
     const key = try PublicKey.parse(signer.publicKey(&key_buffer));
     const file = "zig-x86_64-linux-0.17.0.tar.xz, as published";
@@ -198,7 +204,8 @@ test "a changed file, comment, key or algorithm is refused, each by name" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const signer: Signer = try .init(7, "keyid-01".*);
+    var signer: Signer = try .init(7, "keyid-01".*);
+    defer signer.deinit();
     var key_buffer: [64]u8 = undefined;
     const key = try PublicKey.parse(signer.publicKey(&key_buffer));
     const file = "the published archive";
@@ -209,9 +216,11 @@ test "a changed file, comment, key or algorithm is refused, each by name" {
     try testing.expectError(error.TrustedCommentMismatch, verify(file, try Signature.parse(forged), key));
 
     // Another key under the same id signs nothing this key made.
-    const impostor: Signer = try .init(8, "keyid-01".*);
+    var impostor: Signer = try .init(8, "keyid-01".*);
+    defer impostor.deinit();
     try testing.expectError(error.TrustedCommentMismatch, verify(file, try Signature.parse(try impostor.sign(a, file, .prehashed, "file:zig.tar.xz")), key));
-    const other: Signer = try .init(8, "keyid-02".*);
+    var other: Signer = try .init(8, "keyid-02".*);
+    defer other.deinit();
     try testing.expectError(error.KeyMismatch, verify(file, try Signature.parse(try other.sign(a, file, .prehashed, "c")), key));
 
     var line_buffer: [100]u8 = undefined;

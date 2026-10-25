@@ -1,6 +1,7 @@
 //! One package fetched as Zig records it: by Zig itself, `zig fetch --save`
 //! into a scratch manifest, or by git where Zig cannot reach (`git.zig`).
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const root = @import("root.zig");
@@ -30,7 +31,7 @@ pub fn fetch(io: Io, a: std.mem.Allocator, zig: []const u8, scratch: []const u8,
         .exited => |code| if (code != 0) return null,
         else => return null,
     }
-    const text = try dir.readFileAlloc(io, "build.zig.zon", a, .limited(1 << 20));
+    const text = try aegis.own.readFile(io, dir, "build.zig.zon", a, .fromRaw(1 << 20));
     const parsed = try manifest.parse(a, try a.dupeSentinel(u8, text, 0));
     if (parsed.normal.len != 1) try say.fail(io, "zig fetch saved {d} dependencies; expected one", .{parsed.normal.len});
     return parsed.normal[0];

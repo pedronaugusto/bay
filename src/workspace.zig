@@ -8,6 +8,7 @@
 //! is what builds, so a change in one is tested against the others before it
 //! lands anywhere.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const say = @import("say.zig");
 const manifest = @import("manifest.zig");
@@ -36,7 +37,7 @@ const Identity = struct { name: []const u8, fingerprint: u64 };
 /// What a package is, as its manifest names it.
 fn identity(io: Io, a: std.mem.Allocator, directory: []const u8) !Identity {
     const path = try std.fs.path.join(a, &.{ directory, "build.zig.zon" });
-    const text = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+    const text = try aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20));
     const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
         error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{path}),
         error.OutOfMemory => |e| return e,
@@ -77,7 +78,7 @@ fn find(io: Io, a: std.mem.Allocator, from: []const u8) !?Found {
     var directory: []const u8 = from;
     while (true) {
         const path = try std.fs.path.join(a, &.{ directory, file_name });
-        if (Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20))) |text| {
+        if (aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20))) |text| {
             return .{ .path = path, .text = try a.dupeSentinel(u8, text, 0) };
         } else |err| switch (err) {
             error.FileNotFound => {},

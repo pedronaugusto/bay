@@ -5,6 +5,7 @@
 //! everyone outside sees, so it names the newest release there is. A member
 //! whose version has no tag yet has unreleased work, and its pins stay.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const remotes = @import("remote.zig");
@@ -127,7 +128,7 @@ const Remote = struct {
 };
 
 fn read(io: Io, a: std.mem.Allocator, directory: []const u8) !manifest.Manifest {
-    const text = try Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .limited(1 << 20));
+    const text = try aegis.own.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .fromRaw(1 << 20));
     return manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
         error.InvalidManifest => try say.fail(io, "{s}/build.zig.zon is not a manifest bay can read", .{directory}),
         else => |e| return e,

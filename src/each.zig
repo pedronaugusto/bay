@@ -11,17 +11,25 @@ const workspace = @import("workspace.zig");
 const say = @import("say.zig");
 const aegis = @import("aegis");
 
-const Outcome = enum { pending, ok, failed, skipped };
-
 const Member = struct {
     directory: []const u8,
     name: []const u8,
     /// Indices of the members it depends on.
     needs: []const usize,
-    done: Io.Event = .unset,
-    outcome: Outcome = .pending,
+};
+
+/// How a member's run ended: published once, by its own task.
+const Ended = struct {
+    outcome: enum { ok, failed, skipped },
     /// The member that failed, for one skipped.
     because: ?usize = null,
+};
+
+/// What the members' tasks share: each member's end once it has one, and how many more
+/// runs may start now (`--jobs`).
+const Board = struct {
+    ended: []?Ended,
+    free: usize,
 };
 
 const Run = struct {
@@ -31,7 +39,9 @@ const Run = struct {
     bay: []const u8,
     command: []const []const u8,
     members: []Member,
-    permits: Io.Semaphore,
+    board: aegis.BlockingGuarded(Board),
+    /// Told when a member's end is published or a run gives its place back.
+    changed: aegis.Condition = .init(),
     /// The terminal, which members write to whole, one at a time.
     terminal: aegis.BlockingGuarded(Terminal) = .init(.{}),
 };
@@ -48,29 +58,28 @@ pub fn run(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map
     const directories = try workspace.all(io, a, here) orelse try say.fail(io, "no {s} here or in any directory above", .{workspace.file_name});
     const members = try order(io, a, directories);
     const width = jobs orelse std.Thread.getCpuCount() catch 1;
+    const ended = try a.alloc(?Ended, members.len);
+    @memset(ended, null);
     var state: Run = .{
         .io = io,
         .environ = environ,
         .bay = environ.get("BAY").?, // safe: main sets BAY before any command
         .command = command,
         .members = members,
-        .permits = .{ .permits = @max(width, 1) },
+        .board = .init(.{ .ended = ended, .free = @max(width, 1) }),
     };
     var group: Io.Group = .init;
     for (0..members.len) |index| group.concurrent(io, one, .{ &state, index }) catch |err| {
         // Members not started count as failed, so those that wait on them go on.
-        for (members[index..]) |*member| {
-            member.outcome = .failed;
-            member.done.set(io);
-        }
+        for (index..members.len) |unstarted| publish(&state, unstarted, .{ .outcome = .failed });
         try group.await(io);
         try say.fail(io, "could not start a task per member: {t}", .{err});
     };
     try group.await(io);
-    // Every task has ended: the terminal's state is read without its guard.
+    // Every task has ended: what they shared is read without its guard.
     if (state.terminal.teardown().unwritten) |err| return err;
     var failed: usize = 0;
-    for (members) |member| if (member.outcome != .ok) {
+    for (state.board.teardown().ended) |end| if (end.?.outcome != .ok) { // safe: every task published its end
         failed += 1;
     };
     try say.note(io, "{d} of {d} members ok", .{ members.len - failed, members.len });
@@ -110,7 +119,7 @@ pub fn train(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]c
 fn order(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]Member {
     const manifests = try a.alloc(manifest.Manifest, directories.len);
     for (manifests, directories) |*parsed, directory| {
-        const text = try Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .limited(1 << 20));
+        const text = try aegis.own.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .fromRaw(1 << 20));
         parsed.* = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
             error.InvalidManifest => try say.fail(io, "{s}/build.zig.zon is not a manifest bay can read", .{directory}),
             else => |e| return e,
@@ -207,65 +216,99 @@ fn ring(a: std.mem.Allocator, members: []const Member) !?[]const u8 {
     return null;
 }
 
-/// One member: after what it needs, and within the permits.
+/// One member: after what it needs, and within the runs `--jobs` allows; its end
+/// reported, then published to the members waiting on it.
 fn one(state: *Run, index: usize) void {
-    const io = state.io;
     const member = &state.members[index];
-    defer member.done.set(io);
     var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
     defer arena.deinit();
-    const said = attempt(state, member, arena.allocator());
-    report(state, member, said);
+    const attempted = attempt(state, member, arena.allocator());
+    report(state, member, attempted);
+    publish(state, index, attempted.ended);
 }
 
-/// What a member's run wrote, once it has an outcome.
-const Said = struct { stdout: []const u8 = "", stderr: []const u8 = "" };
+/// What a member's run wrote, and how it ended.
+const Attempt = struct { ended: Ended, stdout: []const u8 = "", stderr: []const u8 = "" };
 
-fn attempt(state: *Run, member: *Member, a: std.mem.Allocator) Said {
+fn attempt(state: *Run, member: *const Member, a: std.mem.Allocator) Attempt {
     const io = state.io;
     for (member.needs) |need| {
-        state.members[need].done.waitUncancelable(io);
-        if (state.members[need].outcome != .ok) {
-            member.outcome = .skipped;
-            member.because = if (state.members[need].outcome == .failed) need else state.members[need].because;
-            return .{};
-        }
+        const needed = endOf(state, need) catch return .{ .ended = .{ .outcome = .failed }, .stderr = "bay: more members wait than a condition holds\n" };
+        if (needed.outcome != .ok) return .{ .ended = .{ .outcome = .skipped, .because = if (needed.outcome == .failed) need else needed.because } };
     }
-    state.permits.waitUncancelable(io);
-    defer state.permits.post(io);
-    member.outcome = .failed;
-    const argv = std.mem.concat(a, []const u8, &.{ &.{state.bay}, state.command }) catch return .{ .stderr = "bay: out of memory\n" };
+    take(state) catch return .{ .ended = .{ .outcome = .failed }, .stderr = "bay: more members wait than a condition holds\n" };
+    defer give(state);
+    const failed: Ended = .{ .outcome = .failed };
+    const argv = std.mem.concat(a, []const u8, &.{ &.{state.bay}, state.command }) catch return .{ .ended = failed, .stderr = "bay: out of memory\n" };
     const result = std.process.run(a, io, .{
         .argv = argv,
         .cwd = .{ .path = member.directory },
         .environ_map = state.environ,
         .stdout_limit = .limited(64 << 20),
         .stderr_limit = .limited(64 << 20),
-    }) catch |err| return .{ .stderr = a.print("bay: could not run bay: {t}\n", .{err}) catch "bay: could not run bay\n" };
-    if (result.term == .exited and result.term.exited == 0) member.outcome = .ok;
-    return .{ .stdout = result.stdout, .stderr = result.stderr };
+    }) catch |err| return .{ .ended = failed, .stderr = a.print("bay: could not run bay: {t}\n", .{err}) catch "bay: could not run bay\n" };
+    const ok = result.term == .exited and result.term.exited == 0;
+    return .{ .ended = if (ok) .{ .outcome = .ok } else failed, .stdout = result.stdout, .stderr = result.stderr };
 }
 
-/// A member's output, whole, under its outcome.
-fn report(state: *Run, member: *const Member, said: Said) void {
+/// The member at `index`'s end, once its task publishes it.
+fn endOf(state: *Run, index: usize) error{WaiterLimit}!Ended {
+    var guard = state.board.acquireUncancelable(state.io);
+    defer guard.deinit(state.io);
+    while (true) {
+        if (guard.value().ended[index]) |end| return end;
+        state.changed.waitUncancelable(state.io, &guard, .none) catch |err| switch (err) {
+            error.Timeout => unreachable, // unreachable: the wait has no deadline
+            error.WaiterLimit => |e| return e,
+        };
+    }
+}
+
+/// A place among the runs `--jobs` allows, once one is free.
+fn take(state: *Run) error{WaiterLimit}!void {
+    var guard = state.board.acquireUncancelable(state.io);
+    defer guard.deinit(state.io);
+    while (guard.value().free == 0) state.changed.waitUncancelable(state.io, &guard, .none) catch |err| switch (err) {
+        error.Timeout => unreachable, // unreachable: the wait has no deadline
+        error.WaiterLimit => |e| return e,
+    };
+    guard.value().free -= 1;
+}
+
+fn give(state: *Run) void {
+    var guard = state.board.acquireUncancelable(state.io);
+    defer guard.deinit(state.io);
+    guard.value().free += 1;
+    state.changed.broadcast(state.io);
+}
+
+/// The member at `index`'s end, to the members waiting on it.
+fn publish(state: *Run, index: usize, ended: Ended) void {
+    var guard = state.board.acquireUncancelable(state.io);
+    defer guard.deinit(state.io);
+    guard.value().ended[index] = ended;
+    state.changed.broadcast(state.io);
+}
+
+/// A member's output, whole, under how it ended.
+fn report(state: *Run, member: *const Member, attempted: Attempt) void {
     var guard = state.terminal.acquireUncancelable(state.io);
     defer guard.deinit(state.io);
     const terminal = guard.value();
     if (terminal.unwritten != null) return;
-    write(state, member, said) catch |err| {
+    write(state, member, attempted) catch |err| {
         terminal.unwritten = err;
     };
 }
 
-fn write(state: *Run, member: *const Member, said: Said) Io.Writer.Error!void {
+fn write(state: *Run, member: *const Member, attempted: Attempt) Io.Writer.Error!void {
     const io = state.io;
-    switch (member.outcome) {
-        .skipped => return say.note(io, "{s}: skipped, since {s} failed", .{ member.name, state.members[member.because.?].name }), // safe: a skipped member names the failure
-        .ok, .failed => try say.note(io, "{s}: {t}", .{ member.name, member.outcome }),
-        .pending => unreachable, // safe: a member is reported once it has an outcome
+    switch (attempted.ended.outcome) {
+        .skipped => return say.note(io, "{s}: skipped, since {s} failed", .{ member.name, state.members[attempted.ended.because.?].name }), // safe: a skipped member names the failure
+        .ok, .failed => |outcome| try say.note(io, "{s}: {t}", .{ member.name, outcome }),
     }
-    try say.out(io, "{s}", .{said.stdout});
-    try say.relay(io, said.stderr);
+    try say.out(io, "{s}", .{attempted.stdout});
+    try say.relay(io, attempted.stderr);
 }
 
 test "members are ordered by what they ship with, and a ring is found" {

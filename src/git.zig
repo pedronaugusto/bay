@@ -8,6 +8,7 @@
 //! in Zig's cache, where every build then finds it. A manifest may pin such a
 //! URL like any other: Zig builds it from the cache and never fetches it.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const say = @import("say.zig");
 
@@ -111,7 +112,7 @@ fn checkout(io: Io, a: std.mem.Allocator, repository: []const u8, commit: []cons
     var reader = try Objects.open(io, a, repository);
     // A tree that fails to write ends git with it; one written lets git end as asked.
     write(io, a, listing, out, reader) catch |err| {
-        reader.child.kill(io);
+        reader.child.deinit(io);
         return err;
     };
     try reader.finish();
@@ -176,7 +177,8 @@ fn contained(path: []const u8) bool {
 const Objects = struct {
     io: Io,
     a: std.mem.Allocator,
-    child: std.process.Child,
+    /// git, which its owner kills unless `finish` ends it as asked.
+    child: aegis.own.OwnedIo(std.process.Child, kill),
     in_buffer: [256]u8 = undefined,
     out_buffer: [64 * 1024]u8 = undefined,
     in: Io.File.Writer = undefined,
@@ -184,14 +186,19 @@ const Objects = struct {
 
     fn open(io: Io, a: std.mem.Allocator, repository: []const u8) !*Objects {
         const objects = try a.create(Objects);
-        objects.* = .{ .io = io, .a = a, .child = try std.process.spawn(io, .{
+        objects.* = .{ .io = io, .a = a, .child = .init(try std.process.spawn(io, .{
             .argv = &.{ "git", "-C", repository, "cat-file", "--batch" },
             .stdin = .pipe,
             .stdout = .pipe,
-        }) };
-        objects.in = objects.child.stdin.?.writerStreaming(io, &objects.in_buffer); // safe: stdin is piped
-        objects.out = objects.child.stdout.?.readerStreaming(io, &objects.out_buffer); // safe: stdout is piped
+        })) };
+        const child = objects.child.borrow();
+        objects.in = child.stdin.?.writerStreaming(io, &objects.in_buffer); // safe: stdin is piped
+        objects.out = child.stdout.?.readerStreaming(io, &objects.out_buffer); // safe: stdout is piped
         return objects;
+    }
+
+    fn kill(child: *std.process.Child, io: Io) void {
+        child.kill(io);
     }
 
     fn blob(objects: *Objects, object: []const u8) ![]const u8 {
@@ -211,9 +218,11 @@ const Objects = struct {
 
     /// Ends git once every blob is read: it must have ended as asked.
     fn finish(objects: *Objects) !void {
-        objects.child.stdin.?.close(objects.io); // safe: stdin is piped
-        objects.child.stdin = null;
-        const term = try objects.child.wait(objects.io);
+        var child: std.process.Child = undefined;
+        objects.child.take(&child);
+        child.stdin.?.close(objects.io); // safe: stdin is piped
+        child.stdin = null;
+        const term = try child.wait(objects.io);
         if (term != .exited or term.exited != 0) return error.GitFailed;
     }
 };

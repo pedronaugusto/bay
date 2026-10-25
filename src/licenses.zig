@@ -3,6 +3,7 @@
 //! license field, so it is read from the package's license files: an
 //! `SPDX-License-Identifier` line when one is there, else the license's text.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const select = @import("select.zig");
 const resolve = @import("resolve.zig");
@@ -56,7 +57,7 @@ fn licenseOf(io: Io, a: std.mem.Allocator, directory: []const u8) !?[]const u8 {
     var entries = dir.iterate();
     while (try entries.next(io)) |entry| {
         if (entry.kind != .file or !isLicenseFile(entry.name)) continue;
-        const text = try dir.readFileAlloc(io, entry.name, a, .limited(1 << 20));
+        const text = try aegis.own.readFile(io, dir, entry.name, a, .fromRaw(1 << 20));
         if (try identify(a, text)) |id| {
             for (found.items) |known| {
                 if (std.mem.eql(u8, known, id)) break;

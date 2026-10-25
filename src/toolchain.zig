@@ -3,6 +3,7 @@
 //! ziglang.org, its digest and minisign signature verified, unpacked under bay's
 //! data directory in `zig/<version>`, and used from there without the network.
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -29,7 +30,7 @@ const oldest: std.SemanticVersion = .{ .major = 0, .minor = 17, .patch = 0 };
 pub fn forPackage(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8) ![]const u8 {
     if (environ.get("ZIG")) |zig| return zig;
     const manifest_path = try std.fs.path.join(a, &.{ package, "build.zig.zon" });
-    const text = try Io.Dir.cwd().readFileAlloc(io, manifest_path, a, .limited(1 << 20));
+    const text = try aegis.own.readFile(io, Io.Dir.cwd(), manifest_path, a, .fromRaw(1 << 20));
     const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
         error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{manifest_path}),
         error.OutOfMemory => |e| return e,

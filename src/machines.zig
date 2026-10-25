@@ -28,51 +28,44 @@ pub const file_name = "machines.zon";
 /// The machines the person named; none when there is no `machines.zon`.
 pub fn load(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map) ![]const Machine {
     const path = try std.fs.path.join(a, &.{ try dirs.config(io, a, environ), file_name });
-    const text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch |err| switch (err) {
+    const text = aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => return &.{},
         else => try say.fail(io, "could not read {s}: {t}", .{ path, err }),
     };
-    return parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Invalid => try say.fail(io, "{s}: {s}", .{ path, problem }),
+    return switch (try parse(a, try a.dupeSentinel(u8, text, 0))) {
+        .machines => |machines| machines,
+        .invalid => |why| try say.fail(io, "{s}: {s}", .{ path, why }),
     };
 }
 
-/// Why the last `parse` refused, for its caller to name.
-var problem: []const u8 = "";
+/// The machines a `machines.zon` names, or why it is refused.
+const Parsed = union(enum) { machines: []const Machine, invalid: []const u8 };
 
-fn parse(a: std.mem.Allocator, source: [:0]const u8) error{ OutOfMemory, Invalid }![]const Machine {
+fn parse(a: std.mem.Allocator, source: [:0]const u8) error{OutOfMemory}!Parsed {
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     const machines = std.zon.parse.fromSlice([]const Machine, .{ .gpa = a, .arena = a, .source = source, .diagnostics = &diagnostics }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.ParseZon => {
-            problem = try a.print("{f}", .{diagnostics.fmt(file_name)});
-            return error.Invalid;
-        },
+        error.ParseZon => return .{ .invalid = try a.print("{f}", .{diagnostics.fmt(file_name)}) },
     };
     for (machines, 0..) |machine, index| {
-        if (machine.name.len == 0 or machine.bay.len == 0 or machine.directory.len == 0) {
-            problem = try a.print("machine {d} needs a name, the command that runs bay there and a directory", .{index + 1});
-            return error.Invalid;
-        }
-        for (machines[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, machine.name)) {
-            problem = try a.print("{s} is named twice", .{machine.name});
-            return error.Invalid;
-        };
+        if (machine.name.len == 0 or machine.bay.len == 0 or machine.directory.len == 0)
+            return .{ .invalid = try a.print("machine {d} needs a name, the command that runs bay there and a directory", .{index + 1}) };
+        for (machines[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, machine.name))
+            return .{ .invalid = try a.print("{s} is named twice", .{machine.name}) };
     }
-    return machines;
+    return .{ .machines = machines };
 }
 
 test "machines are read with their command and directory, and a name twice is refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const machines = try parse(a, ".{ .{ .name = \"bench\", .bay = .{ \"limactl\", \"shell\", \"bench\", \"bay\" }, .directory = \"/home/me/bay\" } }");
+    const machines = (try parse(a, ".{ .{ .name = \"bench\", .bay = .{ \"limactl\", \"shell\", \"bench\", \"bay\" }, .directory = \"/home/me/bay\" } }")).machines;
     try std.testing.expectEqual(1, machines.len);
     try std.testing.expectEqualStrings("limactl", machines[0].bay[0]);
-    try std.testing.expectError(error.Invalid, parse(a, ".{ .{ .name = \"x\", .bay = .{\"bay\"}, .directory = \"/a\" }, .{ .name = \"x\", .bay = .{\"bay\"}, .directory = \"/b\" } }"));
-    try std.testing.expectError(error.Invalid, parse(a, ".{ .{ .name = \"x\", .bay = .{}, .directory = \"/a\" } }"));
-    try std.testing.expectError(error.Invalid, parse(a, ".{ .{ .name = \"x\" } }"));
+    try std.testing.expectEqualStrings("x is named twice", (try parse(a, ".{ .{ .name = \"x\", .bay = .{\"bay\"}, .directory = \"/a\" }, .{ .name = \"x\", .bay = .{\"bay\"}, .directory = \"/b\" } }")).invalid);
+    try std.testing.expectEqualStrings("machine 1 needs a name, the command that runs bay there and a directory", (try parse(a, ".{ .{ .name = \"x\", .bay = .{}, .directory = \"/a\" } }")).invalid);
+    try std.testing.expect((try parse(a, ".{ .{ .name = \"x\" } }")) == .invalid);
 }
 
 /// The terminal the machines' lines share, each written whole.
@@ -128,7 +121,7 @@ fn relayAll(io: Io, child: *std.process.Child, streams: []const Io.File, fed: ?*
     };
     if (unavailable) |err| {
         child.kill(io);
-        if (fed) |feed| if (started == 0) feed.file.close(io);
+        if (fed) |feed| if (started == 0) feed.file.deinit(io);
         for (streams[started..]) |stream| stream.close(io);
         try group.await(io);
         return err;
@@ -136,9 +129,13 @@ fn relayAll(io: Io, child: *std.process.Child, streams: []const Io.File, fed: ?*
     try group.await(io);
 }
 
+/// The most a bundle holds: the package repository's history to the release commit. The
+/// family's largest is warp's, about 120 MiB; a repository past this is refused, not read.
+const bundle_limit: usize = 1 << 30;
+
 /// Gates the bundle's commit on `machine`; whether its gate is green. Its lines go to `output`.
 pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, machine: Machine, request: Request, output: *Output) !bool {
-    const bundle = try Io.Dir.cwd().readFileAlloc(io, request.bundle, a, .unlimited);
+    const bundle = try aegis.own.readFile(io, Io.Dir.cwd(), request.bundle, a, .fromRaw(bundle_limit));
     // The machine's paths are its own: joined with `/`, which Windows takes too.
     const copy = try a.print("{s}/{s}", .{ std.mem.trimEnd(u8, machine.directory, "/\\"), request.repository });
     const argv = try std.mem.concat(a, []const u8, &.{ machine.bay, &.{ "release", "--gate-bundle", copy, "--package", request.package } });
@@ -146,7 +143,7 @@ pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
         try line(io, output, try a.print("could not run {s}: {t}", .{ machine.bay[0], err }));
         return false;
     };
-    var fed: Feed = .{ .io = io, .file = child.stdin.?, .bytes = bundle }; // safe: spawned with a pipe
+    var fed: Feed = .{ .io = io, .file = .init(child.stdin.?), .bytes = bundle }; // safe: spawned with a pipe
     const streams = [_]Io.File{ child.stdout.?, child.stderr.? }; // safe: spawned with pipes
     child.stdin = null;
     child.stdout = null;
@@ -160,17 +157,21 @@ pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
 /// The bundle written to the machine's stdin, which then closes.
 const Feed = struct {
     io: Io,
-    file: Io.File,
+    file: aegis.own.OwnedIo(Io.File, closeFile),
     bytes: []const u8,
     failed: ?Io.File.Writer.Error = null,
 
     fn run(feed: *Feed) void {
-        defer feed.file.close(feed.io);
-        feed.file.writeStreamingAll(feed.io, feed.bytes) catch |err| {
+        defer feed.file.deinit(feed.io);
+        feed.file.lend().get().writeStreamingAll(feed.io, feed.bytes) catch |err| {
             feed.failed = err;
         };
     }
 };
+
+fn closeFile(file: *Io.File, io: Io) void {
+    file.close(io);
+}
 
 /// Each line `file` gives, to `output`, until it ends.
 fn relay(io: Io, file: Io.File, output: *Output) void {
@@ -220,7 +221,7 @@ fn write(io: Io, output: *Output, text: []const u8) !void {
 pub fn receive(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, directory: []const u8, package: []const u8) !u8 {
     var input_buffer: [64 << 10]u8 = undefined;
     var input = Io.File.stdin().readerStreaming(io, &input_buffer);
-    const bytes = input.interface.allocRemaining(a, .unlimited) catch |err| switch (err) {
+    const bytes = input.interface.allocRemaining(a, .limited(bundle_limit)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => try say.fail(io, "no release commit came on stdin: {t}", .{err}),
     };
