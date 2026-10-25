@@ -238,7 +238,11 @@ pub fn receive(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ
     const head = try gitOutput(io, a, environ, directory, &.{ "rev-parse", "HEAD" });
     try say.note(io, "gating {s} in {s}", .{ head[0..@min(head.len, 12)], directory });
     const bay = environ.get("BAY").?; // safe: main sets BAY before any command
-    var child = std.process.spawn(io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = try std.fs.path.join(a, &.{ directory, package }) }, .environ_map = environ }) catch |err|
+    // The machine that releases runs the jobs that say the same on any machine (the
+    // source checks, the compiles of named targets); a machine beside it leaves them.
+    var gate_environ = try environ.clone(a);
+    try gate_environ.put("PREFLIGHT_PORTABLE", "elsewhere");
+    var child = std.process.spawn(io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = try std.fs.path.join(a, &.{ directory, package }) }, .environ_map = &gate_environ }) catch |err|
         try say.fail(io, "could not run bay gate: {t}", .{err});
     return switch (try child.wait(io)) {
         .exited => |code| code,

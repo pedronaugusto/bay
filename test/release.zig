@@ -14,7 +14,8 @@ const refused = fixture.refused;
 const succeeded = fixture.succeeded;
 
 /// The package's gate: it records the commit it gated (a file named for it under
-/// GATE_LOG) and fails when the package holds a file `red`.
+/// GATE_LOG, holding where it was told the portable jobs run) and fails when the
+/// package holds a file `red`.
 const gate_program =
     \\const std = @import("std");
     \\pub fn main(init: std.process.Init) !void {
@@ -24,7 +25,7 @@ const gate_program =
     \\    const sha = std.mem.trim(u8, head.stdout, " \r\n");
     \\    const log = init.environ_map.get("GATE_LOG") orelse return error.NoGateLog;
     \\    const now = std.Io.Clock.real.now(io).toNanoseconds();
-    \\    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/{s}-{d}", .{ log, sha, now }), .data = "" });
+    \\    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/{s}-{d}", .{ log, sha, now }), .data = init.environ_map.get("PREFLIGHT_PORTABLE") orelse "unset" });
     \\    if (std.Io.Dir.cwd().access(io, "red", .{})) |_| return error.Red else |_| {}
     \\}
     \\
@@ -131,6 +132,19 @@ const World = struct {
             if (std.mem.startsWith(u8, entry.name, commit)) count += 1;
         }
         return count;
+    }
+
+    /// Whether a gate of `commit` was told `portable`: where the jobs that say the same
+    /// on any machine run.
+    fn gatedWith(w: *World, commit: []const u8, portable: []const u8) !bool {
+        var dir = try w.f.tmp.dir.openDir(w.f.io, "gates", .{ .iterate = true });
+        defer dir.close(w.f.io);
+        var entries = dir.iterate();
+        while (try entries.next(w.f.io)) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, commit)) continue;
+            if (std.mem.eql(u8, try dir.readFileAlloc(w.f.io, entry.name, w.f.a, .limited(64)), portable)) return true;
+        }
+        return false;
     }
 
     /// What the remote of `dir` holds at `ref`, or "" for nothing.
@@ -458,6 +472,9 @@ test "a machine gates the release beside this one, and its red stops it" {
         std.debug.print("{s} gated {d} times; bay said:\n{s}\n", .{ commit, try w.gated(commit), result.stderr });
         return error.TestUnexpectedResult;
     }
+    // The source checks run once: here, where the release is made, and not on the machine beside it.
+    try std.testing.expect(try w.gatedWith(commit, "unset"));
+    try std.testing.expect(try w.gatedWith(commit, "elsewhere"));
     // A machine whose gate is red: nothing is tagged.
     try w.f.write(fixture.config_dir, "machines.zon", ".{ .{ .name = \"broken\", .bay = .{ \"git\", \"no-such-command\" }, .directory = \"/nowhere\" } }\n");
     try w.change("lib", "### Fixed\n\n- Another fix.\n");
