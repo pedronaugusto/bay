@@ -76,7 +76,10 @@ pub const Store = struct {
         // cache, so every later build unpacks other content and refuses the pin. A
         // build's own fetch stores the package as it hashes it: the package is fetched
         // as the one dependency of a scratch build, checked against the pin by Zig,
-        // and unpacked by Zig where bay reads it.
+        // and unpacked by Zig where bay reads it. Its lazy dependencies are not: bay
+        // reads each manifest resolution needs on its own, and one Zig fetches for a
+        // build on another host (a riscv64 machine's root file system, whose links
+        // Windows makes only with SeCreateSymbolicLinkPrivilege) is no business of this one.
         const scratch = try std.fs.path.join(store.a, &.{ std.fs.path.dirname(store.unpacked).?, "fetch" });
         try Io.Dir.cwd().deleteTree(store.io, scratch);
         try Io.Dir.cwd().createDirPath(store.io, scratch);
@@ -89,7 +92,7 @@ pub const Store = struct {
         // the path dependencies of a package unpacked under an absolute --pkg-dir absolute,
         // then refuses them ("expected path relative to build root").
         const destination = try std.fs.path.join(store.a, &.{ "..", std.fs.path.basename(store.unpacked) });
-        const result = std.process.run(store.a, store.io, .{ .argv = &.{ store.zig, "build", "--fetch=all", "--pkg-dir", destination }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
+        const result = std.process.run(store.a, store.io, .{ .argv = &.{ store.zig, "build", "--fetch", "--pkg-dir", destination }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
             try say.fail(store.io, "could not run {s} build --fetch: {t}", .{ store.zig, err });
         if (result.term != .exited or result.term.exited != 0) {
             try say.relay(store.io, result.stderr);
@@ -210,7 +213,7 @@ fn placed(place: select.Place) select.Revision {
 /// Whether `hash` is one Zig gives a package with no manifest: `N-V-`, for no
 /// name and no version (Zig 0.17, `Fetch.computedPackageHash`). A name is a Zig
 /// identifier and a version a semantic one, so no package with a manifest has it.
-fn unnamed(hash: []const u8) bool {
+pub fn unnamed(hash: []const u8) bool {
     return std.mem.startsWith(u8, hash, "N-V-");
 }
 

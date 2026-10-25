@@ -279,9 +279,10 @@ bay --locked test     # runs the step; nothing is written
 ```
 
 `--locked` refuses any change to a manifest. `bay vendor` has Zig unpack every package
-the graph reads into the project's `zig-pkg`, which the package's build and its
-development build both read before the network, so the project resolves and builds
-with no remote reachable.
+the graph reads, and every package the builds take on this host, into the project's
+`zig-pkg`, which the package's build and its development build both read before the
+network, so the project resolves and builds with no remote reachable. A lazy package
+only another host's build asks for is not fetched.
 
 ## Commands
 
@@ -302,11 +303,11 @@ with no remote reachable.
 | `bay outdated` | Packages the builds use with a newer release on their remote, or at a version their newest release retracts |
 | `bay licenses [--dev]` | Each package a build contains, with the license its files state; `--dev` adds the development tools |
 | `bay audit` | Each package the builds select, checked against its repository's published security advisories (GitHub; `GITHUB_TOKEN` when set) and its own retractions; fails on any finding |
-| `bay vendor` | Every package the graph reads, into `zig-pkg` |
+| `bay vendor` | Every package the graph reads and the builds take on this host, into `zig-pkg` |
 | `bay release [--dry-run] [--no-push]` | Release the package from its CHANGELOG's `[Unreleased]` section: commit, gate here and on the machines in `machines.zon`, push the branch and its tag at once over SSH |
 | `bay --workspace release` | Release every member that changed, in dependency order, each pinned at the releases before it |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
-| `bay fetch` | Fetch every dependency of both kinds |
+| `bay fetch` | Fetch what both builds take on this host, lazy dependencies their configuration asks for included |
 | `bay install [--prefix <dir>] [--name <name>] [--force] [<url or dir>]` | Build a package's programs (ReleaseSafe) into `<dir>/bin`, `~/.local/bin` by default; with no source, the package here |
 | `bay install --list` | What bay installed, and from where |
 | `bay install --update [name...]` | Reinstall each from its recorded branch or tag |

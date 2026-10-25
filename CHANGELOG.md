@@ -15,6 +15,13 @@
 
 - The development build uses the cache Zig picks for the package build, `ZIG_LOCAL_CACHE_DIR` when it is set, as it says it shares the package's. It named `<package>/.zig-cache` always, so under that variable the two builds compiled into two caches.
 - Development: the tests share one cache for what Zig compiles, so a fixture's package cloned, checked out to gate or copied to a machine builds once, as do the build runners fixtures share. On GitHub's macOS runner (Debug) the suite took 423 s, not 493 s; on Windows it gained little, its tests' times summing to 687 s, not 704 s. Its slowest tests still build with Zig from cold, 108 s on macOS and 111 s on Windows, so each stays held to 300 s.
+### Changed
+
+- `bay fetch` and `bay vendor` fetch what the builds take on this host: each build's dependencies, and the lazy ones its configuration asks for, which Zig fetches as it configures the package's build and the development build. A lazy package only another host's build or another option asks for is no longer fetched. `bay vendor` still unpacks every revision selection reads into `zig-pkg`, so the project resolves offline as before; a package with no manifest is among them only when a build takes it.
+
+### Fixed
+
+- Reading a dependency's manifest fetches the dependency and what it needs to build, not its lazy dependencies. bay fetched it with `zig build --fetch=all`, which unpacked every lazy package below it: preflight pins Alpine's riscv64 root file system for its machine, whose links Windows makes only for an account with SeCreateSymbolicLinkPrivilege, so on any other Windows account no package developed with preflight resolved ("could not fetch … as it is pinned").
 
 ## [0.2.0] - 2026-10-25
 

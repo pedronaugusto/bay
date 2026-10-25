@@ -219,6 +219,74 @@ test "a lazy pin with no manifest is not fetched to resolve, as it pins nothing 
     try std.testing.expect(std.mem.find(u8, built.stderr, "built without the image") != null);
 }
 
+test "a dependency's lazy pin with no manifest is never fetched: the development build configures, fetches and vendors without it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // As preflight pins Alpine's root file system lazily for its riscv64 machine: a
+    // package `t` whose build asks for its image only when told to, the image an archive
+    // with no manifest that holds a symbolic link. Windows makes a link only for an
+    // account with SeCreateSymbolicLinkPrivilege, so a host whose builds never ask for
+    // the image must never unpack it. The pin's hash is the image's files without the
+    // link, so a fetch fails everywhere: on the link where links cannot be made, on the
+    // hash where they can.
+    try f.tmp.dir.createDirPath(f.io, "image/etc");
+    try f.write("image", "etc/os-release", "NAME=image\n");
+    const image_hashed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "image" }) }, .environ_map = &f.env });
+    try std.testing.expect(succeeded(image_hashed));
+    const image_hash = std.mem.trim(u8, image_hashed.stdout, "\r\n");
+    try std.testing.expect(std.mem.startsWith(u8, image_hash, "N-V-"));
+    // The image ships inside `t`, pinned by a path in it, as a URL a dependency's
+    // manifest opens on every host.
+    const image_pin = try f.a.print(".image = .{{ .url = \"file:image.tar\", .hash = \"{s}\", .lazy = true }},", .{image_hash});
+    try f.package("t", "t", "0.1.0", image_pin, &.{}, "pub const t = true;");
+    var archive_file = try f.tmp.dir.createFile(f.io, "t/image.tar", .{});
+    var buffer: [4096]u8 = undefined;
+    var file_writer = archive_file.writer(f.io, &buffer);
+    var archive: std.tar.Writer = .{ .underlying_writer = &file_writer.interface };
+    try archive.writeFileBytes("etc/os-release", "NAME=image\n", .{});
+    try archive.writeLink("bin/sh", "busybox", .{});
+    try archive.finishPedantically();
+    try file_writer.interface.flush();
+    archive_file.close(f.io);
+    const t_build = try f.tmp.dir.readFileAlloc(f.io, "t/build.zig", f.a, .limited(1 << 20));
+    const t_close = std.mem.findLast(u8, t_build, "}").?; // safe: the fixture's build function ends in a brace
+    try f.write("t", "build.zig", try f.a.print("{s}    if (b.option(bool, \"image\", \"Build the machine image\") orelse false) _ = b.lazyDependency(\"image\", .{{}});\n}}\n", .{t_build[0..t_close]}));
+    const t_hashed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "t" }) }, .environ_map = &f.env });
+    try std.testing.expect(succeeded(t_hashed));
+    const t_hash = std.mem.trim(u8, t_hashed.stdout, "\r\n");
+    // `t` as a forge serves it: its files under one directory, which Zig's hash leaves out.
+    var t_file = try f.tmp.dir.createFile(f.io, "t.tar", .{});
+    var t_writer = t_file.writer(f.io, &buffer);
+    var t_archive: std.tar.Writer = .{ .underlying_writer = &t_writer.interface };
+    try t_archive.setRoot("t");
+    for ([_][]const u8{ "build.zig", "build.zig.zon", "src/root.zig", "image.tar" }) |name|
+        try t_archive.writeFileBytes(name, try f.tmp.dir.readFileAlloc(f.io, try std.fs.path.join(f.a, &.{ "t", name }), f.a, .limited(1 << 16)), .{});
+    try t_archive.finishPedantically();
+    try t_writer.interface.flush();
+    t_file.close(f.io);
+    // Neither is in Zig's cache: bay must fetch `t` to read it, and a fetch of the image fails.
+    const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
+    for ([_][]const u8{ image_hash, t_hash }) |hash| {
+        try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
+        try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{hash}) }));
+    }
+    try f.application("app", "", &.{}, "pub fn main() void {}");
+    const manifest = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const close = std.mem.findLast(u8, manifest, "}").?; // safe: the fixture's manifest ends in a brace
+    const t_pin = try f.a.print(".t = .{{ .url = \"{s}\", .hash = \"{s}\" }},", .{ try Fixture.fileUrl(f.a, try std.fs.path.join(f.a, &.{ f.root, "t.tar" })), t_hash });
+    try f.write("app", "build.zig.zon", try f.a.print("{s}, .dev_dependencies = .{{ {s} }} }}\n", .{ std.mem.trimEnd(u8, manifest[0..close], " "), t_pin }));
+    const build = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig", f.a, .limited(1 << 20));
+    try f.write("app", "build.zig", try f.a.print("{s}pub fn dev(b: *std.Build, tools: type) void {{\n    _ = tools;\n    _ = b.dependency(\"t\", .{{}});\n    _ = b.step(\"tool\", \"\");\n}}\n", .{build}));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "dev", "-l" })));
+    try std.testing.expect(succeeded(try f.bay("app", &.{"fetch"})));
+    try std.testing.expect(succeeded(try f.bay("app", &.{"vendor"})));
+    // What the builds take is vendored, `t` among it; the image they never ask for is not.
+    try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "app", "zig-pkg", t_hash }), .{});
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "app", "zig-pkg", image_hash }), .{}));
+}
+
 /// An application on the diamond whose manifest, before its last brace, is
 /// returned, for a test to add a field to it.
 fn overridden(f: *Fixture) ![]const u8 {

@@ -137,10 +137,11 @@ pub fn outdated(r: resolve.Resolution) !void {
     if (!any) try say.note(r.input.io, "every package is at its newest release, and none is retracted", .{});
 }
 
-/// `bay vendor`: every package the graph reaches, what is built and every
-/// revision selection reads to choose it, unpacked by Zig itself into the
-/// project's `zig-pkg`, which both its builds use and Zig reads before any
-/// network: the project resolves and builds with no remote reachable.
+/// `bay vendor`'s first half: every revision selection reads to choose the graph,
+/// unpacked by Zig itself into the project's `zig-pkg`, which both its builds use
+/// and Zig reads before any network, so the project resolves with no remote
+/// reachable. What the builds take besides, a package with no manifest or a lazy
+/// one, their configuration on this host brings (`main.zig`'s vendor).
 pub fn vendor(r: resolve.Resolution) !void {
     const a = r.input.a;
     const io = r.input.io;
@@ -151,6 +152,8 @@ pub fn vendor(r: resolve.Resolution) !void {
             .remote => |remote| remote,
             .directory => continue,
         };
+        // A package with no manifest is read by no selection: a build that takes it fetches it.
+        if (store.unnamed(remote.hash)) continue;
         // Zig fetches what only git reaches from its cache, where resolution put it.
         _ = try r.store.directoryOf(remote);
         try dependencies.writer.print(".p{d} = .{{ .url = \"{f}\", .hash = \"{f}\" }}, ", .{ count, std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) });
@@ -167,7 +170,7 @@ pub fn vendor(r: resolve.Resolution) !void {
     // Relative to the scratch build, as the store's fetch passes it: Zig 0.17 refuses the
     // path dependencies of a package unpacked under an absolute --pkg-dir.
     const relative = try std.fs.path.join(a, &.{ "..", "..", "..", "zig-pkg" });
-    const result = std.process.run(a, io, .{ .argv = &.{ r.input.zig, "build", "--fetch=all", "--pkg-dir", relative }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
+    const result = std.process.run(a, io, .{ .argv = &.{ r.input.zig, "build", "--fetch", "--pkg-dir", relative }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(io, "could not run {s}: {t}", .{ r.input.zig, err });
     if (result.term != .exited or result.term.exited != 0) {
         try say.relay(io, result.stderr);

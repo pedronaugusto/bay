@@ -77,10 +77,10 @@ pub const Cli = struct {
             .locate = .{ .help = "The package's directory, or with --dev its development build's root, which a configured development build's paths are relative to" },
             .tidy = .{ .help = "Pin each package at the version selection picks: the highest any manifest in the graph asks for (Go's MVS); in a workspace, each member at its release" },
             .outdated = .{ .help = "Packages the builds use with a newer release, or at a version their newest release retracts" },
-            .vendor = .{ .help = "Every package the builds use, into zig-pkg, for building offline" },
+            .vendor = .{ .help = "Every package the graph reads and the builds take on this host, into zig-pkg, for building offline" },
             .audit = .{ .help = "Each package the builds select checked against its repository's published security advisories and its own retractions; fails on any finding. GITHUB_TOKEN, when set, is sent to GitHub" },
             .list = .{ .help = "Both lists, with their pins" },
-            .fetch = .{ .help = "Fetch every dependency of both kinds" },
+            .fetch = .{ .help = "Fetch what both builds take on this host: their dependencies, and the lazy ones their configuration asks for" },
             .init = .{ .help = "Make the package here one bay develops, adding only what is missing; zig init first where there is no package" },
             .version = .{ .help = "The version of bay" },
             .step = .{ .help = "The step from the package's build, or else from its development build, which has the dev dependencies; the arguments go to zig build" },
@@ -473,10 +473,15 @@ fn auditCommand(env: Env) !u8 {
 
 /// `bay outdated` and `bay vendor`, over the resolved graph.
 fn graphCommand(env: Env, comptime which: enum { outdated, vendor }) !u8 {
-    const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
+    const parsed = try manifest.parse(env.a, try env.readManifest());
+    const resolution = try resolveHere(env, parsed);
     switch (which) {
         .outdated => try graph.outdated(resolution),
-        .vendor => try graph.vendor(resolution),
+        // What selection reads, then what the builds take on this host besides.
+        .vendor => {
+            try graph.vendor(resolution);
+            return configured(env, parsed, resolution);
+        },
     }
     return 0;
 }
@@ -570,12 +575,27 @@ fn step(env: Env, name: []const u8, args: []const []const u8) !u8 {
     return built(env, parsed, resolution, .development, &.{name}, args);
 }
 
+/// `bay fetch`: both builds configured, so Zig fetches what each takes on this host.
 fn fetchAll(env: Env) !u8 {
-    const code = try zigBuild(env, .package, &.{"--fetch=all"}, &.{});
-    if (code != 0) return code;
     const parsed = try manifest.parse(env.a, try env.readManifest());
-    if (parsed.dev.len == 0) return 0;
-    return zigBuild(env, .development, &.{"--fetch=all"}, &.{});
+    return configured(env, parsed, try buildable(env, parsed));
+}
+
+/// Configures the package's build and its development build, so Zig fetches into
+/// `zig-pkg` what each takes on this host: its dependencies, and the lazy ones its
+/// configuration asks for. A lazy package only another host's build or another
+/// option asks for is not fetched (`zig build --fetch=all` fetched it, and a riscv64
+/// machine's root file system has links Windows makes only with a privilege).
+fn configured(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution) !u8 {
+    for ([_]Where{ .package, .development }) |where| {
+        if (where == .development and parsed.dev.len == 0) continue;
+        const listed = try stepsOf(env, parsed, resolution, where);
+        if (!listed.configured) {
+            try say.relay(env.io, listed.stderr);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /// `bay add`: Zig fetches into a scratch manifest with `zig fetch --save`, so
