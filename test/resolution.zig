@@ -219,37 +219,42 @@ test "a lazy pin with no manifest is not fetched to resolve, as it pins nothing 
     try std.testing.expect(std.mem.find(u8, built.stderr, "built without the image") != null);
 }
 
-test "a dependency's lazy pin with no manifest is never fetched: the development build configures, fetches and vendors without it" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var f: Fixture = try .init(arena.allocator());
-    defer f.deinit();
-    // As preflight pins Alpine's root file system lazily for its riscv64 machine: a
-    // package `t` whose build asks for its image only when told to, the image an archive
-    // with no manifest that holds a symbolic link. Windows makes a link only for an
-    // account with SeCreateSymbolicLinkPrivilege, so a host whose builds never ask for
-    // the image must never unpack it. The pin's hash is the image's files without the
-    // link, so a fetch fails everywhere: on the link where links cannot be made, on the
-    // hash where they can.
-    try f.tmp.dir.createDirPath(f.io, "image/etc");
-    try f.write("image", "etc/os-release", "NAME=image\n");
-    const image_hashed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "image" }) }, .environ_map = &f.env });
-    try std.testing.expect(succeeded(image_hashed));
-    const image_hash = std.mem.trim(u8, image_hashed.stdout, "\r\n");
-    try std.testing.expect(std.mem.startsWith(u8, image_hash, "N-V-"));
-    // The image ships inside `t`, pinned by a path in it, as a URL a dependency's
-    // manifest opens on every host.
-    const image_pin = try f.a.print(".image = .{{ .url = \"file:image.tar\", .hash = \"{s}\", .lazy = true }},", .{image_hash});
-    try f.package("t", "t", "0.1.0", image_pin, &.{}, "pub const t = true;");
-    var archive_file = try f.tmp.dir.createFile(f.io, "t/image.tar", .{});
+/// As preflight pins Alpine's root file system lazily for its riscv64 machine: an
+/// archive with no manifest that holds a symbolic link, which Windows makes only for
+/// an account with SeCreateSymbolicLinkPrivilege.
+fn writeImage(f: *Fixture, path: []const u8) !void {
+    var file = try f.tmp.dir.createFile(f.io, path, .{});
+    defer file.close(f.io);
     var buffer: [4096]u8 = undefined;
-    var file_writer = archive_file.writer(f.io, &buffer);
+    var file_writer = file.writer(f.io, &buffer);
     var archive: std.tar.Writer = .{ .underlying_writer = &file_writer.interface };
     try archive.writeFileBytes("etc/os-release", "NAME=image\n", .{});
     try archive.writeLink("bin/sh", "busybox", .{});
     try archive.finishPedantically();
     try file_writer.interface.flush();
-    archive_file.close(f.io);
+}
+
+/// The image's files without its link, hashed: a pin no fetch can satisfy, failing on
+/// the link where links cannot be made and on the hash where they can.
+fn imageWithoutLink(f: *Fixture) ![]const u8 {
+    try f.tmp.dir.createDirPath(f.io, "image/etc");
+    try f.write("image", "etc/os-release", "NAME=image\n");
+    const hashed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "image" }) }, .environ_map = &f.env });
+    try std.testing.expect(succeeded(hashed));
+    const hash = std.mem.trim(u8, hashed.stdout, "\r\n");
+    try std.testing.expect(std.mem.startsWith(u8, hash, "N-V-"));
+    return hash;
+}
+
+/// An application `app` whose development build takes a package `t`, whose build asks
+/// for the image, pinned lazily at `image_hash`, only when told to. Neither `t` nor the
+/// image is in Zig's cache, so bay must fetch `t` to read it. Returns `t`'s hash.
+fn developedWithImage(f: *Fixture, image_hash: []const u8) ![]const u8 {
+    // The image ships inside `t`, pinned by a path in it, as a URL a dependency's
+    // manifest opens on every host.
+    const image_pin = try f.a.print(".image = .{{ .url = \"file:image.tar\", .hash = \"{s}\", .lazy = true }},", .{image_hash});
+    try f.package("t", "t", "0.1.0", image_pin, &.{}, "pub const t = true;");
+    try writeImage(f, "t/image.tar");
     const t_build = try f.tmp.dir.readFileAlloc(f.io, "t/build.zig", f.a, .limited(1 << 20));
     const t_close = std.mem.findLast(u8, t_build, "}").?; // safe: the fixture's build function ends in a brace
     try f.write("t", "build.zig", try f.a.print("{s}    if (b.option(bool, \"image\", \"Build the machine image\") orelse false) _ = b.lazyDependency(\"image\", .{{}});\n}}\n", .{t_build[0..t_close]}));
@@ -258,6 +263,7 @@ test "a dependency's lazy pin with no manifest is never fetched: the development
     const t_hash = std.mem.trim(u8, t_hashed.stdout, "\r\n");
     // `t` as a forge serves it: its files under one directory, which Zig's hash leaves out.
     var t_file = try f.tmp.dir.createFile(f.io, "t.tar", .{});
+    var buffer: [4096]u8 = undefined;
     var t_writer = t_file.writer(f.io, &buffer);
     var t_archive: std.tar.Writer = .{ .underlying_writer = &t_writer.interface };
     try t_archive.setRoot("t");
@@ -266,7 +272,6 @@ test "a dependency's lazy pin with no manifest is never fetched: the development
     try t_archive.finishPedantically();
     try t_writer.interface.flush();
     t_file.close(f.io);
-    // Neither is in Zig's cache: bay must fetch `t` to read it, and a fetch of the image fails.
     const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
     for ([_][]const u8{ image_hash, t_hash }) |hash| {
         try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, hash }));
@@ -279,12 +284,59 @@ test "a dependency's lazy pin with no manifest is never fetched: the development
     try f.write("app", "build.zig.zon", try f.a.print("{s}, .dev_dependencies = .{{ {s} }} }}\n", .{ std.mem.trimEnd(u8, manifest[0..close], " "), t_pin }));
     const build = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig", f.a, .limited(1 << 20));
     try f.write("app", "build.zig", try f.a.print("{s}pub fn dev(b: *std.Build, tools: type) void {{\n    _ = tools;\n    _ = b.dependency(\"t\", .{{}});\n    _ = b.step(\"tool\", \"\");\n}}\n", .{build}));
+    return t_hash;
+}
+
+test "a dependency's lazy pin with no manifest is never fetched: the development build configures, fetches and vendors without it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // A host whose builds never ask for the image must never unpack it; its pin fails
+    // every fetch, so one would show.
+    const image_hash = try imageWithoutLink(&f);
+    const t_hash = try developedWithImage(&f, image_hash);
     try std.testing.expect(succeeded(try f.bay("app", &.{ "dev", "-l" })));
     try std.testing.expect(succeeded(try f.bay("app", &.{"fetch"})));
     try std.testing.expect(succeeded(try f.bay("app", &.{"vendor"})));
     // What the builds take is vendored, `t` among it; the image they never ask for is not.
     try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "app", "zig-pkg", t_hash }), .{});
     try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "app", "zig-pkg", image_hash }), .{}));
+}
+
+test "bay vendor --all-hosts vendors what a build on any host may ask for, or refuses by name a link this account may not make" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // Where this account can make the image's link, Zig hashes it and every host's bundle
+    // holds it; where it cannot, nothing can unpack the image here, and its pin is one
+    // no fetch satisfies.
+    try writeImage(&f, "image.tar");
+    const probed = try std.process.run(f.a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(f.a, &.{ f.root, "image.tar" }) }, .environ_map = &f.env });
+    const links = succeeded(probed);
+    if (!links) try std.testing.expect(std.mem.find(u8, probed.stderr, "unable to create symlink from 'bin/sh' to 'busybox': PermissionDenied") != null);
+    const image_hash = if (links) std.mem.trim(u8, probed.stdout, "\r\n") else try imageWithoutLink(&f);
+    const t_hash = try developedWithImage(&f, image_hash);
+    // This host's packages: `t`, and not the image its builds never ask for.
+    const this_host = try f.bay("app", &.{"vendor"});
+    if (!succeeded(this_host)) std.debug.print("{s}\n", .{this_host.stderr});
+    try std.testing.expect(succeeded(this_host));
+    try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "app", "zig-pkg", t_hash }), .{});
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "app", "zig-pkg", image_hash }), .{}));
+    const all_hosts = try f.bay("app", &.{ "vendor", "--all-hosts" });
+    if (links) {
+        if (!succeeded(all_hosts)) std.debug.print("{s}\n", .{all_hosts.stderr});
+        try std.testing.expect(succeeded(all_hosts));
+        try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "app", "zig-pkg", image_hash }), .{});
+    } else {
+        // Refused by the package's name and the link's, with the right it needs, and not
+        // buried under Zig's note for every link.
+        try std.testing.expect(!succeeded(all_hosts));
+        try std.testing.expect(std.mem.find(u8, all_hosts.stderr, "t, with every package below it, lazy ones included, holds a link this account may not make, from 'bin/sh' to 'busybox'") != null);
+        try std.testing.expect(std.mem.find(u8, all_hosts.stderr, "SeCreateSymbolicLinkPrivilege") != null);
+        try std.testing.expect(std.mem.find(u8, all_hosts.stderr, "unable to create symlink") == null);
+    }
 }
 
 /// An application on the diamond whose manifest, before its last brace, is

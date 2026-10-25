@@ -2,6 +2,7 @@
 //! `cargo tree` and Go's `go mod graph` do, `bay outdated` names newer
 //! releases, `bay vendor` keeps every package a build uses in the project.
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
@@ -137,12 +138,21 @@ pub fn outdated(r: resolve.Resolution) !void {
     if (!any) try say.note(r.input.io, "every package is at its newest release, and none is retracted", .{});
 }
 
+/// The hosts a vendored `zig-pkg` builds on.
+pub const Hosts = enum {
+    /// What the builds take besides the revisions selection reads, a package with no
+    /// manifest or a lazy one, their configuration on this host brings (`main.zig`'s vendor).
+    this_host,
+    /// Every package below every revision, lazy ones included: what a build on any host
+    /// may ask for. One revision is fetched at a time, so a failure names its package.
+    all_hosts,
+};
+
 /// `bay vendor`'s first half: every revision selection reads to choose the graph,
 /// unpacked by Zig itself into the project's `zig-pkg`, which both its builds use
 /// and Zig reads before any network, so the project resolves with no remote
-/// reachable. What the builds take besides, a package with no manifest or a lazy
-/// one, their configuration on this host brings (`main.zig`'s vendor).
-pub fn vendor(r: resolve.Resolution) !void {
+/// reachable.
+pub fn vendor(r: resolve.Resolution, hosts: Hosts) !void {
     const a = r.input.a;
     const io = r.input.io;
     var dependencies: Io.Writer.Allocating = .init(a);
@@ -153,28 +163,66 @@ pub fn vendor(r: resolve.Resolution) !void {
             .directory => continue,
         };
         // A package with no manifest is read by no selection: a build that takes it fetches it.
-        if (store.unnamed(remote.hash)) continue;
+        const unnamed = store.unnamed(remote.hash);
+        if (unnamed and hosts == .this_host) continue;
         // Zig fetches what only git reaches from its cache, where resolution put it.
-        _ = try r.store.directoryOf(remote);
-        try dependencies.writer.print(".p{d} = .{{ .url = \"{f}\", .hash = \"{f}\" }}, ", .{ count, std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) });
+        if (!unnamed) _ = try r.store.directoryOf(remote);
+        const entry = try a.print(".p{d} = .{{ .url = \"{f}\", .hash = \"{f}\" }}, ", .{ count, std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) });
         count += 1;
+        switch (hosts) {
+            .this_host => try dependencies.writer.writeAll(entry),
+            .all_hosts => try unpack(r, entry, "--fetch=all", revision.identity.name),
+        }
     }
+    if (hosts == .this_host) try unpack(r, dependencies.written(), "--fetch", null);
+    try say.note(io, "{d} packages vendored into {s}", .{ count, try std.fs.path.join(a, &.{ r.input.package, "zig-pkg" }) });
+}
+
+/// Zig unpacks the packages `dependencies` lists, fetched by `mode`, into the project's
+/// `zig-pkg`, as the dependencies of a scratch build. `name`, when the list is one
+/// package, is the package a failure names.
+fn unpack(r: resolve.Resolution, dependencies: []const u8, mode: []const u8, name: ?[]const u8) !void {
+    const a = r.input.a;
+    const io = r.input.io;
     const scratch = try std.fs.path.join(a, &.{ r.input.package, ".zig-cache", "bay", "vendor" });
     try Io.Dir.cwd().deleteTree(io, scratch);
     try Io.Dir.cwd().createDirPath(io, scratch);
     var dir = try Io.Dir.cwd().openDir(io, scratch, .{});
     defer dir.close(io);
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
-    try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(a, "bay_vendor", dependencies.written()) });
+    try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(a, "bay_vendor", dependencies) });
     const destination = try std.fs.path.join(a, &.{ r.input.package, "zig-pkg" });
     // Relative to the scratch build, as the store's fetch passes it: Zig 0.17 refuses the
     // path dependencies of a package unpacked under an absolute --pkg-dir.
     const relative = try std.fs.path.join(a, &.{ "..", "..", "..", "zig-pkg" });
-    const result = std.process.run(a, io, .{ .argv = &.{ r.input.zig, "build", "--fetch", "--pkg-dir", relative }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
+    const result = std.process.run(a, io, .{ .argv = &.{ r.input.zig, "build", mode, "--pkg-dir", relative }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(io, "could not run {s}: {t}", .{ r.input.zig, err });
     if (result.term != .exited or result.term.exited != 0) {
+        // Windows makes a symbolic link only for an account holding the privilege. Zig
+        // notes every link it could not make; bay names the first, and what to do.
+        if (builtin.os.tag == .windows) if (linkRefused(result.stderr)) |link|
+            try say.fail(io, "{s}, with every package below it, lazy ones included, holds a link this account may not make, {s}: Windows makes one only for an account with SeCreateSymbolicLinkPrivilege, the \"Create symbolic links\" right; `bay vendor` without --all-hosts vendors what this host's builds take", .{ name orelse "the graph", link });
         try say.relay(io, result.stderr);
         try say.fail(io, "Zig could not unpack the packages into {s}", .{destination});
     }
-    try say.note(io, "{d} packages vendored into {s}", .{ count, destination });
+}
+
+/// The first link Zig's output says it was not permitted to make, `from 'a' to 'b'`,
+/// from its note `unable to create symlink from 'a' to 'b': PermissionDenied`.
+fn linkRefused(stderr: []const u8) ?[]const u8 {
+    const note = "unable to create symlink ";
+    const denied = ": PermissionDenied";
+    var lines = std.mem.splitScalar(u8, stderr, '\n');
+    while (lines.next()) |line| {
+        const start = std.mem.find(u8, line, note) orelse continue;
+        const text = std.mem.trimEnd(u8, line[start + note.len ..], "\r");
+        if (std.mem.endsWith(u8, text, denied)) return text[0 .. text.len - denied.len];
+    }
+    return null;
+}
+
+test linkRefused {
+    try std.testing.expectEqualStrings("from 'bin/sh' to 'busybox'", linkRefused("error: unable to unpack\r\nnote: unable to create symlink from 'bin/sh' to 'busybox': PermissionDenied\r\n").?);
+    try std.testing.expectEqual(null, linkRefused("note: unable to create symlink from 'a' to 'b': NameTooLong\n"));
+    try std.testing.expectEqual(null, linkRefused("error: hash mismatch\n"));
 }

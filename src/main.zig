@@ -44,7 +44,7 @@ pub const Cli = struct {
         outdated,
         licenses: Developed,
         audit,
-        vendor,
+        vendor: Vendor,
         list,
         locate: Developed,
         fetch,
@@ -77,7 +77,7 @@ pub const Cli = struct {
             .locate = .{ .help = "The package's directory, or with --dev its development build's root, which a configured development build's paths are relative to" },
             .tidy = .{ .help = "Pin each package at the version selection picks: the highest any manifest in the graph asks for (Go's MVS); in a workspace, each member at its release" },
             .outdated = .{ .help = "Packages the builds use with a newer release, or at a version their newest release retracts" },
-            .vendor = .{ .help = "Every package the graph reads and the builds take on this host, into zig-pkg, for building offline" },
+            .vendor = .{ .help = "Every package the graph reads and the builds take on this host, into zig-pkg, for building offline; with --all-hosts, every package any host's build may ask for" },
             .audit = .{ .help = "Each package the builds select checked against its repository's published security advisories and its own retractions; fails on any finding. GITHUB_TOKEN, when set, is sent to GitHub" },
             .list = .{ .help = "Both lists, with their pins" },
             .fetch = .{ .help = "Fetch what both builds take on this host: their dependencies, and the lazy ones their configuration asks for" },
@@ -167,6 +167,12 @@ const Tree = struct {
             .duplicates = .{ .help = "The packages pinned at more than one revision, and who pins each" },
         },
     };
+};
+
+/// `bay vendor`: for this host's builds, or for every host's.
+const Vendor = struct {
+    all_hosts: bool = false,
+    pub const spec: ensign.Spec(@This()) = .{ .options = .{ .all_hosts = .{ .help = "Every package any host's build may ask for, lazy ones included, so every host builds from the bundle" } } };
 };
 
 /// A command that can look at the development build too.
@@ -281,7 +287,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         .tree => |args| treeCommand(env, args),
         .outdated => graphCommand(env, .outdated),
         .licenses => |args| licensesCommand(env, args.dev),
-        .vendor => graphCommand(env, .vendor),
+        .vendor => |args| vendorCommand(env, args.all_hosts),
         .audit => auditCommand(env),
         .fetch => fetchAll(env),
         .build => |args| zigBuild(env, .package, &.{}, args.args),
@@ -471,19 +477,22 @@ fn auditCommand(env: Env) !u8 {
     return if (try audit.audit(resolution, token)) 0 else 1;
 }
 
-/// `bay outdated` and `bay vendor`, over the resolved graph.
-fn graphCommand(env: Env, comptime which: enum { outdated, vendor }) !u8 {
-    const parsed = try manifest.parse(env.a, try env.readManifest());
-    const resolution = try resolveHere(env, parsed);
+/// `bay outdated`, over the resolved graph.
+fn graphCommand(env: Env, comptime which: enum { outdated }) !u8 {
+    const resolution = try resolveHere(env, try manifest.parse(env.a, try env.readManifest()));
     switch (which) {
         .outdated => try graph.outdated(resolution),
-        // What selection reads, then what the builds take on this host besides.
-        .vendor => {
-            try graph.vendor(resolution);
-            return configured(env, parsed, resolution);
-        },
     }
     return 0;
+}
+
+/// `bay vendor`: what selection reads, then what the builds take on this host
+/// besides; with `--all-hosts`, every package below each revision, lazy ones included.
+fn vendorCommand(env: Env, all_hosts: bool) !u8 {
+    const parsed = try manifest.parse(env.a, try env.readManifest());
+    const resolution = try resolveHere(env, parsed);
+    try graph.vendor(resolution, if (all_hosts) .all_hosts else .this_host);
+    return configured(env, parsed, resolution);
 }
 
 /// Writes the package's manifest; `--locked` refuses, since it would change.
