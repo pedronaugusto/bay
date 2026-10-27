@@ -2,19 +2,6 @@
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-10-25
-
-### Changed
-
-- Pins airlock 0.5.5.
-
-### Fixed
-
-- Windows: `bay install` replaces a program that is running, bay itself among them, so bay updates itself. The program moves aside to `<file>.old` by airlock's rename, which asks only to delete the name, as a running image allows; std's asks to write it too, which the image refuses, so the install failed with `FileBusy` and left the old program in place. Each step of a replacement that fails names itself and its path, and an earlier `.old` still running is named as such, `FileBusy` as well as `AccessDenied`.
-### Fixed
-
-- The development build uses the cache Zig picks for the package build, `ZIG_LOCAL_CACHE_DIR` when it is set, as it says it shares the package's. It named `<package>/.zig-cache` always, so under that variable the two builds compiled into two caches.
-- Development: the tests share one cache for what Zig compiles, so a fixture's package cloned, checked out to gate or copied to a machine builds once, as do the build runners fixtures share. On GitHub's macOS runner (Debug) the suite took 423 s, not 493 s; on Windows it gained little, its tests' times summing to 687 s, not 704 s. Its slowest tests still build with Zig from cold, 108 s on macOS and 111 s on Windows, so each stays held to 300 s.
 ### Added
 
 - `bay vendor --all-hosts` vendors every package any host's build may ask for: each revision in the graph with every package below it, lazy ones included, so a bundle made on one host builds on every other. Where a package holds a link this account may not make, as Windows makes a symbolic link only for an account with SeCreateSymbolicLinkPrivilege, it is refused by the package's name and the link's, with the right it needs, and `bay vendor` without the flag still vendors what this host's builds take.
@@ -25,8 +12,20 @@
 
 ### Fixed
 
+- The development build uses the cache Zig picks for the package build, `ZIG_LOCAL_CACHE_DIR` when it is set, as it says it shares the package's. It named `<package>/.zig-cache` always, so under that variable the two builds compiled into two caches.
+- Development: the tests share one cache for what Zig compiles, so a fixture's package cloned, checked out to gate or copied to a machine builds once, as do the build runners fixtures share. On GitHub's macOS runner (Debug) the suite took 423 s, not 493 s; on Windows it gained little, its tests' times summing to 687 s, not 704 s. Its slowest tests still build with Zig from cold, 108 s on macOS and 111 s on Windows, so each stays held to 300 s.
 - Reading a dependency's manifest fetches the dependency and what it needs to build, not its lazy dependencies. bay fetched it with `zig build --fetch=all`, which unpacked every lazy package below it: preflight pins Alpine's riscv64 root file system for its machine, whose links Windows makes only for an account with SeCreateSymbolicLinkPrivilege, so on any other Windows account no package developed with preflight resolved ("could not fetch … as it is pinned").
 - Development: the tests that link a folder make a junction on Windows, which any account makes, where a symbolic link needs SeCreateSymbolicLinkPrivilege, through one helper of their own that sets the mount point with the Windows API (`FSCTL_SET_REPARSE_POINT`), run by no shell, and tested itself; the test of a Zig found where bay keeps toolchains links that Zig's folder there, not its program. Both failed with `PermissionDenied` on an account without the privilege.
+
+## [0.2.1] - 2026-10-25
+
+### Changed
+
+- Pins airlock 0.5.5.
+
+### Fixed
+
+- Windows: `bay install` replaces a program that is running, bay itself among them, so bay updates itself. The program moves aside to `<file>.old` by airlock's rename, which asks only to delete the name, as a running image allows; std's asks to write it too, which the image refuses, so the install failed with `FileBusy` and left the old program in place. Each step of a replacement that fails names itself and its path, and an earlier `.old` still running is named as such, `FileBusy` as well as `AccessDenied`.
 
 ## [0.2.0] - 2026-10-25
 
