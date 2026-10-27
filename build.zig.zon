@@ -6,17 +6,17 @@
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.18#c6fd0e2501b553af60256669df0ee15176ed21ce",
-            .hash = "aegis-0.1.18-rsxounuqCAA3bG0JhLkfilLi4zBvhm9QTeUkT1U4UBr5",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.2.0#f58cea578f23a38aaf94dc0d855b97e7164a6d58",
+            .hash = "aegis-0.2.0-rsxouhW3CACsiNW-C1ujVL8HNVQ6iol6C-QfRkkoZ1vo",
         },
 
         .ensign = .{
-            .url = "git+https://github.com/pedronaugusto/ensign?ref=v0.3.0#96479667fcda4e450888f3ecd7e295b4c0ff94b4",
-            .hash = "ensign-0.3.0-6eMTDzKjBQBrSefCw30-s-wNNMyogxpErWRNvHtRDD4K",
+            .url = "git+https://github.com/pedronaugusto/ensign?ref=aegis-0.2#d69e65fb7708844450ce34f0b17bb540b0b6fc72",
+            .hash = "ensign-0.3.0-6eMTDzOjBQDBZ0kVHFX0I1taobSZIT7KQVGKbGCnaFNX",
         },
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.5.5#17745a76ef93c989fb2a2fceb29f2bee411fed0c",
-            .hash = "airlock-0.5.5-rfvu6LreBgDNBCHYs-LuhEqJ7upm0flv93J7d5lEI6TF",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=aegis-0.2#4ccf3cfa5c0876b2652cc81bc3028ba62f3727a2",
+            .hash = "airlock-0.5.5-rfvu6LjeBgD4DDony8gcIH_lS4QwBCzMUEqUVi73eZNb",
         },
     },
     .dev_dependencies = .{
