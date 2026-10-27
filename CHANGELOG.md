@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-27
+
 ### Added
 
 - `bay vendor --all-hosts` vendors every package any host's build may ask for: each revision in the graph with every package below it, lazy ones included, so a bundle made on one host builds on every other. Where a package holds a link this account may not make, as Windows makes a symbolic link only for an account with SeCreateSymbolicLinkPrivilege, it is refused by the package's name and the link's, with the right it needs, and `bay vendor` without the flag still vendors what this host's builds take.
@@ -262,7 +264,8 @@
 - `zig build dist`: the release programs for Linux, macOS and Windows on x86_64 and aarch64.
 - Paths in a manifest bay writes use `/` on every host; on Windows links to directories are made as such, and a running program is moved aside before an install replaces it.
 
-[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/pedronaugusto/bay/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/pedronaugusto/bay/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/pedronaugusto/bay/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/pedronaugusto/bay/compare/v0.1.21...v0.2.0
 [0.1.21]: https://github.com/pedronaugusto/bay/compare/v0.1.20...v0.1.21
