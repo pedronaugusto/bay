@@ -231,7 +231,7 @@ fn contained(path: []const u8) bool {
 }
 
 /// The most one file of a package holds, as git gives it: a larger one is refused, not read.
-const blob_limit: usize = 1 << 30;
+const blob_limit: aegis.bounded.Limit(usize) = .init(1 << 30);
 
 /// Blobs read through one `git cat-file --batch`, a request and its answer at a time.
 const Objects = struct {
@@ -270,7 +270,7 @@ const Objects = struct {
         const space = std.mem.findScalarLast(u8, header, ' ') orelse return error.UnexpectedGitOutput;
         if (std.mem.find(u8, header, " blob ") == null) return error.UnexpectedGitOutput;
         const size = std.fmt.parseUnsigned(usize, header[space + 1 ..], 10) catch return error.UnexpectedGitOutput;
-        if (size > blob_limit) return error.BlobTooLarge;
+        if (blob_limit.exceeds(size)) return error.BlobTooLarge;
         const data = try objects.a.alloc(u8, size);
         try reader.readSliceAll(data);
         if (try reader.takeByte() != '\n') return error.UnexpectedGitOutput;
