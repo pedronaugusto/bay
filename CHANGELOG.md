@@ -10,6 +10,7 @@
 
 - Pins aegis 0.2.1, the 0.2 line: `SecretBytes` holds no allocator.
 - `bay fetch` and `bay vendor` fetch what the builds take on this host: each build's dependencies, and the lazy ones its configuration asks for, which Zig fetches as it configures the package's build and the development build. A lazy package only another host's build or another option asks for is no longer fetched. `bay vendor` still unpacks every revision selection reads into `zig-pkg`, so the project resolves offline as before; a package with no manifest is among them only when a build takes it.
+- Pins ensign 0.3.1 and airlock 0.6.0.
 
 ### Fixed
 

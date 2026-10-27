@@ -11,12 +11,13 @@
         },
 
         .ensign = .{
-            .url = "git+https://github.com/pedronaugusto/ensign?ref=aegis-0.2#d69e65fb7708844450ce34f0b17bb540b0b6fc72",
-            .hash = "ensign-0.3.0-6eMTDzOjBQDBZ0kVHFX0I1taobSZIT7KQVGKbGCnaFNX",
+            .url = "git+https://github.com/pedronaugusto/ensign?ref=v0.3.1#271c75f60534b7e9eb1c79ae6d3b8f94c28be705",
+            .hash = "ensign-0.3.1-6eMTD7ejBQCKWv4nIZ0aJ1sZp8iqcM98FSGwKTnd4mVJ",
         },
+
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=aegis-0.2#4ccf3cfa5c0876b2652cc81bc3028ba62f3727a2",
-            .hash = "airlock-0.5.5-rfvu6LjeBgD4DDony8gcIH_lS4QwBCzMUEqUVi73eZNb",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.6.0#0931b6512b1d7c2e03e822bc82870ec8f98fa91e",
+            .hash = "airlock-0.6.0-rfvu6JUEBwD8DeigCmlj5NDNiglUZzUy2HSsKAeYRs3E",
         },
     },
     .dev_dependencies = .{
