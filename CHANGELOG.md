@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `bay release` on a branch with no upstream pushes it to its own name on the remote, as `git push -u` would, and makes that its upstream: the remote git pushes to by default (`remote.pushDefault`), or the one remote there is. It refused the branch before, asking for `git push -u` first. With more than one remote and none the default, it still refuses, naming that. A dry run says the branch would take the upstream.
+
 ## [0.2.2] - 2026-10-27
 
 ### Added

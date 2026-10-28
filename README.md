@@ -218,14 +218,16 @@ anything else the last number. An empty section releases nothing. The section be
 `## [X.Y.Z] - date` (its groups in order, a group written twice made one), the manifest's
 `.version` takes the version, and both are committed as `Release vX.Y.Z`. That commit is
 gated by the package's own `gate` step (preflight's, from its development build), and only
-when the gate is green do the branch and the tag `vX.Y.Z` go to the branch's remote, in
-one atomic push over SSH, read back before the tag is made here. A red gate leaves the
+when the gate is green do the branch and the tag `vX.Y.Z` go to the branch's upstream, in
+one atomic push over SSH, read back before the tag is made here. A branch with no upstream
+goes where `git push -u` would send it, under its own name on the remote git pushes to by
+default or the one remote there is, and keeps that as its upstream. A red gate leaves the
 branch where it was. `bay release --dry-run` prints the version, the section and the plan;
 `bay release --no-push` commits and gates, and holds the gated commit for a later `bay
 release`, someone else's it may be, to push without gating it again.
 
-It refuses a tree with changes, a branch behind its remote or with none, a remote that is
-not SSH, a version already tagged, a manifest and a changelog at different releases, and a
+It refuses a tree with changes, a branch behind its remote, a branch with no upstream that
+more than one remote could take, a remote that is not SSH, a version already tagged, a manifest and a changelog at different releases, and a
 line under no group. A release stopped after its commit is finished by the next `bay
 release`, which gates the commit again; one whose push failed after a green gate is pushed
 without gating it again; one pushed whose tag never reached this clone is tagged here.

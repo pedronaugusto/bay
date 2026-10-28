@@ -100,18 +100,32 @@ const Upstream = struct {
     tracking: []const u8,
     /// The branch on the remote as people name it, `<remote>/<name>`.
     onto: []const u8,
+    /// The branch had no upstream: the push makes this its upstream, as `git push -u` does.
+    set: bool,
 };
 
 fn upstream(c: Context) !Upstream {
     const branch = (try git(c, &.{ "symbolic-ref", "--short", "-q", "HEAD" })).out;
     if (branch.len == 0) try say.fail(c.io, "HEAD is detached: check out the branch to release", .{});
-    const remote = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.remote", .{branch}) })).out;
-    const merge = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.merge", .{branch}) })).out;
-    if (remote.len == 0 or merge.len == 0 or std.mem.eql(u8, remote, ".")) try say.fail(c.io, "{s} has no upstream on a remote: push it once with git push -u <remote> {s}", .{ branch, branch });
+    var remote = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.remote", .{branch}) })).out;
+    var merge = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.merge", .{branch}) })).out;
+    // A branch with no upstream goes where `git push -u` would send it: its own name on the
+    // remote git pushes to by default, or on the one remote there is.
+    const set = remote.len == 0 or merge.len == 0 or std.mem.eql(u8, remote, ".");
+    if (set) {
+        remote = (try git(c, &.{ "config", "--get", "remote.pushDefault" })).out;
+        if (remote.len == 0) {
+            const remotes = try must(c, &.{"remote"});
+            if (remotes.len == 0 or std.mem.findScalar(u8, remotes, '\n') != null)
+                try say.fail(c.io, "{s} has no upstream, and {s}: push it once with git push -u <remote> {s}", .{ branch, if (remotes.len == 0) "there is no remote" else "more than one remote could take it", branch });
+            remote = remotes;
+        }
+        merge = try c.a.print("refs/heads/{s}", .{branch});
+    }
     const url = try must(c, &.{ "remote", "get-url", "--push", remote });
     if (!isSsh(url)) try say.fail(c.io, "{s} pushes to {s}, which is not SSH: a release goes over SSH (git remote set-url --push {s} <user>@<host>:<path>)", .{ remote, url, remote });
     const name = if (std.mem.startsWith(u8, merge, "refs/heads/")) merge["refs/heads/".len..] else merge;
-    return .{ .branch = branch, .remote = remote, .url = url, .merge = merge, .tracking = try c.a.print("refs/remotes/{s}/{s}", .{ remote, name }), .onto = try c.a.print("{s}/{s}", .{ remote, name }) };
+    return .{ .branch = branch, .remote = remote, .url = url, .merge = merge, .tracking = try c.a.print("refs/remotes/{s}/{s}", .{ remote, name }), .onto = try c.a.print("{s}/{s}", .{ remote, name }), .set = set };
 }
 
 /// The commit a tag names here, or null.
@@ -376,6 +390,11 @@ fn push(c: Context, up: Upstream, commit: []const u8, tag: ?[]const u8) !void {
     if (!branch_ok or !tag_ok) try say.fail(c.io, "{s} took the push, but reading it back shows {s}{s} elsewhere than {s}", .{ up.remote, if (branch_ok) "" else up.merge, if (tag_ok) "" else " and the tag", commit[0..12] });
     if (tag) |t| _ = try must(c, &.{ "tag", t, commit });
     _ = try must(c, &.{ "update-ref", up.tracking, commit });
+    if (up.set) {
+        _ = try must(c, &.{ "config", try c.a.print("branch.{s}.remote", .{up.branch}), up.remote });
+        _ = try must(c, &.{ "config", try c.a.print("branch.{s}.merge", .{up.branch}), up.merge });
+        try say.note(c.io, "{s} has {s} as its upstream now", .{ up.branch, up.onto });
+    }
 }
 
 /// A train's member whose new commits are development pins alone: gated, then
@@ -403,7 +422,7 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
     for (gate_machines) |machine| try say.out(c.io, ", on {s}", .{machine.name});
     if (options.no_push) {
         try say.out(c.io, "\nhold it here, gated, for a later bay release to push\n", .{});
-    } else try say.out(c.io, "\npush it to {s} and the tag {s} on {s} at once ({s})\n", .{ up.onto, plan.tag, up.remote, up.url });
+    } else try say.out(c.io, "\npush it to {s} and the tag {s} on {s} at once ({s}){s}\n", .{ up.onto, plan.tag, up.remote, up.url, if (up.set) ", which becomes the branch's upstream" else "" });
 }
 
 /// `bay --workspace release`: the train. Members one at a time, each after the

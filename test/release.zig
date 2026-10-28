@@ -208,6 +208,37 @@ test "a release cuts the section, gates that commit, and pushes the branch and i
     try std.testing.expectEqualStrings(commit, try w.head("lib"));
 }
 
+test "a branch with no upstream is released to its own name on the remote, which becomes its upstream" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    try w.package("lib", "0.1.0", "");
+    try w.git("lib", &.{ "checkout", "--quiet", "-b", "line-0.1" });
+    try w.change("lib", "### Fixed\n\n- A fix.\n");
+    const remote_main = try w.remoteAt("lib", "refs/heads/main");
+    const dry = try w.releaseIn("lib", &.{"--dry-run"});
+    try std.testing.expect(succeeded(dry));
+    try std.testing.expect(contains(dry.stdout, "push it to origin/line-0.1 and the tag v0.1.1 on origin"));
+    try std.testing.expect(contains(dry.stdout, "which becomes the branch's upstream"));
+    // The dry run set nothing.
+    try std.testing.expect(!succeeded(try w.f.run("lib", &.{ "git", "config", "--get", "branch.line-0.1.remote" })));
+    const released = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(released));
+    const commit = try w.head("lib");
+    try std.testing.expect(contains(released.stderr, "line-0.1 has origin/line-0.1 as its upstream now"));
+    try std.testing.expectEqualStrings(commit, try w.remoteAt("lib", "refs/heads/line-0.1"));
+    try std.testing.expectEqualStrings(commit, try w.remoteAt("lib", "refs/tags/v0.1.1"));
+    try std.testing.expectEqualStrings(remote_main, try w.remoteAt("lib", "refs/heads/main"));
+    try std.testing.expectEqualStrings("origin/line-0.1", try w.out("lib", &.{ "rev-parse", "--abbrev-ref", "line-0.1@{upstream}" }));
+    // From then on it releases as any branch with an upstream does.
+    try w.change("lib", "### Fixed\n\n- Another.\n");
+    const again = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(again));
+    try std.testing.expect(std.mem.find(u8, again.stderr, "as its upstream now") == null);
+    try std.testing.expectEqualStrings(try w.head("lib"), try w.remoteAt("lib", "refs/tags/v0.1.2"));
+}
+
 test "the version is the section's largest change, and a dry run changes nothing" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -266,11 +297,14 @@ test "each refusal names its cause and leaves the branch, the tags and the remot
     try w.git("lib", &.{ "remote", "set-url", "--push", "origin", try w.path("remotes/lib.git") });
     try Expect.refusal(&w, "which is not SSH", start, remote_main);
     try w.git("lib", &.{ "remote", "set-url", "--push", "origin", try w.sshUrl("lib") });
-    // HEAD detached, and a branch with no upstream.
+    // HEAD detached, and a branch with no upstream that more than one remote could take.
     try w.git("lib", &.{ "checkout", "--quiet", "--detach" });
     try Expect.refusal(&w, "HEAD is detached", start, remote_main);
     try w.git("lib", &.{ "checkout", "--quiet", "-b", "loose" });
-    try Expect.refusal(&w, "loose has no upstream", start, remote_main);
+    try w.git("lib", &.{ "remote", "add", "mirror", try w.sshUrl("lib") });
+    try Expect.refusal(&w, "loose has no upstream, and more than one remote could take it", start, remote_main);
+    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/heads/loose"));
+    try w.git("lib", &.{ "remote", "remove", "mirror" });
     try w.git("lib", &.{ "checkout", "--quiet", "main" });
     // The manifest and the CHANGELOG at different releases.
     try w.f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, w.f.a, try w.read("lib", "build.zig.zon"), "\"0.1.0\"", "\"0.1.5\""));
