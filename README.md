@@ -111,7 +111,10 @@ Zig then gets a graph in which each package appears once. A dependency whose own
 name other revisions is built from a copy with only those pins rewritten, which
 `zig build --fork` substitutes for it; no package's files are edited. The package's
 own pins must already name the selection: a build that disagrees stops and says why,
-and `bay tidy` writes them.
+and `bay tidy` writes them. It also gives every other manifest under the package (a
+sample, a fixture, a conformance build) the package's own pin of each package both pin,
+so a nested build tests what the package ships and develops with; a package only the
+nested manifest pins, or takes by path, stays as it is.
 
 | Case | What bay does |
 | --- | --- |
@@ -154,7 +157,7 @@ pins each member the package depends on at its release: the tag of the member's 
 has unreleased work, and pins to it stay. Pins of every other package go to the one
 version selected, and the workspace is one graph, every member's development in it:
 a tool one member develops with can raise the floor another member ships with, as in
-a Go workspace. `bay tidy` writes only the package's own manifest; `bay --workspace
+a Go workspace. `bay tidy` writes only the package's own manifests; `bay --workspace
 tidy` tidies every member.
 
 `bay --workspace <command>` runs a command in every member, each after the members it
@@ -302,7 +305,7 @@ every package below the graph, lazy ones included, for a bundle any host builds 
 | `bay remove [--dev] <name>` | Drop a dependency from the list that holds it; `--dev` where it is in both |
 | `bay update [name...]` | Pin what each recorded ref names now: a branch at its head, a release tag at the newest release on its line |
 | `bay upgrade [name...]` | Pin each at the newest release tag of its repository, across lines, whether it was pinned at a tag or a commit; a repository with no release tag stays |
-| `bay tidy` | Pin each package at the version selection picks, and in a workspace each member at its release |
+| `bay tidy` | Pin each package at the version selection picks, and in a workspace each member at its release; nested manifests take the package's pins |
 | `bay list` | Both lists, with their pins |
 | `bay tree [--why <name>] [--duplicates]` | The resolved graph; the paths to one package; the packages pinned at several revisions, and by whom |
 | `bay outdated` | Packages the builds use with a newer release on their remote, or at a version their newest release retracts |

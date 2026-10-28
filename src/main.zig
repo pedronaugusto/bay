@@ -497,20 +497,27 @@ fn vendorCommand(env: Env, all_hosts: bool) !u8 {
 
 /// Writes the package's manifest; `--locked` refuses, since it would change.
 fn writeManifest(env: Env, text: []const u8) !void {
-    if (env.locked) try say.fail(env.io, "--locked: build.zig.zon would change", .{});
+    try writeManifestAt(env, "build.zig.zon", text);
+}
+
+/// Writes the manifest at `path` under the package; `--locked` refuses, since it would change.
+fn writeManifestAt(env: Env, path: []const u8, text: []const u8) !void {
+    if (env.locked) try say.fail(env.io, "--locked: {f} would change", .{manifest.portable(path)});
     var dir = try env.dir();
     defer dir.deinit(env.io);
     const package = dir.lend().get();
     // Written beside and renamed over: a member resolving at the same moment reads
     // the old manifest or the new one, never half of one.
-    try package.writeFile(env.io, .{ .sub_path = "build.zig.zon.bay-partial", .data = text });
-    try package.rename("build.zig.zon.bay-partial", package, "build.zig.zon", env.io);
+    const partial = try env.a.print("{s}.bay-partial", .{path});
+    try package.writeFile(env.io, .{ .sub_path = partial, .data = text });
+    try package.rename(partial, package, path, env.io);
 }
 
 /// `bay tidy`: the package's manifest pins each workspace member at its release
-/// and each package at its one hash, as Go writes go.mod; what moves is named,
-/// and nothing to write says nothing. Only this manifest is written: every
-/// member's is its own (`bay --workspace tidy` tidies them all). What the build
+/// and each package at its one hash, as Go writes go.mod, and each other manifest
+/// under the package pins what the package pins as it does; what moves is named,
+/// and nothing to write says nothing. Only this package's manifests are written:
+/// every member's are its own (`bay --workspace tidy` tidies them all). What the build
 /// makes from the pins is made again even when nothing moves here: the pins may
 /// have been written by a command told not to tidy, or by hand.
 fn tidy(env: Env) !u8 {
@@ -526,8 +533,11 @@ fn writeTidied(env: Env, text: [:0]const u8, generate: enum { always, when_writt
         .released => "pinned at its release",
         .raised => "raised to",
     }, move.to });
+    for (tidied.nested) |file| for (file.moves) |move|
+        try say.note(env.io, "{f}: {s} {s}pinned as build.zig.zon pins it, {s}", .{ manifest.portable(file.path), move.name, if (env.locked) "would be " else "", move.to });
     const written = try writeChanged(env, tidied.text);
-    if (written or generate == .always) try regenerate(env);
+    for (tidied.nested) |file| try writeManifestAt(env, file.path, file.text);
+    if (written or tidied.nested.len != 0 or generate == .always) try regenerate(env);
     return 0;
 }
 

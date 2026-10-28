@@ -1,9 +1,9 @@
 //! bay end to end over real packages: the diamond Zig alone cannot build, a
-//! tie the root decides, tidy, the package under development linked by its own
-//! tools, a vendored project built with no cache and no network, overrides, and
-//! a command run across a workspace in order. Each test works in a directory of
-//! its own, with a Zig cache, HOME and data directory of its own, and the Zig
-//! that builds bay, so nothing is downloaded.
+//! tie the root decides, tidy (a nested sample's pins too), the package under
+//! development linked by its own tools, a vendored project built with no cache
+//! and no network, overrides, and a command run across a workspace in order.
+//! Each test works in a directory of its own, with a Zig cache, HOME and data
+//! directory of its own, and the Zig that builds bay, so nothing is downloaded.
 const std = @import("std");
 const Io = std.Io;
 const options = @import("options");
@@ -82,6 +82,48 @@ test "a root pinned below the selection is refused until tidy raises it, and --l
     try std.testing.expect(std.mem.find(u8, text, "c-0.1.1-") != null);
     try std.testing.expect(succeeded(try f.bay("app", &.{ "build", "run" })));
     try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
+}
+
+test "a tidy gives a nested manifest the package's pins of what both pin, and leaves the rest as it is" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    const c1 = try f.pin("c", "c1");
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b"), c1 }), &.{ "a", "b", "c" }, main_ab);
+    // A sample built on app: c, which app pins (below the selection, as app does); a package
+    // app does not pin, under a name of the sample's own; and app by its directory.
+    const other = try f.pin("other", "c1");
+    const sample = try f.a.print(".{{ .name = .sample, .version = \"0.0.0\", .fingerprint = 0x{x}, .paths = .{{\"\"}}, .dependencies = .{{ .app = .{{ .path = \"..\" }}, {s} {s} }} }}\n", .{ fingerprint("sample"), c1, other });
+    try f.tmp.dir.createDirPath(f.io, "app/sample");
+    try f.write("app", "sample/build.zig.zon", sample);
+    // A build's output is no source of the package.
+    try f.tmp.dir.createDirPath(f.io, "app/zig-out/old");
+    try f.write("app", "zig-out/old/build.zig.zon", sample);
+    const tidied = try f.bay("app", &.{"tidy"});
+    try std.testing.expect(succeeded(tidied));
+    try std.testing.expect(std.mem.find(u8, tidied.stderr, "sample/build.zig.zon: c pinned as build.zig.zon pins it, c-0.1.1-") != null);
+    const own = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const moved = try f.tmp.dir.readFileAlloc(f.io, "app/sample/build.zig.zon", f.a, .limited(1 << 20));
+    const c2 = try f.pin("c", "c2");
+    const at = std.mem.find(u8, c2, ".hash = \"").? + ".hash = \"".len;
+    const hash = c2[at..][0..std.mem.findScalar(u8, c2[at..], '"').?];
+    try std.testing.expect(std.mem.find(u8, own, hash) != null);
+    try std.testing.expect(std.mem.find(u8, moved, hash) != null);
+    try std.testing.expect(std.mem.find(u8, moved, other) != null);
+    try std.testing.expect(std.mem.find(u8, moved, ".app = .{ .path = \"..\" }") != null);
+    try std.testing.expectEqualStrings(sample, try f.tmp.dir.readFileAlloc(f.io, "app/zig-out/old/build.zig.zon", f.a, .limited(1 << 20)));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
+    // A sample behind on its own is moved on its own, and --locked refuses to.
+    try f.write("app", "sample/build.zig.zon", sample);
+    const locked = try f.bay("app", &.{ "--locked", "tidy" });
+    try std.testing.expect(refused(locked));
+    try std.testing.expect(std.mem.find(u8, locked.stderr, "--locked: sample/build.zig.zon would change") != null);
+    try std.testing.expectEqualStrings(sample, try f.tmp.dir.readFileAlloc(f.io, "app/sample/build.zig.zon", f.a, .limited(1 << 20)));
+    try std.testing.expect(succeeded(try f.bay("app", &.{"tidy"})));
+    try std.testing.expectEqualStrings(moved, try f.tmp.dir.readFileAlloc(f.io, "app/sample/build.zig.zon", f.a, .limited(1 << 20)));
+    try std.testing.expectEqualStrings(own, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20)));
 }
 
 test "a dev tool built on the package links the package under development" {
