@@ -72,6 +72,12 @@ pub fn all(io: Io, a: std.mem.Allocator, from: []const u8) !?[]const []const u8 
     return try list.toOwnedSlice(a);
 }
 
+/// The `bay.work` found from `from` up, or null outside a workspace.
+pub fn fileOf(io: Io, a: std.mem.Allocator, from: []const u8) !?[]const u8 {
+    const found = try find(io, a, from) orelse return null;
+    return found.path;
+}
+
 const Found = struct { path: []const u8, text: [:0]const u8 };
 
 fn find(io: Io, a: std.mem.Allocator, from: []const u8) !?Found {

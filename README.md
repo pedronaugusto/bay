@@ -227,8 +227,10 @@ branch where it was. `bay release --dry-run` prints the version, the section and
 release`, someone else's it may be, to push without gating it again.
 
 It refuses a tree with changes, a branch behind its remote, a branch with no upstream that
-more than one remote could take, a remote that is not SSH, a version already tagged, a manifest and a changelog at different releases, and a
-line under no group. A release stopped after its commit is finished by the next `bay
+more than one remote could take, a remote that is not SSH, a package in a workspace with
+other members (their trees would stand in for its pins in the gate; `bay --workspace
+release` releases them), a version already tagged, a manifest and a changelog at
+different releases, and a line under no group. A release stopped after its commit is finished by the next `bay
 release`, which gates the commit again; one whose push failed after a green gate is pushed
 without gating it again; one pushed whose tag never reached this clone is tagged here.
 

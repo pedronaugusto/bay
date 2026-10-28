@@ -4,6 +4,7 @@
 
 ### Changed
 
+- `bay release` refuses a package inside a workspace with other members (a `bay.work` in its directory or one above), naming the file and the members. Their working trees would stand in for what the package pins, so the gate would pass on code no release holds: aegis 0.2.2's gate once ran under a stray `bay.work`, developed with unreleased glint and preflight. `bay --workspace release` still releases the members, each in the workspace it was made for.
 - `bay release` on a branch with no upstream pushes it to its own name on the remote, as `git push -u` would, and makes that its upstream: the remote git pushes to by default (`remote.pushDefault`), or the one remote there is. It refused the branch before, asking for `git push -u` first. With more than one remote and none the default, it still refuses, naming that. A dry run says the branch would take the upstream.
 
 ## [0.2.2] - 2026-10-27

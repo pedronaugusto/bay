@@ -5,7 +5,8 @@
 //! two branches adding lines under one group rebased with no conflict; a
 //! release interrupted after its commit and after its push, finished or
 //! refused, never a tag on a commit no gate passed; a machine gating beside
-//! this one; and a workspace's train of three members in order.
+//! this one; and a workspace's train of three members in order, none of which
+//! releases alone.
 const std = @import("std");
 const Io = std.Io;
 const fixture = @import("fixture.zig");
@@ -562,6 +563,12 @@ test "a workspace's train releases its members in order, each pinned at the rele
         try std.testing.expectEqualStrings(head, try w.head(dir));
         try std.testing.expectEqualStrings("", try w.out(dir, &.{ "status", "--porcelain" }));
     }
+    // One member released alone would gate with the others' trees in place of its pins.
+    const alone = try w.releaseIn("a", &.{});
+    try std.testing.expect(refused(alone));
+    try std.testing.expect(contains(alone.stderr, "bay.work holds this package with c and b: their trees would stand in for the pins"));
+    try std.testing.expectEqualStrings(heads[0], try w.head("a"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("a", "refs/tags/v0.1.1"));
     const train = try w.f.bay(".", &.{ "--workspace", "release" });
     try std.testing.expect(succeeded(train));
     // In order: a, then b pinning it, then c pinning b; each released and pushed with its tag.

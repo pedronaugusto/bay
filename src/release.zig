@@ -200,7 +200,22 @@ const Plan = struct {
     cut: ?struct { from: std.SemanticVersion, section: changelog.Section, text: []const u8, manifest: [:0]const u8 },
 };
 
+/// `bay release` of one package. A workspace above it would build its other members'
+/// trees in place of what the package pins, so the gate would pass on code no release
+/// holds: refused. A train's members are gated in their workspace, as it is made for.
 pub fn run(c: Context, options: Options) !Outcome {
+    const others = try workspace.members(c.io, c.a, c.package);
+    if (others.len != 0) {
+        const names = try c.a.alloc([]const u8, others.len);
+        for (names, others) |*name, member| name.* = std.fs.path.basename(member);
+        const file = (try workspace.fileOf(c.io, c.a, c.package)).?; // safe: a workspace has other members only when its file is found
+        try say.fail(c.io, "{s} holds this package with {s}: their trees would stand in for the pins, so the gate would not be the release's; release the workspace with bay --workspace release, or this package from a clone outside it", .{ file, try listed(c.a, names) });
+    }
+    return releaseOne(c, options);
+}
+
+/// The package released, its pins resolved as wherever it stands resolves them.
+fn releaseOne(c: Context, options: Options) !Outcome {
     const up = try upstream(c);
     if ((try must(c, &.{ "status", "--porcelain" })).len != 0) try say.fail(c.io, "the tree has changes: a release tags a commit as it is, so commit them or put them away first", .{});
     // The remote's tags are read from it (`ls-remote`), never fetched here: a refused release changes nothing.
@@ -475,7 +490,7 @@ fn ride(c: Context, car: each.Car, when: enum { always, when_repinned }, version
     };
     if (when == .when_repinned and !pins_moved) return .nothing;
     try say.note(c.io, "{s}: {s}", .{ car.name, car.directory });
-    return switch (run(member, .{ .push_unreleased = true }) catch |err| switch (err) {
+    return switch (releaseOne(member, .{ .push_unreleased = true }) catch |err| switch (err) {
         error.Reported => return .failed,
         else => return err,
     }) {
