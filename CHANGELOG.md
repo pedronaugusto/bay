@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `bay install` takes a repository's URL as `bay add` does: `https://github.com/owner/repo`, as a browser shows it, is the git repository there, and a git URL that names no ref installs the newest release. It handed the page's URL to Zig's fetch, which refused the HTML, and installed a bare git URL from the default branch's head. Both commands now find the source one way, and a `git+ssh` or `git+file` URL with no ref takes the newest release too, where `bay add` pinned its default branch.
+
 ### Changed
 
 - `bay tidy`, and with it every command that tidies and a train's re-pin, gives each other manifest under the package (a sample, a fixture, a conformance build) the package's own `.url` and `.hash` for each package both pin remotely, and names each move. preflight's lint asks for exactly this, and nothing wrote it: preflight's `sample/bay` kept developing with shakedown 0.4.17 when preflight moved on, so bay refused the sample in preflight 0.18.2's gate ("pinned below the selection"). A package only the nested manifest pins, or takes by path, stays as it is, and hidden directories, `zig-out` and `zig-pkg` are not read. `--locked` refuses a nested manifest that would change.

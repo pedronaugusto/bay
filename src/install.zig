@@ -15,6 +15,8 @@ const fetch = @import("fetch.zig");
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
 const store = @import("store.zig");
+const published = @import("published.zig");
+const root = @import("root.zig");
 const resolve = @import("resolve.zig");
 const toolchain = @import("toolchain.zig");
 
@@ -155,9 +157,15 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
         recorded = try Io.Dir.cwd().realPathFileAlloc(c.io, source, c.a);
         break :recorded recorded;
     } else directory: {
-        const dependency = try fetch.fetch(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }), source, given_name) orelse return 1;
+        // As `bay add` keeps them: packages unpacked under the store's place, fetches in a
+        // scratch beside them, which each fetch empties.
+        const place = try std.fs.path.join(c.a, &.{ data, "fetch" });
+        const packages = try store.Store.init(c.io, c.a, c.zig, place);
+        const scratch = try std.fs.path.join(c.a, &.{ place, root.directory, "add" });
+        // A repository's URL is installed at its newest release, as `bay add` pins it.
+        const url = try published.fetchable(c.io, c.a, c.zig, packages, scratch, source);
+        const dependency = try fetch.fetch(c.io, c.a, c.zig, scratch, url, given_name) orelse return 1;
         recorded = dependency.source.remote.url;
-        const packages = try store.Store.init(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }));
         break :directory try packages.directoryOf(.{ .url = dependency.source.remote.url, .hash = dependency.source.remote.hash });
     };
     const package_text = aegis.own.readFile(c.io, Io.Dir.cwd(), try std.fs.path.join(c.a, &.{ package_dir, "build.zig.zon" }), c.a, .fromRaw(1 << 20)) catch

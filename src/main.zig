@@ -634,32 +634,10 @@ fn add(env: Env, args: Add) !?[:0]const u8 {
     return text;
 }
 
-/// What `bay add` fetches for `where`: a repository's page URL (`https://host/
-/// owner/repo`, as a browser shows it) is the git repository there, and a git
-/// URL that names no ref is pinned at its newest release, as `go get` takes
-/// `@latest`; with no release it is the default branch, as Zig fetches it.
-/// An archive URL, a URL with a ref or commit, and what git fetches stay as given.
+/// What `bay add` fetches for `where` (`published.fetchable`), its scratch beside the package.
 fn addable(env: Env, where: []const u8) ![]const u8 {
-    const url = try repositoryUrl(env.a, where);
-    if (!std.mem.startsWith(u8, url, "git+") or git.handles(url)) return url;
-    const p = git.parts(url);
-    if (p.ref != null or p.fragment != null) return url;
     const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
-    const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
-    const latest = try published.newest(env.io, env.a, env.zig, packages, scratch, url) orelse return url;
-    return env.a.print("{s}#{s}", .{ url, latest.tag });
-}
-
-/// `where` as a git URL when it is an http(s) URL of a repository rather than
-/// of an archive: Zig fetches a plain https URL as a file, and a repository's
-/// page is HTML, which it refuses by its Content-Type.
-fn repositoryUrl(a: std.mem.Allocator, where: []const u8) ![]const u8 {
-    if (!std.mem.startsWith(u8, where, "https://") and !std.mem.startsWith(u8, where, "http://")) return where;
-    const path = where[0 .. std.mem.findAny(u8, where, "?#") orelse where.len];
-    for ([_][]const u8{ ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar", ".zip" }) |suffix| {
-        if (std.mem.endsWith(u8, path, suffix)) return where;
-    }
-    return a.print("git+{s}", .{std.mem.trimEnd(u8, where, "/")});
+    return published.fetchable(env.io, env.a, env.zig, packages, try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" }), where);
 }
 
 /// `dependency` put into each list that pins its name already, keeping whether it
@@ -982,18 +960,6 @@ test "remove finds a name in the list that holds it" {
     try std.testing.expectEqual(manifest.Kind.dev, removedFrom(parsed, "both", true).?);
     try std.testing.expectEqual(null, removedFrom(parsed, "shipped", true));
     try std.testing.expectEqual(null, removedFrom(parsed, "absent", false));
-}
-
-test "a repository's page URL is added as its git repository, an archive as a file" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    try std.testing.expectEqualStrings("git+https://github.com/o/r", try repositoryUrl(a, "https://github.com/o/r"));
-    try std.testing.expectEqualStrings("git+https://github.com/o/r", try repositoryUrl(a, "https://github.com/o/r/"));
-    try std.testing.expectEqualStrings("git+https://codeberg.org/o/r.git", try repositoryUrl(a, "https://codeberg.org/o/r.git"));
-    try std.testing.expectEqualStrings("https://example.org/r-1.0.tar.gz", try repositoryUrl(a, "https://example.org/r-1.0.tar.gz"));
-    try std.testing.expectEqualStrings("https://example.org/r.zip?x=1", try repositoryUrl(a, "https://example.org/r.zip?x=1"));
-    try std.testing.expectEqualStrings("git+https://github.com/o/r#v1.0.0", try repositoryUrl(a, "git+https://github.com/o/r#v1.0.0"));
 }
 
 // Every file's tests, each named: one left out would never run.

@@ -1009,6 +1009,28 @@ test "an install builds what the package ships, whatever its development pins" {
     try f.tmp.dir.access(f.io, if (@import("builtin").os.tag == .windows) "prefix/bin/app.exe" else "prefix/bin/app", .{});
 }
 
+test "an install from a repository's URL builds its newest release, as add pins it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // app released as v0.1.0, and a commit after it on main that no release holds.
+    try f.application("app", "", &.{}, "pub fn main() void {}");
+    for ([_][]const []const u8{ &.{ "git", "init", "--quiet", "--initial-branch=main" }, &.{ "git", "add", "." }, &.{ "git", "commit", "--quiet", "-m", "0.1.0" }, &.{ "git", "tag", "v0.1.0" } }) |argv|
+        try std.testing.expect(succeeded(try f.run("app", argv)));
+    try f.write("app", "src/main.zig", "pub fn main() void {} // unreleased");
+    try std.testing.expect(succeeded(try f.run("app", &.{ "git", "commit", "--quiet", "-am", "After the release" })));
+    const installed = try f.bay(".", &.{ "install", "--prefix", try std.fs.path.join(f.a, &.{ f.root, "prefix" }), try gitUrl(&f, "app") });
+    try std.testing.expect(succeeded(installed));
+    const listed = try f.bay(".", &.{ "install", "--list" });
+    try std.testing.expect(succeeded(listed));
+    try std.testing.expect(std.mem.find(u8, listed.stdout, "?ref=v0.1.0#") != null);
+    // bay add pins the same URL at the same release.
+    try f.package("user", "user", "0.1.0", "", &.{}, "");
+    try std.testing.expect(succeeded(try f.bay("user", &.{ "add", try gitUrl(&f, "app") })));
+    try std.testing.expect(std.mem.find(u8, try manifestOf(&f, "user"), "?ref=v0.1.0#") != null);
+}
+
 test "an install replaces a program that is running, and names what still runs from the install before" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

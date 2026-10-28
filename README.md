@@ -341,12 +341,14 @@ All are ignored by Zig.
 ## Global installs
 
 `bay install` fetches a package as `zig fetch` does (a `git+https` or archive URL, at
-a `#tag`, `#branch` or `#commit`), copies its sources and builds them as anything that
-depends on the package would: what it ships, without its development dependencies, as
-`cargo install` does. Zig's package cache is never written to. bay records what each
-install put where in `~/.local/share/bay/installed.zon` (`$XDG_DATA_HOME/bay`):
-`uninstall` removes exactly that, and a file bay did not install is never replaced
-without `--force`. Installed programs run without bay.
+a `#tag`, `#branch` or `#commit`; a repository's URL with no ref, as a browser shows
+it, `https://github.com/owner/repo`, at its newest release, as `bay add` pins one),
+copies its sources and builds them as anything that depends on the package would:
+what it ships, without its development dependencies, as `cargo install` does. Zig's
+package cache is never written to. bay records what each install put where in
+`~/.local/share/bay/installed.zon` (`$XDG_DATA_HOME/bay`): `uninstall` removes exactly
+that, and a file bay did not install is never replaced without `--force`. Installed
+programs run without bay.
 
 ## How it works
 
