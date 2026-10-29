@@ -22,6 +22,7 @@ const workspace = @import("workspace.zig");
 const each = @import("each.zig");
 const tidying = @import("tidy.zig");
 const toolchain = @import("toolchain.zig");
+const fetch = @import("fetch.zig");
 const dirs = @import("dirs.zig");
 const git_source = @import("git.zig");
 const advertised = @import("remote.zig");
@@ -386,6 +387,29 @@ fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
         },
     };
     if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned at no release: a release builds from what tags fix, so pin each at one (bay update) and release again", .{try listed(c.a, wrong.items)});
+    try pinsHoldTheirHashes(c, parsed);
+}
+
+/// Every remote pin's `.hash` is what its URL holds, fetched now as Zig records it. Zig takes
+/// a package its cache holds by the hash alone, without the URL: a hash of other content
+/// builds here, and fails or builds other code for anyone who fetches the release.
+fn pinsHoldTheirHashes(c: Context, parsed: manifest.Manifest) !void {
+    const zig = try toolchain.forPackage(c.io, c.a, c.environ, c.package);
+    // In the package's cache, which each fetch clears for itself.
+    const scratch = try std.fs.path.join(c.a, &.{ c.package, ".zig-cache", "bay", "release-fetch" });
+    var wrong: std.ArrayList([]const u8) = .empty;
+    for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev, parsed.overrides }) |list| for (list) |dependency| switch (dependency.source) {
+        .path => {},
+        .remote => |at| {
+            const fetched = try fetch.fetch(c.io, c.a, zig, scratch, at.url, dependency.name) orelse {
+                try wrong.append(c.a, try c.a.print("{s} (its URL could not be fetched, so nothing shows its .hash is what the URL holds)", .{dependency.name}));
+                continue;
+            };
+            const hash = fetched.source.remote.hash;
+            if (!std.mem.eql(u8, hash, at.hash)) try wrong.append(c.a, try c.a.print("{s} (its .hash is {s}; what its URL holds is {s})", .{ dependency.name, at.hash, hash }));
+        },
+    };
+    if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned by a hash its URL does not hold: pin each again (bay update) and release again", .{try listed(c.a, wrong.items)});
 }
 
 /// A git pin as a release names one: `?ref=` a version (`v1.2.3`, or without the `v`) and

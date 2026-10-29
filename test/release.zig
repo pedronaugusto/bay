@@ -330,11 +330,15 @@ test "each refusal names its cause and leaves the branch, the tags and the remot
     try w.change("lib", "- Loose.\n");
     try Expect.refusal(&w, "CHANGELOG.md:5: an entry under no group", try w.head("lib"), remote_main);
     try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
-    // A pin at no release: on a branch, and on a version tag that does not name the pinned commit.
+    // A pin at no release: on a branch, and on a version tag that does not name the pinned
+    // commit; and one at a release whose hash its URL does not hold.
     try w.package("dep", "0.1.0", "");
     const pins = [_]struct { []const u8, []const u8, []const u8 }{
         .{ "main", try w.head("dep"), "dep (at main) pinned at no release" },
         .{ "v0.1.0", start, "dep (v0.1.0 is no tag at " },
+        // At the tag, by a hash of other content: Zig would take what its cache held under it
+        // (review-1029b m-d).
+        .{ "v0.1.0", try w.head("dep"), "dep (its .hash is dep-0.1.0-AAAA" },
     };
     for (pins) |pin| {
         const ref, const commit, const said = pin;
