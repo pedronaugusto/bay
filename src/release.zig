@@ -23,6 +23,7 @@ const each = @import("each.zig");
 const tidying = @import("tidy.zig");
 const toolchain = @import("toolchain.zig");
 const fetch = @import("fetch.zig");
+const lock = @import("lock.zig");
 const dirs = @import("dirs.zig");
 const git_source = @import("git.zig");
 const advertised = @import("remote.zig");
@@ -730,6 +731,9 @@ pub fn train(c: Context, options: Options) !u8 {
     const directories = try workspace.all(c.io, c.a, c.package) orelse try say.fail(c.io, "no {s} here or in any directory above", .{workspace.file_name});
     const cars = try each.train(c.io, c.a, directories);
     if (options.dry_run) return trainPlan(c, cars);
+    // One train in a workspace at a time: a second would gate the same members at once.
+    const held = try lock.hold(c.io, c.a, c.environ, .train, (try workspace.fileOf(c.io, c.a, c.package)).?); // safe: `all` found it above
+    defer held.release(c.io);
     const done = try c.a.alloc(Done, cars.len);
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
     @memset(versions, null);

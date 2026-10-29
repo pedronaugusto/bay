@@ -14,6 +14,7 @@ const Io = std.Io;
 const aegis = @import("aegis");
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
+const lock = @import("lock.zig");
 
 pub const Machine = struct {
     name: []const u8,
@@ -96,6 +97,9 @@ pub const Request = struct {
 /// Gates the commit at HEAD of the package at `package` on this machine, with its
 /// `gate` step; whether it is green. Its lines go to `output`.
 pub fn local(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8, output: *Output) !bool {
+    // One gate in a directory at a time: a second would build over the first's files.
+    const held = try lock.hold(io, a, environ, .gate, package);
+    defer held.release(io);
     const bay = environ.get("BAY").?; // safe: main sets BAY before any command
     // This machine releases, so it runs the jobs that say the same on any machine; a
     // `PREFLIGHT_PORTABLE=elsewhere` it inherited would leave them to no one.
@@ -229,6 +233,10 @@ pub fn receive(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ
         error.OutOfMemory => return error.OutOfMemory,
         else => try say.fail(io, "no release commit came on stdin: {t}", .{err}),
     };
+    // One gate in this copy at a time: a second release's checkout would change the files the
+    // first's build reads (two trains once gated one copy at once).
+    const held = try lock.hold(io, a, environ, .gate, directory);
+    defer held.release(io);
     // Beside the copy, and replaced by the next release's.
     const bundle = try a.print("{s}.bundle", .{std.mem.trimEnd(u8, directory, "/\\")});
     if (std.fs.path.dirname(bundle)) |parent| try Io.Dir.cwd().createDirPath(io, parent);

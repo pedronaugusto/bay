@@ -994,6 +994,7 @@ test {
     _ = @import("changelog.zig");
     _ = @import("dirs.zig");
     _ = @import("download.zig");
+    _ = @import("lock.zig");
     _ = each;
     _ = fetch;
     _ = git;
