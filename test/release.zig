@@ -123,6 +123,18 @@ const World = struct {
         try w.git(dir, &.{ "commit", "--quiet", "-m", "A change" });
     }
 
+    /// The commit bay recorded as gated green for `tag` in `dir`'s repository and has not
+    /// pushed, as bay keeps it in its data directory; empty when there is none.
+    fn gateRecord(w: *World, dir: []const u8, tag: []const u8) ![]const u8 {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(try w.out(dir, &.{ "rev-parse", "--absolute-git-dir" }), &digest, .{});
+        const record = try std.fs.path.join(w.f.a, &.{ "data", "bay", "gated", &std.fmt.bytesToHex(digest, .lower), tag });
+        return w.f.tmp.dir.readFileAlloc(w.f.io, record, w.f.a, .limited(256)) catch |err| switch (err) {
+            error.FileNotFound => "",
+            else => return err,
+        };
+    }
+
     /// How many times a gate ran on `commit`.
     fn gated(w: *World, commit: []const u8) !usize {
         var dir = try w.f.tmp.dir.openDir(w.f.io, "gates", .{ .iterate = true });
@@ -316,6 +328,20 @@ test "each refusal names its cause and leaves the branch, the tags and the remot
     try w.change("lib", "- Loose.\n");
     try Expect.refusal(&w, "CHANGELOG.md:5: an entry under no group", try w.head("lib"), remote_main);
     try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
+    // A pin at no release: on a branch, and on a version tag that does not name the pinned commit.
+    try w.package("dep", "0.1.0", "");
+    const pins = [_]struct { []const u8, []const u8, []const u8 }{
+        .{ "main", try w.head("dep"), "dep (at main) pinned at no release" },
+        .{ "v0.1.0", start, "dep (v0.1.0 is no tag at " },
+    };
+    for (pins) |pin| {
+        const ref, const commit, const said = pin;
+        const dev = try w.f.a.print("    .dependencies = .{{}},\n    .dev_dependencies = .{{ .dep = .{{ .url = \"{s}?ref={s}#{s}\", .hash = \"dep-0.1.0-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\" }} }},\n", .{ try w.pinUrl("dep"), ref, commit });
+        try w.f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, w.f.a, try w.read("lib", "build.zig.zon"), "    .dependencies = .{},\n", dev));
+        try w.git("lib", &.{ "commit", "--quiet", "-am", "Pin dep" });
+        try Expect.refusal(&w, said, try w.head("lib"), remote_main);
+        try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
+    }
     // The version to come tagged already, on the remote.
     try w.git(".", &.{ "clone", "--quiet", try w.path("remotes/lib.git"), "other" });
     try w.git("other", &.{ "tag", "v0.1.1" });
@@ -418,16 +444,20 @@ test "a release stopped after its commit or its push is finished, and never tags
     try std.testing.expect(contains(stopped.stderr, "the push to origin failed, and nothing moved there"));
     const commit = try w.head("lib");
     try std.testing.expectEqualStrings("Release v0.1.1", try w.out("lib", &.{ "log", "-1", "--format=%s" }));
-    try std.testing.expectEqualStrings(commit, try w.out("lib", &.{ "rev-parse", "refs/bay/gated/v0.1.1" }));
+    try std.testing.expectEqualStrings(commit, try w.gateRecord("lib", "v0.1.1"));
+    try std.testing.expectEqualStrings("", try w.out("lib", &.{ "for-each-ref", "refs/bay" }));
     try std.testing.expectEqualStrings("v0.1.0", try w.out("lib", &.{ "tag", "--list" }));
     try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.1"));
-    // A run stopped before its gate ended has no record: the next run gates the commit again.
-    try w.git("lib", &.{ "update-ref", "-d", "refs/bay/gated/v0.1.1" });
+    // A run stopped before its gate ended has no record: the next run gates the commit again,
+    // and a ref made by hand where bay once kept the record is no gate passed.
+    try w.f.tmp.dir.deleteTree(w.f.io, "data/bay/gated");
+    try w.git("lib", &.{ "update-ref", "refs/bay/gated/v0.1.1", commit });
     try w.f.tmp.dir.deleteFile(w.f.io, hook);
     const resumed = try w.releaseIn("lib", &.{});
     try std.testing.expect(succeeded(resumed));
     try std.testing.expect(contains(resumed.stderr, "v0.1.1 is under way"));
     try std.testing.expectEqual(2, try w.gated(commit));
+    try std.testing.expectEqualStrings("", try w.gateRecord("lib", "v0.1.1"));
     try std.testing.expectEqualStrings(commit, try w.remoteAt("lib", "refs/tags/v0.1.1"));
     // With the record, the next run pushes the gated commit without gating it again.
     try w.change("lib", "### Fixed\n\n- Another fix.\n");
@@ -446,7 +476,7 @@ test "a release stopped after its commit or its push is finished, and never tags
     try std.testing.expect(succeeded(held));
     try std.testing.expect(contains(held.stderr, "v0.1.3 at"));
     const third = try w.head("lib");
-    try std.testing.expectEqualStrings(third, try w.out("lib", &.{ "rev-parse", "refs/bay/gated/v0.1.3" }));
+    try std.testing.expectEqualStrings(third, try w.gateRecord("lib", "v0.1.3"));
     try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.3"));
     try std.testing.expect(succeeded(try w.releaseIn("lib", &.{})));
     try std.testing.expectEqual(1, try w.gated(third));

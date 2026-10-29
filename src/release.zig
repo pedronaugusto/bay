@@ -8,9 +8,9 @@
 //!
 //! git is the record of a release under way: a red gate puts the branch back
 //! where it was; a run that stops leaves its release commit at HEAD, which the
-//! next run gates and pushes; `refs/bay/gated/vX.Y.Z` names a commit gated
-//! green whose push did not go, so the next run pushes it without gating it
-//! again. No tag is ever made on a commit no gate passed.
+//! next run gates and pushes; a commit gated green whose push did not go is
+//! recorded in bay's data directory on this machine, so the next run pushes it
+//! without gating it again. No tag is ever made on a commit no gate passed.
 const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
@@ -22,6 +22,9 @@ const workspace = @import("workspace.zig");
 const each = @import("each.zig");
 const tidying = @import("tidy.zig");
 const toolchain = @import("toolchain.zig");
+const dirs = @import("dirs.zig");
+const git_source = @import("git.zig");
+const advertised = @import("remote.zig");
 
 pub const Context = struct {
     io: Io,
@@ -159,9 +162,40 @@ fn tagName(c: Context, version: std.SemanticVersion) ![]const u8 {
     return c.a.print("v{f}", .{version});
 }
 
-/// The commit `bay release` gated green for `tag` and has not pushed yet.
-fn gatedRef(c: Context, tag: []const u8) ![]const u8 {
-    return c.a.print("refs/bay/gated/{s}", .{tag});
+/// Where this machine records the commit `bay release` gated green for `tag` and has not
+/// pushed: `<data>/gated/<repository>/<tag>`, the repository named by the SHA-256 of its git
+/// directory's path. Only bay writes it, and nothing carries it: a ref would travel with a
+/// fetch, a bundle or a mirror clone, and a record made anywhere but in this machine's gate
+/// would push a commit no gate here passed.
+fn gatedRecord(c: Context, tag: []const u8) ![]const u8 {
+    return gatedPath(c.a, try dirs.data(c.io, c.a, c.environ), try must(c, &.{ "rev-parse", "--absolute-git-dir" }), tag);
+}
+
+fn gatedPath(a: std.mem.Allocator, data: []const u8, git_dir: []const u8, tag: []const u8) ![]const u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(git_dir, &digest, .{});
+    return std.fs.path.join(a, &.{ data, "gated", &std.fmt.bytesToHex(digest, .lower), tag });
+}
+
+/// The commit recorded at `path`, or null when there is none.
+fn recorded(io: Io, a: std.mem.Allocator, path: []const u8) !?[]const u8 {
+    const text = aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(256)) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    return std.mem.trim(u8, text, " \r\n");
+}
+
+fn record(io: Io, path: []const u8, commit: []const u8) !void {
+    try Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = commit });
+}
+
+fn forget(io: Io, path: []const u8) !void {
+    Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 }
 
 fn read(c: Context, name: []const u8) !?[:0]const u8 {
@@ -272,6 +306,7 @@ fn releaseOne(c: Context, options: Options) !Outcome {
         if (try localTag(c, tag)) |sha| try say.fail(c.io, "{s} is tagged here already, at {s}: a tag never moves; build.zig.zon's .version is behind the releases", .{ tag, sha[0..12] });
         break :plan .{ .version = version, .tag = tag, .start = head, .cut = .{ .from = current, .section = unreleased, .text = log, .manifest = manifest_text } };
     };
+    try pinsAreReleases(c, parsed);
     const gate_machines = try machines.load(c.io, c.a, c.environ);
     if (options.dry_run) {
         try dryRun(c, up, plan, gate_machines, options);
@@ -300,22 +335,70 @@ fn releaseOne(c: Context, options: Options) !Outcome {
         try say.note(c.io, "{s} {f} -> {f}: committed as Release {s}", .{ parsed.name, cut.from, plan.version, plan.tag });
     }
     const commit = try must(c, &.{ "rev-parse", "HEAD" });
-    const gated = try gatedRef(c, plan.tag);
-    const recorded = (try git(c, &.{ "rev-parse", "-q", "--verify", gated })).out;
-    if (std.mem.eql(u8, recorded, commit)) {
+    const gated = try gatedRecord(c, plan.tag);
+    if (std.mem.eql(u8, try recorded(c.io, c.a, gated) orelse "", commit)) {
         try say.note(c.io, "{s} at {s} was gated green; pushing it", .{ plan.tag, commit[0..12] });
     } else if (try gateEverywhere(c, gate_machines)) |red| {
         _ = try must(c, &.{ "reset", "--quiet", "--keep", plan.start });
         try say.fail(c.io, "the gate is red {s}: nothing was tagged or pushed, and {s} is back at {s}", .{ red, up.branch, plan.start[0..12] });
-    } else _ = try must(c, &.{ "update-ref", gated, commit });
+    } else try record(c.io, gated, commit);
     if (options.no_push) {
         try say.note(c.io, "{s} at {s} is gated green and held here: bay release pushes it, with no gate again", .{ plan.tag, commit[0..12] });
         return .{ .held = plan.version };
     }
     try push(c, up, commit, plan.tag);
-    _ = try must(c, &.{ "update-ref", "-d", gated });
+    try forget(c.io, gated);
     try say.note(c.io, "released {s} {s} at {s}: {s} and the tag {s} on {s}", .{ parsed.name, plan.tag, commit[0..12], up.onto, plan.tag, up.remote });
     return .{ .released = plan.version };
+}
+
+/// Every git pin of the manifest names a release: its `?ref=` is a version tag on its
+/// repository, at the commit the pin holds. A release pinned on a branch or a bare commit
+/// builds from code no tag fixes, and its consumers would take it.
+fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
+    var wrong: std.ArrayList([]const u8) = .empty;
+    for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev, parsed.overrides }) |list| for (list) |dependency| switch (dependency.source) {
+        .path => {},
+        .remote => |at| {
+            if (!std.mem.startsWith(u8, at.url, "git+")) continue;
+            const pin = releasePin(at.url) orelse {
+                const p = git_source.parts(at.url);
+                try wrong.append(c.a, try c.a.print("{s} (at {s})", .{ dependency.name, p.ref orelse p.fragment orelse "its default branch" }));
+                continue;
+            };
+            const tagged = for (try advertised.tags(c.io, c.a, at.url)) |tag| {
+                if (std.mem.eql(u8, tag.name, pin.ref)) break tag.commit;
+            } else null;
+            if (tagged == null or !std.mem.eql(u8, tagged.?, pin.commit))
+                try wrong.append(c.a, try c.a.print("{s} ({s} is no tag at {s} on its repository)", .{ dependency.name, pin.ref, pin.commit[0..@min(12, pin.commit.len)] }));
+        },
+    };
+    if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned at no release: a release builds from what tags fix, so pin each at one (bay update) and release again", .{try listed(c.a, wrong.items)});
+}
+
+/// A git pin as a release names one: `?ref=` a version (`v1.2.3`, or without the `v`) and
+/// the commit after `#`. Null for a branch, a bare commit or no ref.
+fn releasePin(url: []const u8) ?struct { ref: []const u8, commit: []const u8 } {
+    const p = git_source.parts(url);
+    const ref = p.ref orelse return null;
+    const commit = p.fragment orelse return null;
+    _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, ref, "v")) ref[1..] else ref) catch return null;
+    return .{ .ref = ref, .commit = commit };
+}
+
+test "a release pin names a version tag and its commit; a branch, a bare commit or no ref does not" {
+    const commit = "5d2a92141f0298d76dc5fd602526d55a62b4e11a";
+    const pin = releasePin("git+https://github.com/o/r?ref=v1.2.0#" ++ commit).?;
+    try std.testing.expectEqualStrings("v1.2.0", pin.ref);
+    try std.testing.expectEqualStrings(commit, pin.commit);
+    try std.testing.expect(releasePin("git+https://github.com/o/r?ref=0.3.0-rc.1#" ++ commit) != null);
+    for ([_][]const u8{
+        "git+https://github.com/o/r?ref=aegis-0.2#" ++ commit,
+        "git+https://github.com/o/r?ref=main#" ++ commit,
+        "git+https://github.com/o/r#" ++ commit,
+        "git+https://github.com/o/r?ref=v1.2.0",
+        "git+https://github.com/o/r",
+    }) |url| try std.testing.expect(releasePin(url) == null);
 }
 
 /// Gates the commit at HEAD here and on every machine at once, each gate's output
@@ -661,4 +744,25 @@ test "re-pins are listed as a sentence" {
     const a = arena.allocator();
     try std.testing.expectEqualStrings("x 1.0.0", try listed(a, &.{"x 1.0.0"}));
     try std.testing.expectEqualStrings("x 1.0.0, y 0.2.0 and z 0.3.1", try listed(a, &.{ "x 1.0.0", "y 0.2.0", "z 0.3.1" }));
+}
+
+test "a gated commit is recorded per repository and tag in bay's data directory, and forgotten once pushed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    const here = try gatedPath(a, data, "/work/one/.git", "v0.2.0");
+    const there = try gatedPath(a, data, "/work/two/.git", "v0.2.0");
+    try std.testing.expect(!std.mem.eql(u8, here, there));
+    try std.testing.expect(std.mem.startsWith(u8, here, data));
+    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, here));
+    try record(std.testing.io, here, "0123456789abcdef0123456789abcdef01234567");
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", (try recorded(std.testing.io, a, here)).?);
+    // Another repository's gate says nothing of this one.
+    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, there));
+    try forget(std.testing.io, here);
+    try forget(std.testing.io, here);
+    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, here));
 }
