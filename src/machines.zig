@@ -183,7 +183,7 @@ fn relay(io: Io, file: Io.File, output: *Output) void {
     var buffer: [16 << 10]u8 = undefined;
     var reader = file.readerStreaming(io, &buffer);
     while (true) {
-        const text = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+        const text = (reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             // A line longer than the buffer goes in parts.
             error.StreamTooLong => {
                 const part = reader.interface.buffered();
@@ -192,7 +192,7 @@ fn relay(io: Io, file: Io.File, output: *Output) void {
                 continue;
             },
             error.ReadFailed => return,
-        } orelse return;
+        }) orelse return;
         line(io, output, std.mem.trimEnd(u8, text, "\r")) catch return;
     }
 }

@@ -137,6 +137,7 @@ fn write(io: Io, a: std.mem.Allocator, listing: []const u8, out: Io.Dir, reader:
             try links.append(a, .{ .path = path, .target = target });
             continue;
         }
+        // aegis: no-danger(A009): Entry.parse's contained() refused a path with an empty, `.`, `..` or `.git` part, a backslash or a colon
         if (std.fs.path.dirname(path)) |parent| try out.createDirPath(io, parent);
         try out.writeFile(io, .{ .sub_path = path, .data = data, .flags = .{ .permissions = if (entry.kind == .executable) .executable_file else .default_file } });
     }
@@ -146,14 +147,17 @@ fn write(io: Io, a: std.mem.Allocator, listing: []const u8, out: Io.Dir, reader:
             // A folder on the way that is an earlier link (`A` where the file system
             // takes `a` for it) would carry this one outside the tree.
             if (try throughLink(io, out, parent)) try say.fail(io, "the commit names a link inside another link, which would leave its tree: {s}", .{link.path});
+            // aegis: no-danger(A009): Entry.parse's contained() checked the link's path, and throughLink above the folders on the way
             try out.createDirPath(io, parent);
         }
         // Windows makes a link to a directory apart from one to a file: what it reaches in the
         // tree says which, and a link that leaves the tree is kept as a link to a file.
+        // aegis: no-danger(A009): LinkTarget.parse gives a path it reaches only when contained() passes it
         const to_directory = if (link.target.within) |reached| if (out.statFile(io, reached, .{})) |stat| stat.kind == .directory else |err| switch (err) {
             error.FileNotFound => false, // a link to nothing in the tree is kept as a link to a file
             else => |e| return e,
         } else false;
+        // aegis: no-danger(A009): Entry.parse's contained() checked the link's path; its target is text the link holds, which nothing here opens
         try out.symLink(io, link.target.text, link.path, .{ .is_directory = to_directory });
     }
 }
@@ -350,6 +354,7 @@ fn throughLink(io: Io, dir: Io.Dir, path: []const u8) !bool {
     var end: usize = 0;
     while (end < path.len) {
         end = std.mem.findScalarPos(u8, path, end + 1, '/') orelse path.len;
+        // aegis: no-danger(A009): a folder of a link's path, which Entry.parse's contained() checked
         const stat = dir.statFile(io, path[0..end], .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => return false, // what is not there yet is made as a folder
             else => |e| return e,
