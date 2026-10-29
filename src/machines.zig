@@ -98,7 +98,7 @@ pub const Request = struct {
 /// `gate` step; whether it is green. Its lines go to `output`.
 pub fn local(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8, output: *Output) !bool {
     // One gate in a directory at a time: a second would build over the first's files.
-    const held = try lock.hold(io, a, environ, .gate, package);
+    var held = try lock.hold(io, a, environ, .gate, package);
     defer held.release(io);
     const bay = environ.get("BAY").?; // safe: main sets BAY before any command
     // This machine releases, so it runs the jobs that say the same on any machine; a
@@ -235,7 +235,7 @@ pub fn receive(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ
     };
     // One gate in this copy at a time: a second release's checkout would change the files the
     // first's build reads (two trains once gated one copy at once).
-    const held = try lock.hold(io, a, environ, .gate, directory);
+    var held = try lock.hold(io, a, environ, .gate, directory);
     defer held.release(io);
     // Beside the copy, and replaced by the next release's.
     const bundle = try a.print("{s}.bundle", .{std.mem.trimEnd(u8, directory, "/\\")});

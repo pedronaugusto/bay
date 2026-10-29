@@ -623,10 +623,14 @@ test "a workspace's train releases its members in order, each pinned at the rele
         "2. b 0.1.0 -> 0.1.1 (fix): pins a 0.1.1\n",
         "3. c 0.1.0 -> 0.1.1 (fix): pins b 0.1.1\n",
         "then a develops with c 0.1.1, gated and pushed with no tag\n",
+        // Each car's steps, after its tidy run as a dry run.
+        "   then: the re-pin committed, if a pin moves; v0.1.1 written from its section and committed; gated here; the branch and the tag pushed\n",
     }) |line| if (!contains(plan.stdout, line)) {
         std.debug.print("expected the line:\n{s}in the plan:\n{s}\n", .{ line, plan.stdout });
         return error.TestUnexpectedResult;
     };
+    // Each member's tidy, run as the train runs it, says the generate step that would follow.
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, plan.stderr, "then the package build's `generate` step would run"));
     for ([_][]const u8{ "a", "b", "c" }, heads) |dir, head| {
         try std.testing.expectEqualStrings(head, try w.head(dir));
         try std.testing.expectEqualStrings("", try w.out(dir, &.{ "status", "--porcelain" }));

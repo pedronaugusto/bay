@@ -76,10 +76,17 @@ test "a root pinned below the selection is refused until tidy raises it, and --l
     try std.testing.expect(std.mem.find(u8, below.stderr, "bay tidy writes it") != null);
     const locked = try f.bay("app", &.{ "--locked", "tidy" });
     try std.testing.expect(refused(locked));
+    // A dry run says the move and the generate step, and writes nothing.
+    const planned = try f.bay("app", &.{ "tidy", "--dry-run" });
+    try std.testing.expect(succeeded(planned));
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "c would be raised to") != null);
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "no build has a `generate` step") != null);
+    try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20)), "c-0.1.1-") == null);
     const tidied = try f.bay("app", &.{"tidy"});
     try std.testing.expect(succeeded(tidied));
     const text = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
     try std.testing.expect(std.mem.find(u8, text, "c-0.1.1-") != null);
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "tidy", "--dry-run" })).stderr, "no pin would move") != null);
     try std.testing.expect(succeeded(try f.bay("app", &.{ "build", "run" })));
     try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
 }

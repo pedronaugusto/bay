@@ -39,7 +39,7 @@ pub const Cli = struct {
         remove: Remove,
         update: Names,
         upgrade: Names,
-        tidy,
+        tidy: Tidy,
         tree: Tree,
         outdated,
         licenses: Developed,
@@ -114,6 +114,16 @@ const Add = struct {
             .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
             .name = .{ .help = "The name to pin the one source given under" },
             .sources = .{ .positional = true, .value_name = "URL-OR-DIRECTORY", .hint = .directory, .help = "A repository's URL (pinned at its newest release), a git URL with a ref, an archive URL, or a directory" },
+        },
+    };
+};
+
+/// `bay tidy`'s options.
+const Tidy = struct {
+    dry_run: bool = false,
+    pub const spec: ensign.Spec(@This()) = .{
+        .options = .{
+            .dry_run = .{ .help = "Print what tidy would pin and which build's generate step it would run; change and run nothing" },
         },
     };
 };
@@ -254,7 +264,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         const writes = deferTidy(&member);
         const code = try each.run(io, a, environ, jobs, try ensign.render(Cli, a, member));
         if (!writes or code != 0) return code;
-        member.command = .tidy;
+        member.command = .{ .tidy = .{} };
         return each.run(io, a, environ, jobs, try ensign.render(Cli, a, member));
     }
     switch (command) {
@@ -282,7 +292,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         .update => |args| afterEdit(env, args.tidy, try update(env, args.names)),
         .upgrade => |args| afterEdit(env, args.tidy, try upgrade(env, args.names)),
         .list => list(env),
-        .tidy => tidy(env),
+        .tidy => |args| if (args.dry_run) planTidy(env) else tidy(env),
         .locate => |args| locate(env, args.dev),
         .tree => |args| treeCommand(env, args),
         .outdated => graphCommand(env, .outdated),
@@ -567,17 +577,49 @@ fn regenerate(env: Env) !void {
     if (env.locked) return;
     const parsed = try manifest.parse(env.a, try env.readManifest());
     const resolution = try buildable(env, parsed);
+    switch (try generator(env, parsed, resolution)) {
+        .none => {},
+        .unconfigured => |build| try say.note(env.io, "the {t} build does not configure with these pins, so what it makes from them (its `generate` step) is not made again: bay tidy makes it once it configures", .{build}),
+        .step => |where| if (try built(env, parsed, resolution, where, &.{"generate"}, &.{}) != 0)
+            try say.fail(env.io, "the pins are written, but `generate` failed: what the build makes from them is not", .{}),
+    }
+}
+
+/// The build whose `generate` step makes what follows from the pins: the package's own, else
+/// its development build's; none when neither has one, and the first that does not configure
+/// when one does not.
+const Generator = union(enum) { none, unconfigured: Where, step: Where };
+
+fn generator(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution) !Generator {
     const builds: []const Where = if (parsed.dev.len == 0) &.{.package} else &.{ .package, .development };
-    const where = for (builds) |build| {
+    for (builds) |build| {
         const listed = try stepsOf(env, parsed, resolution, build);
-        if (!listed.configured) {
-            try say.note(env.io, "the {s} build does not configure with these pins, so what it makes from them (its `generate` step) is not made again: bay tidy makes it once it configures", .{if (build == .development) "development" else "package"});
-            return;
-        }
-        if (steps.listed(listed.stdout, "generate")) break build;
-    } else return;
-    if (try built(env, parsed, resolution, where, &.{"generate"}, &.{}) != 0)
-        try say.fail(env.io, "the pins are written, but `generate` failed: what the build makes from them is not", .{});
+        if (!listed.configured) return .{ .unconfigured = build };
+        if (steps.listed(listed.stdout, "generate")) return .{ .step = build };
+    }
+    return .none;
+}
+
+/// `bay tidy --dry-run`: what tidy would pin, and the `generate` step it would then run, read
+/// from the builds with the pins it would write; nothing is written or run. A train's dry run
+/// runs it in each member, so what each car does shows before the first one moves.
+fn planTidy(env: Env) !u8 {
+    const tidied = try tidying.tidied(env.input(), try env.readManifest());
+    for (tidied.moves) |move| try say.note(env.io, "{s} would be {s} {s}", .{ move.name, switch (move.how) {
+        .released => "pinned at its release",
+        .raised => "raised to",
+    }, move.to });
+    for (tidied.nested) |file| for (file.moves) |move|
+        try say.note(env.io, "{f}: {s} would be pinned as build.zig.zon pins it, {s}", .{ manifest.portable(file.path), move.name, move.to });
+    if (tidied.moves.len == 0 and tidied.nested.len == 0) try say.note(env.io, "no pin would move", .{});
+    // The builds as they would configure with the pins tidy would write.
+    const parsed = try manifest.parse(env.a, tidied.text);
+    switch (try generator(env, parsed, try buildable(env, parsed))) {
+        .none => try say.note(env.io, "no build has a `generate` step: nothing would be made again", .{}),
+        .unconfigured => |build| try say.note(env.io, "the {t} build does not configure, so its `generate` step would not run", .{build}),
+        .step => |where| try say.note(env.io, "then the {t} build's `generate` step would run", .{where}),
+    }
+    return 0;
 }
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.

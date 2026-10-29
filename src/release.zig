@@ -732,7 +732,7 @@ pub fn train(c: Context, options: Options) !u8 {
     const cars = try each.train(c.io, c.a, directories);
     if (options.dry_run) return trainPlan(c, cars);
     // One train in a workspace at a time: a second would gate the same members at once.
-    const held = try lock.hold(c.io, c.a, c.environ, .train, (try workspace.fileOf(c.io, c.a, c.package)).?); // safe: `all` found it above
+    var held = try lock.hold(c.io, c.a, c.environ, .train, (try workspace.fileOf(c.io, c.a, c.package)).?); // safe: `all` found it above
     defer held.release(c.io);
     const done = try c.a.alloc(Done, cars.len);
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
@@ -836,6 +836,10 @@ fn bayIn(c: Context, args: []const []const u8) !void {
 fn trainPlan(c: Context, cars: []const each.Car) !u8 {
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
     @memset(versions, null);
+    // Where each car is gated, as `ride` gates it.
+    var gated: std.Io.Writer.Allocating = .init(c.a);
+    try gated.writer.writeAll("here");
+    for (try machines.load(c.io, c.a, c.environ)) |machine| try gated.writer.print(", on {s}", .{machine.name});
     const developed_with = try c.a.alloc([]const manifest.Dependency, cars.len);
     for (cars, versions, developed_with, 1..) |car, *version, *dev, number| {
         var member = c;
@@ -872,6 +876,17 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         } else try say.out(c.io, ": nothing to release", .{});
         if (developed.items.len != 0) try say.out(c.io, "; develops with {s}{s}", .{ try listed(c.a, developed.items), if (change == .none) ", gated and pushed with no tag" else "" });
         try say.out(c.io, "\n", .{});
+        // What the train runs in it, run as a dry run (its tidy, and the `generate` step after),
+        // then the steps it takes, so a clash shows before the first car moves.
+        bayIn(member, &.{ "tidy", "--dry-run" }) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name}),
+            else => return err,
+        };
+        if (version.*) |v| {
+            try say.out(c.io, "   then: the re-pin committed, if a pin moves; v{f} written from its section and committed; gated {s}; the branch and the tag pushed\n", .{ v, gated.written() });
+        } else if (developed.items.len != 0) {
+            try say.out(c.io, "   then: the re-pin committed; gated {s}; the branch pushed, with no tag\n", .{gated.written()});
+        } else try say.out(c.io, "   then: nothing\n", .{});
     }
     // The closing pass: a development pin left out of the order, on a member after it.
     for (cars, developed_with) |car, dev| for (cars, versions) |later, version| {

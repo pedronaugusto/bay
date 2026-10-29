@@ -14,12 +14,16 @@ pub const Kind = enum { train, gate };
 
 /// A held lock, let go by `release` or by the process ending.
 pub const Held = struct {
-    file: Io.File,
+    file: aegis.own.OwnedIo(Io.File, closeFile),
 
-    pub fn release(held: Held, io: Io) void {
-        held.file.close(io);
+    pub fn release(held: *Held, io: Io) void {
+        held.file.deinit(io);
     }
 };
+
+fn closeFile(file: *Io.File, io: Io) void {
+    file.close(io);
+}
 
 /// The lock of `kind` on `path`, as an absolute path names it, or a refusal naming what holds it.
 pub fn hold(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, kind: Kind, relative: []const u8) !Held {
@@ -40,11 +44,14 @@ pub fn hold(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
     };
     errdefer file.close(io);
     // What holds it, for the one refused.
-    const seconds: u64 = @intCast(@max(0, @divFloor(Io.Clock.real.now(io).toNanoseconds(), std.time.ns_per_s)));
+    const now = try aegis.units.Instant(.real, .second, i64).fromTimestamp(Io.Clock.real.now(io), .down);
+    // A clock set before 1970 reads as midnight.
+    const seconds: u64 = @intCast(@max(0, now.raw())); // safe: clamped to zero and up
     const day = (std.time.epoch.EpochSeconds{ .secs = seconds }).getDaySeconds();
     try file.setLength(io, 0);
     try file.writePositionalAll(io, try a.print("since {d:0>2}:{d:0>2} UTC", .{ day.getHoursIntoDay(), day.getMinutesIntoHour() }), 0);
-    return .{ .file = file };
+    // Owned from here: its owner binds it where the caller keeps it.
+    return .{ .file = .init(file) };
 }
 
 /// The lock file's name: its kind and a digest of the path, so any path makes one name.
@@ -66,11 +73,14 @@ test "a second hold on one path is refused while the first holds it, and taken o
     try environ.put("XDG_DATA_HOME", home);
     try environ.put("HOME", home);
     try environ.put("LOCALAPPDATA", home);
-    const first = try hold(io, a, &environ, .train, "/w/ring");
+    var first = try hold(io, a, &environ, .train, "/w/ring");
     // Another path, or another kind on this one, is its own lock.
-    (try hold(io, a, &environ, .train, "/w/other")).release(io);
-    (try hold(io, a, &environ, .gate, "/w/ring")).release(io);
+    var other = try hold(io, a, &environ, .train, "/w/other");
+    other.release(io);
+    var gate = try hold(io, a, &environ, .gate, "/w/ring");
+    gate.release(io);
     try std.testing.expectError(error.Reported, hold(io, a, &environ, .train, "/w/ring"));
     first.release(io);
-    (try hold(io, a, &environ, .train, "/w/ring")).release(io);
+    var again = try hold(io, a, &environ, .train, "/w/ring");
+    again.release(io);
 }
