@@ -112,7 +112,7 @@ pub fn scratchManifest(a: std.mem.Allocator, name: []const u8, dependencies: []c
 fn fingerprint(name: []const u8, package: []const u8) u64 {
     var id = std.hash.XxHash32.hash(0, package);
     if (id == 0 or id == std.math.maxInt(u32)) id = 1;
-    return @as(u64, std.hash.Crc32.hash(name)) << 32 | id;
+    return (@as(u64, std.hash.Crc32.hash(name)) << 32) | id;
 }
 
 /// Writes the root under `package_dir`, touching a file only when its text changes,
