@@ -27,18 +27,33 @@ fn closeFile(file: *Io.File, io: Io) void {
 
 /// The lock of `kind` on `path`, as an absolute path names it, or a refusal naming what holds it.
 pub fn hold(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, kind: Kind, relative: []const u8) !Held {
+    return switch (try take(io, a, environ, kind, relative)) {
+        .held => |held| held,
+        .busy => |busy| try say.fail(io, "a {t} holds {s} already{s}: one runs there at a time, so wait for it to end", .{ kind, busy.path, if (busy.holder.len == 0) "" else try a.print(" ({s})", .{busy.holder}) }),
+    };
+}
+
+/// A lock taken, or the path another holds and what it says of itself.
+const Taken = union(enum) {
+    held: Held,
+    busy: struct { path: []const u8, holder: []const u8 },
+};
+
+fn take(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, kind: Kind, relative: []const u8) !Taken {
     const path = try std.fs.path.resolveAlloc(a, &.{ try Io.Dir.cwd().realPathFileAlloc(io, ".", a), relative });
     const locks = try std.fs.path.join(a, &.{ try dirs.data(io, a, environ), "locks" });
     try Io.Dir.cwd().createDirPath(io, locks);
     const file_path = try std.fs.path.join(a, &.{ locks, try name(a, kind, path) });
     const file = Io.Dir.cwd().createFile(io, file_path, .{ .lock = .exclusive, .lock_nonblocking = true, .truncate = false, .read = true }) catch |err| switch (err) {
-        error.WouldBlock => {
-            const holder = aegis.own.readFile(io, Io.Dir.cwd(), file_path, a, .fromRaw(4096)) catch |read| switch (read) {
-                error.Canceled => |e| return e,
-                // Its holder is still writing what it is; the refusal stands without it.
-                else => "",
-            };
-            try say.fail(io, "a {t} holds {s} already{s}: one runs there at a time, so wait for it to end", .{ kind, path, if (holder.len == 0) "" else try a.print(" ({s})", .{holder}) });
+        error.WouldBlock => return .{
+            .busy = .{
+                .path = path,
+                .holder = aegis.own.readFile(io, Io.Dir.cwd(), file_path, a, .fromRaw(4096)) catch |read| switch (read) {
+                    error.Canceled => |e| return e,
+                    // Its holder is still writing what it is; the refusal stands without it.
+                    else => "",
+                },
+            },
         },
         else => |e| return e,
     };
@@ -51,7 +66,7 @@ pub fn hold(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
     try file.setLength(io, 0);
     try file.writePositionalAll(io, try a.print("since {d:0>2}:{d:0>2} UTC", .{ day.getHoursIntoDay(), day.getMinutesIntoHour() }), 0);
     // Owned from here: its owner binds it where the caller keeps it.
-    return .{ .file = .init(file) };
+    return .{ .held = .{ .file = .init(file) } };
 }
 
 /// The lock file's name: its kind and a digest of the path, so any path makes one name.
@@ -73,14 +88,16 @@ test "a second hold on one path is refused while the first holds it, and taken o
     try environ.put("XDG_DATA_HOME", home);
     try environ.put("HOME", home);
     try environ.put("LOCALAPPDATA", home);
-    var first = try hold(io, a, &environ, .train, "/w/ring");
+    var first = (try take(io, a, &environ, .train, "/w/ring")).held;
     // Another path, or another kind on this one, is its own lock.
-    var other = try hold(io, a, &environ, .train, "/w/other");
+    var other = (try take(io, a, &environ, .train, "/w/other")).held;
     other.release(io);
-    var gate = try hold(io, a, &environ, .gate, "/w/ring");
+    var gate = (try take(io, a, &environ, .gate, "/w/ring")).held;
     gate.release(io);
-    try std.testing.expectError(error.Reported, hold(io, a, &environ, .train, "/w/ring"));
+    const busy = (try take(io, a, &environ, .train, "/w/ring")).busy;
+    try std.testing.expectEqualStrings("ring", std.fs.path.basename(busy.path));
+    try std.testing.expect(std.mem.startsWith(u8, busy.holder, "since ") and std.mem.endsWith(u8, busy.holder, " UTC"));
     first.release(io);
-    var again = try hold(io, a, &environ, .train, "/w/ring");
+    var again = (try take(io, a, &environ, .train, "/w/ring")).held;
     again.release(io);
 }
