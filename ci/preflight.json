@@ -6,6 +6,7 @@
       {"id": "A003", "level": "gate"},
       {"id": "A004", "level": "gate"},
       {"id": "A005", "level": "gate"}
-    ]
+    ],
+    "escapes": {"no-danger": {"A009": 7}}
   }
 }
