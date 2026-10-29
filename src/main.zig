@@ -1058,5 +1058,6 @@ test {
     _ = @import("steps.zig");
     _ = store;
     _ = toolchain;
+    _ = @import("tree.zig");
     _ = workspace;
 }

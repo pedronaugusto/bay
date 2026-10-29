@@ -9,6 +9,7 @@ const manifest = @import("manifest.zig");
 const select = @import("select.zig");
 const say = @import("say.zig");
 const git = @import("git.zig");
+const tree = @import("tree.zig");
 const scratchManifest = @import("root.zig").scratchManifest;
 
 /// Where bay unpacks an archived package to read it, under the package.
@@ -155,7 +156,7 @@ pub const Store = struct {
         if (diagnostics.errors.items.len != 0) try say.fail(io, "{s} did not unpack: {d} entries failed", .{ archive_path, diagnostics.errors.items.len });
         // An archive holding one directory holds the package in it.
         const root = if (diagnostics.root_dir.len != 0) try std.fs.path.join(store.a, &.{ partial, diagnostics.root_dir }) else partial;
-        try markExecutables(io, store.a, root);
+        try tree.markExecutables(io, store.a, root);
         try Io.Dir.cwd().rename(root, Io.Dir.cwd(), destination, io);
         if (root.len != partial.len) try Io.Dir.cwd().deleteTree(io, partial);
         return destination;
@@ -247,41 +248,4 @@ pub fn globalCache(io: Io, a: std.mem.Allocator, zig: []const u8) ![]const u8 {
     const env = std.zon.parse.fromSlice(Env, .{ .gpa = a, .arena = a, .source = try a.dupeSentinel(u8, result.stdout, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
         try say.fail(io, "could not read {s} env", .{zig});
     return env.global_cache_dir;
-}
-
-/// Gives each file in `path` that starts as a program does (`#!`, ELF, Mach-O)
-/// the executable bit, as Zig 0.17 does when it unpacks a package: an archive's
-/// own modes are ignored by both, so what bay copies from here is what Zig unpacks.
-fn markExecutables(io: Io, a: std.mem.Allocator, path: []const u8) !void {
-    if (!Io.File.Permissions.has_executable_bit) return;
-    var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
-    defer dir.close(io);
-    var walker = try dir.walk(a);
-    defer walker.deinit();
-    while (try walker.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        const file = try dir.openFile(io, entry.path, .{});
-        defer file.close(io);
-        var header: [4]u8 = undefined;
-        const length = try file.readPositional(io, &.{&header}, 0);
-        if (startsAsProgram(header[0..length])) try file.setPermissions(io, .executable_file);
-    }
-}
-
-fn startsAsProgram(header: []const u8) bool {
-    if (std.mem.startsWith(u8, header, "#!")) return true;
-    if (std.mem.startsWith(u8, header, std.elf.MAGIC)) return true;
-    if (header.len < 4) return false;
-    const magic = std.mem.readInt(u32, header[0..4], @import("builtin").cpu.arch.endian());
-    return switch (magic) {
-        std.macho.MH_MAGIC, std.macho.MH_MAGIC_64, std.macho.FAT_MAGIC, std.macho.FAT_MAGIC_64, std.macho.MH_CIGAM, std.macho.MH_CIGAM_64, std.macho.FAT_CIGAM, std.macho.FAT_CIGAM_64 => true,
-        else => false,
-    };
-}
-
-test "a file is a program by its first bytes, as Zig takes it" {
-    try std.testing.expect(startsAsProgram("#!/bin/sh"));
-    try std.testing.expect(startsAsProgram("\x7fELF"));
-    try std.testing.expect(!startsAsProgram("pub "));
-    try std.testing.expect(!startsAsProgram("#"));
 }
