@@ -360,7 +360,15 @@ fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
     for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev, parsed.overrides }) |list| for (list) |dependency| switch (dependency.source) {
         .path => {},
         .remote => |at| {
-            if (!std.mem.startsWith(u8, at.url, "git+")) continue;
+            if (!std.mem.startsWith(u8, at.url, "git+")) {
+                // A forge's archive of one revision is that revision of its repository: a
+                // release only at a version tag or the commit one names. Any other URL names no
+                // repository bay can read; its hash fixes the bytes its host published.
+                const archive = try archived(c.a, at.url) orelse continue;
+                if (!isRelease(try advertised.tags(c.io, c.a, try c.a.print("git+{s}", .{archive.repository})), archive.revision))
+                    try wrong.append(c.a, try c.a.print("{s} (an archive of {s}, no version tag of its repository)", .{ dependency.name, archive.revision }));
+                continue;
+            }
             const pin = releasePin(at.url) orelse {
                 const p = git_source.parts(at.url);
                 try wrong.append(c.a, try c.a.print("{s} (at {s})", .{ dependency.name, p.ref orelse p.fragment orelse "its default branch" }));
@@ -384,6 +392,86 @@ fn releasePin(url: []const u8) ?struct { ref: []const u8, commit: []const u8 } {
     const commit = p.fragment orelse return null;
     _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, ref, "v")) ref[1..] else ref) catch return null;
     return .{ .ref = ref, .commit = commit };
+}
+
+/// Whether `revision` is a release of the repository whose tags are `tags`: a version tag by
+/// its name (`v1.2.3`, `refs/tags/v1.2.3`), or a commit a version tag names.
+fn isRelease(tags: []const advertised.Tag, revision: []const u8) bool {
+    const name = if (std.mem.startsWith(u8, revision, "refs/tags/")) revision["refs/tags/".len..] else revision;
+    for (tags) |tag| {
+        _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, tag.name, "v")) tag.name[1..] else tag.name) catch continue;
+        if (std.mem.eql(u8, tag.name, name)) return true;
+        if (git_source.isCommit(revision) and std.mem.eql(u8, tag.commit, revision)) return true;
+    }
+    return false;
+}
+
+/// The repository (`https://host/owner/repo`) and revision a forge's archive URL names:
+/// `/owner/repo/archive/<revision>.<ext>` (GitHub, Codeberg, Forgejo, Gitea; the revision may be
+/// `refs/tags/<tag>`), GitLab's `/owner/repo/-/archive/<revision>/<file>`, and GitHub's
+/// `codeload.github.com/owner/repo/<format>/<revision>`. Null for any other URL.
+fn archived(a: std.mem.Allocator, url: []const u8) !?struct { repository: []const u8, revision: []const u8 } {
+    const scheme = "https://";
+    if (!std.mem.startsWith(u8, url, scheme)) return null;
+    const end = std.mem.findAny(u8, url, "?#") orelse url.len;
+    const host_end = std.mem.findScalarPos(u8, url[0..end], scheme.len, '/') orelse return null;
+    const host = url[scheme.len..host_end];
+    var segments = std.mem.splitScalar(u8, url[host_end + 1 .. end], '/');
+    const owner = segments.next() orelse return null;
+    const repo = segments.next() orelse return null;
+    if (owner.len == 0 or repo.len == 0) return null;
+    const repo_end = @intFromPtr(repo.ptr) - @intFromPtr(url.ptr) + repo.len;
+    const kind = segments.next() orelse return null;
+    const rest = segments.rest();
+    if (std.mem.eql(u8, host, "codeload.github.com")) {
+        if (rest.len == 0) return null;
+        return .{ .repository = try a.print("https://github.com{s}", .{url[host_end..repo_end]}), .revision = rest };
+    }
+    if (std.mem.eql(u8, kind, "archive")) {
+        for ([_][]const u8{ ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tar", ".zip" }) |suffix| {
+            if (std.mem.endsWith(u8, rest, suffix) and rest.len > suffix.len) return .{ .repository = url[0..repo_end], .revision = rest[0 .. rest.len - suffix.len] };
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, kind, "-") and std.mem.startsWith(u8, rest, "archive/")) {
+        const revision = rest["archive/".len..];
+        const slash = std.mem.findScalarLast(u8, revision, '/') orelse return null;
+        if (slash == 0) return null;
+        return .{ .repository = url[0..repo_end], .revision = revision[0..slash] };
+    }
+    return null;
+}
+
+test "a forge's archive names its repository and revision; any other URL names none" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const commit = "5d2a92141f0298d76dc5fd602526d55a62b4e11a";
+    for ([_]struct { []const u8, []const u8, []const u8 }{
+        .{ "https://github.com/o/r/archive/" ++ commit ++ ".tar.gz", "https://github.com/o/r", commit },
+        .{ "https://github.com/o/r/archive/refs/tags/v1.2.0.tar.gz", "https://github.com/o/r", "refs/tags/v1.2.0" },
+        .{ "https://github.com/o/r/archive/v1.2.0.zip", "https://github.com/o/r", "v1.2.0" },
+        .{ "https://codeberg.org/o/r/archive/v1.2.0.tar.gz", "https://codeberg.org/o/r", "v1.2.0" },
+        .{ "https://gitlab.com/o/r/-/archive/v1.2.0/r-v1.2.0.tar.gz", "https://gitlab.com/o/r", "v1.2.0" },
+        .{ "https://codeload.github.com/o/r/tar.gz/refs/tags/v1.2.0", "https://github.com/o/r", "refs/tags/v1.2.0" },
+    }) |case| {
+        const got = (try archived(arena.allocator(), case[0])).?;
+        try std.testing.expectEqualStrings(case[1], got.repository);
+        try std.testing.expectEqualStrings(case[2], got.revision);
+    }
+    for ([_][]const u8{
+        "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/riscv64/alpine-minirootfs-3.24.2-riscv64.tar.gz",
+        "https://example.org/lib-1.0.tar.gz",
+        "https://github.com/o/r/archive/.tar.gz",
+        "http://github.com/o/r/archive/v1.2.0.tar.gz",
+    }) |url| try std.testing.expect(try archived(arena.allocator(), url) == null);
+}
+
+test "a revision is a release at a version tag, by name or by the commit it names" {
+    const at = "5d2a92141f0298d76dc5fd602526d55a62b4e11a";
+    const mid = "cfcf9dceb3ab6d5e5a198a0ac0784e2108251b9f";
+    const tags = [_]advertised.Tag{ .{ .name = "v1.2.0", .commit = at }, .{ .name = "nightly", .commit = mid } };
+    for ([_][]const u8{ "v1.2.0", "refs/tags/v1.2.0", at }) |revision| try std.testing.expect(isRelease(&tags, revision));
+    for ([_][]const u8{ mid, "nightly", "main", "refs/heads/main", "v1.3.0" }) |revision| try std.testing.expect(!isRelease(&tags, revision));
 }
 
 test "a release pin names a version tag and its commit; a branch, a bare commit or no ref does not" {
