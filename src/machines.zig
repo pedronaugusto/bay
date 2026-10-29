@@ -234,7 +234,10 @@ pub fn receive(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ
     if (std.fs.path.dirname(bundle)) |parent| try Io.Dir.cwd().createDirPath(io, parent);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = bundle, .data = bytes });
     const git_dir = try std.fs.path.join(a, &.{ directory, ".git" });
-    if (Io.Dir.cwd().access(io, git_dir, .{})) |_| {} else |_| try git(io, a, environ, null, &.{ "init", "--quiet", directory });
+    if (Io.Dir.cwd().access(io, git_dir, .{})) |_| {} else |err| switch (err) {
+        error.FileNotFound => try git(io, a, environ, null, &.{ "init", "--quiet", directory }),
+        else => return err,
+    }
     try git(io, a, environ, directory, &.{ "fetch", "--quiet", "--force", "--tags", bundle, "+HEAD:refs/bay/gate" });
     try git(io, a, environ, directory, &.{ "checkout", "--quiet", "--force", "--detach", "refs/bay/gate" });
     // What an earlier gate left that git tracks not, but ignored files: its caches.

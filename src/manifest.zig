@@ -373,11 +373,11 @@ fn format(gpa: std.mem.Allocator, source: [:0]const u8) ![:0]u8 {
 /// The URL to fetch to follow a pin: a git URL's recorded `?ref=` as its
 /// fragment, or the URL as it is for an archive. Null when a git URL names
 /// only a commit.
-pub fn following(a: std.mem.Allocator, url: []const u8) ?[]const u8 {
+pub fn following(a: std.mem.Allocator, url: []const u8) !?[]const u8 {
     if (!std.mem.startsWith(u8, url, "git+")) return url;
     const without_commit = url[0 .. std.mem.findScalar(u8, url, '#') orelse url.len];
     const query = std.mem.find(u8, without_commit, "?ref=") orelse return null;
-    return a.print("{s}#{s}", .{ without_commit[0..query], without_commit[query + "?ref=".len ..] }) catch null;
+    return try a.print("{s}#{s}", .{ without_commit[0..query], without_commit[query + "?ref=".len ..] });
 }
 
 const sample =

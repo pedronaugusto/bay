@@ -353,7 +353,11 @@ fn packageHere(io: Io, a: std.mem.Allocator) !?[]const u8 {
     var path: []const u8 = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
     while (true) {
         const candidate = try std.fs.path.join(a, &.{ path, "build.zig.zon" });
-        if (Io.Dir.cwd().access(io, candidate, .{})) |_| return path else |_| {}
+        // Absent or unreadable, the search goes on up; a cancel ends it.
+        if (Io.Dir.cwd().access(io, candidate, .{})) |_| return path else |err| switch (err) {
+            error.Canceled => return err,
+            else => {},
+        }
         path = std.fs.path.dirname(path) orelse return null;
     }
 }
@@ -628,7 +632,7 @@ fn add(env: Env, args: Add) !?[:0]const u8 {
     var text = try env.readManifest();
     const kind: manifest.Kind = if (args.dev) .dev else .normal;
     for (args.sources) |where| {
-        const dependency = if (isDirectory(env, where)) try local(env, where, args.name) else try fetched(env, try addable(env, where), args.name) orelse return null;
+        const dependency = if (try isDirectory(env, where)) try local(env, where, args.name) else try fetched(env, try addable(env, where), args.name) orelse return null;
         text = try pinInto(env, pinned, text, dependency, kind, args.lazy);
     }
     return text;
@@ -666,9 +670,13 @@ fn putNoted(env: Env, text: [:0]const u8, kind: manifest.Kind, entry: manifest.D
     return manifest.put(env.a, text, kind, entry);
 }
 
-fn isDirectory(env: Env, path: []const u8) bool {
+fn isDirectory(env: Env, path: []const u8) !bool {
     if (std.mem.find(u8, path, "://") != null) return false;
-    var dir = Io.Dir.cwd().openDir(env.io, path, .{}) catch return false;
+    var dir = Io.Dir.cwd().openDir(env.io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return err,
+        // Not a directory here: a URL or a name to fetch.
+        else => return false,
+    };
     dir.close(env.io);
     return true;
 }
@@ -734,7 +742,7 @@ fn update(env: Env, names: []const []const u8) !?[:0]const u8 {
                 .remote => |remote| remote,
                 .path => continue,
             };
-            const url = manifest.following(env.a, remote.url) orelse {
+            const url = try manifest.following(env.a, remote.url) orelse {
                 try say.note(env.io, "{s} is pinned to an exact commit; bay add it with a branch or tag to follow one", .{dependency.name});
                 continue;
             };
@@ -844,8 +852,9 @@ const dev_function =
 /// each only when it is missing. Inside a package but not at its root, nothing.
 fn initCommand(io: Io, a: std.mem.Allocator, zig: []const u8) !u8 {
     const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
-    if (Io.Dir.cwd().access(io, "build.zig.zon", .{})) |_| {} else |_| {
-        if (enclosing(io, a, here)) |package| try say.fail(io, "this is inside the package at {s}: run bay init there, or bay new <name> for a package of its own", .{package});
+    if (Io.Dir.cwd().access(io, "build.zig.zon", .{})) |_| {} else |err| switch (err) {
+        error.FileNotFound => if (try enclosing(io, a, here)) |package| try say.fail(io, "this is inside the package at {s}: run bay init there, or bay new <name> for a package of its own", .{package}),
+        else => return err,
     }
     return prepare(io, a, zig, here);
 }
@@ -860,11 +869,15 @@ fn newCommand(io: Io, a: std.mem.Allocator, zig: []const u8, name: []const u8) !
 }
 
 /// The nearest directory above `path` with a build.zig.zon.
-fn enclosing(io: Io, a: std.mem.Allocator, path: []const u8) ?[]const u8 {
+fn enclosing(io: Io, a: std.mem.Allocator, path: []const u8) !?[]const u8 {
     var dir = std.fs.path.dirname(path);
     while (dir) |candidate| : (dir = std.fs.path.dirname(candidate)) {
-        const zon = std.fs.path.join(a, &.{ candidate, "build.zig.zon" }) catch return null;
-        if (Io.Dir.cwd().access(io, zon, .{})) |_| return candidate else |_| {}
+        const zon = try std.fs.path.join(a, &.{ candidate, "build.zig.zon" });
+        // Absent or unreadable, the search goes on up; a cancel ends it.
+        if (Io.Dir.cwd().access(io, zon, .{})) |_| return candidate else |err| switch (err) {
+            error.Canceled => return err,
+            else => {},
+        }
     }
     return null;
 }
@@ -872,7 +885,8 @@ fn enclosing(io: Io, a: std.mem.Allocator, path: []const u8) ?[]const u8 {
 fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 {
     var dir = try Io.Dir.cwd().openDir(io, path, .{});
     defer dir.close(io);
-    if (dir.access(io, "build.zig.zon", .{})) |_| {} else |_| {
+    if (dir.access(io, "build.zig.zon", .{})) |_| {} else |missing| {
+        if (missing != error.FileNotFound) return missing;
         var child = std.process.spawn(io, .{ .argv = &.{ zig, "init" }, .cwd = .{ .path = path } }) catch |err| try say.fail(io, "could not run {s}: {t}", .{ zig, err });
         switch (try child.wait(io)) {
             .exited => |code| if (code != 0) return code,
@@ -892,13 +906,22 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
     return 0;
 }
 
+test "a cancel ends the search for the package, never taken for a directory without one" {
+    const shakedown = @import("shakedown");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const fault = try shakedown.FaultIo.init(std.testing.allocator, std.testing.io, .{ .plan = &.{.{ .at = .{ .nth = .{ .call = .dirAccess, .n = 1 } }, .fault = .{ .fail = error.Canceled } }} });
+    defer fault.deinit();
+    try std.testing.expectError(error.Canceled, packageHere(fault.io(), arena.allocator()));
+}
+
 test "update follows a recorded ref and leaves a commit pin" {
     const a = std.testing.allocator;
-    const branch = manifest.following(a, "git+https://example.org/x?ref=main#5d2a92141f0298d76dc5fd602526d55a62b4e11a").?;
+    const branch = (try manifest.following(a, "git+https://example.org/x?ref=main#5d2a92141f0298d76dc5fd602526d55a62b4e11a")).?;
     defer a.free(branch);
     try std.testing.expectEqualStrings("git+https://example.org/x#main", branch);
-    try std.testing.expectEqual(null, manifest.following(a, "git+https://example.org/x#5d2a92141f0298d76dc5fd602526d55a62b4e11a"));
-    try std.testing.expectEqualStrings("https://example.org/x.tar.gz", manifest.following(a, "https://example.org/x.tar.gz").?);
+    try std.testing.expectEqual(null, try manifest.following(a, "git+https://example.org/x#5d2a92141f0298d76dc5fd602526d55a62b4e11a"));
+    try std.testing.expectEqualStrings("https://example.org/x.tar.gz", (try manifest.following(a, "https://example.org/x.tar.gz")).?);
 }
 
 test "bay's command lines read as they did by hand, and --workspace hands each member the same command" {

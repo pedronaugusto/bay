@@ -5,6 +5,7 @@
 ### Fixed
 
 - `bay install` takes a repository's URL as `bay add` does: `https://github.com/owner/repo`, as a browser shows it, is the git repository there, and a git URL that names no ref installs the newest release. It handed the page's URL to Zig's fetch, which refused the HTML, and installed a bare git URL from the default branch's head. Both commands now find the source one way, and a `git+ssh` or `git+file` URL with no ref takes the newest release too, where `bay add` pinned its default branch.
+- A cancel stops bay where it lands: finding the package or the one around it, `bay init` and `bay new` asking whether a manifest is there, a machine's gate asking whether its clone is there, `bay add` asking whether the source is a directory, and `bay licenses` reading a package's directory each took a cancel for an answer (no manifest, no clone, a name to fetch, no license) and went on: `bay init` ran `zig init`, a machine's gate ran `git init`. A ref that cannot be followed for want of memory is no longer read as a pin at a bare commit.
 
 ### Changed
 

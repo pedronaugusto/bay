@@ -50,7 +50,11 @@ pub fn list(r: resolve.Resolution, dev: bool) !void {
 /// joined with `AND` when there are several (`LICENSE-MIT` and `LICENSE-APACHE`
 /// together are usually a choice, which the files themselves say).
 fn licenseOf(io: Io, a: std.mem.Allocator, directory: []const u8) !?[]const u8 {
-    var dir = Io.Dir.cwd().openDir(io, directory, .{ .iterate = true }) catch return null;
+    var dir = Io.Dir.cwd().openDir(io, directory, .{ .iterate = true }) catch |err| switch (err) {
+        error.Canceled => return err,
+        // No directory to read is no license stated.
+        else => return null,
+    };
     defer dir.close(io);
     var found: std.ArrayList([]const u8) = .empty;
     var unread: usize = 0;

@@ -97,7 +97,7 @@ pub fn command(c: Context, args: Args) !u8 {
                     if (try one(c, &records, record.source, record.prefix, record.name, true) != 0) return 1;
                     continue;
                 }
-                const url = manifest.following(c.a, record.source) orelse {
+                const url = try manifest.following(c.a, record.source) orelse {
                     try say.note(c.io, "{s} was installed from an exact commit; bay install it with a branch or tag to follow one", .{record.name});
                     continue;
                 };
