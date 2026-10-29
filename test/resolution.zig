@@ -702,13 +702,7 @@ test "with no Zig named and none on the PATH, a new package is made by the Zig b
     defer arena.deinit();
     var f: Fixture = try .init(arena.allocator());
     defer f.deinit();
-    // That Zig installed where bay keeps toolchains, so nothing is downloaded: its
-    // folder linked there whole, Zig's lib beside it.
-    const data: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ "local", "bay", "data" } else &.{ "data", "bay" };
-    const toolchains = try std.fs.path.join(f.a, try std.mem.concat(f.a, []const u8, &.{ data, &.{"zig"} }));
-    try f.tmp.dir.createDirPath(f.io, toolchains);
-    const installed = std.fs.path.dirname(try Io.Dir.cwd().realPathFileAlloc(f.io, options.zig, f.a)).?; // safe: a file's real path has a folder
-    try f.folderLink(installed, try std.fs.path.join(f.a, &.{ toolchains, @import("builtin").zig_version_string }));
+    try f.installZig();
     _ = f.env.swapRemove("ZIG");
     try f.env.put("PATH", "");
     try std.testing.expect(succeeded(try f.bay(".", &.{ "new", "fresh" })));

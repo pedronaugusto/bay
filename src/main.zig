@@ -299,6 +299,10 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
 
 /// `bay release`, its train with `--workspace`, and a machine's side of either.
 fn releaseCommand(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli: Cli, args: Release) !u8 {
+    // A release builds with the Zig each package's manifest names, as its CI does, on every
+    // machine that gates it: never one the shell set (a stand-in that passes every build would
+    // call the gate green).
+    _ = environ.swapRemove("ZIG");
     if (args.gate_bundle) |directory| return machines.receive(io, a, environ, directory, args.package);
     if (cli.workspace) {
         if (cli.jobs != null) try say.fail(io, "a train releases one member at a time: --jobs is for other commands", .{});

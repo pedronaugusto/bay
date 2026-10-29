@@ -54,6 +54,8 @@ const World = struct {
 
     fn init(a: std.mem.Allocator) !World {
         var w: World = .{ .f = try .init(a) };
+        // A release's gate builds with the Zig the manifest names, never `ZIG`.
+        try w.f.installZig();
         try w.f.tmp.dir.createDirPath(w.f.io, "gates");
         try w.f.env.put("GATE_LOG", try std.fs.path.join(a, &.{ w.f.root, "gates" }));
         return w;
@@ -531,6 +533,21 @@ test "the machine that releases runs the jobs any machine runs, whatever its env
     const commit = try w.head("lib");
     try std.testing.expect(try w.gatedWith(commit, "unset"));
     try std.testing.expect(!try w.gatedWith(commit, "elsewhere"));
+}
+
+test "a release's gate builds with the Zig the manifest names, never the shell's ZIG" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    try w.package("lib", "0.1.0", "");
+    try w.change("lib", "### Fixed\n\n- A fix.\n");
+    // A stand-in that passed every build called the gate green (review-1029b N6); this one
+    // is no program at all, so a gate that took it could not run.
+    try w.f.env.put("ZIG", try w.path("no-zig-here"));
+    const result = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(result));
+    try std.testing.expect(try w.gatedWith(try w.head("lib"), "unset"));
 }
 
 test "a machine gates the release beside this one, and its red stops it" {
