@@ -516,6 +516,23 @@ fn refusePushes(w: *World, hook: []const u8) !void {
     try file.setPermissions(w.f.io, .executable_file);
 }
 
+test "the machine that releases runs the jobs any machine runs, whatever its environment says" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    try w.package("lib", "0.1.0", "");
+    try w.change("lib", "### Fixed\n\n- A fix.\n");
+    // Inherited, it would have left the source checks to a machine that is not there
+    // (review-1029 M4).
+    try w.f.env.put("PREFLIGHT_PORTABLE", "elsewhere");
+    const result = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(result));
+    const commit = try w.head("lib");
+    try std.testing.expect(try w.gatedWith(commit, "unset"));
+    try std.testing.expect(!try w.gatedWith(commit, "elsewhere"));
+}
+
 test "a machine gates the release beside this one, and its red stops it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

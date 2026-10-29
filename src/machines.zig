@@ -95,9 +95,13 @@ pub const Request = struct {
 
 /// Gates the commit at HEAD of the package at `package` on this machine, with its
 /// `gate` step; whether it is green. Its lines go to `output`.
-pub fn local(io: Io, environ: *const std.process.Environ.Map, package: []const u8, output: *Output) !bool {
+pub fn local(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8, output: *Output) !bool {
     const bay = environ.get("BAY").?; // safe: main sets BAY before any command
-    var child = try std.process.spawn(io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = package }, .environ_map = environ, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe });
+    // This machine releases, so it runs the jobs that say the same on any machine; a
+    // `PREFLIGHT_PORTABLE=elsewhere` it inherited would leave them to no one.
+    var gate_environ = try environ.clone(a);
+    _ = gate_environ.swapRemove("PREFLIGHT_PORTABLE");
+    var child = try std.process.spawn(io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = package }, .environ_map = &gate_environ, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe });
     const streams = [_]Io.File{ child.stdout.?, child.stderr.? }; // safe: spawned with pipes
     child.stdout = null;
     child.stderr = null;

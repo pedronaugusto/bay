@@ -537,7 +537,7 @@ fn gateEverywhere(c: Context, gate_machines: []const machines.Machine) !?[]const
 const Gate = struct { where: []const u8, log: []const u8, output: machines.Output, green: bool = false, failed: ?anyerror = null };
 
 fn gateHere(c: Context, one: *Gate) void {
-    one.green = machines.local(c.io, c.environ, c.package, &one.output) catch |err| {
+    one.green = machines.local(c.io, c.a, c.environ, c.package, &one.output) catch |err| {
         one.failed = err;
         return;
     };
