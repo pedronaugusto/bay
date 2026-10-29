@@ -362,11 +362,15 @@ fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
         .remote => |at| {
             if (!std.mem.startsWith(u8, at.url, "git+")) {
                 // A forge's archive of one revision is that revision of its repository: a
-                // release only at a version tag or the commit one names. Any other URL names no
-                // repository bay can read; its hash fixes the bytes its host published.
-                const archive = try archived(c.a, at.url) orelse continue;
-                if (!isRelease(try advertised.tags(c.io, c.a, try c.a.print("git+{s}", .{archive.repository})), archive.revision))
-                    try wrong.append(c.a, try c.a.print("{s} (an archive of {s}, no version tag of its repository)", .{ dependency.name, archive.revision }));
+                // release only at a version tag or the commit one names. A known forge's URL
+                // bay cannot read as one is refused; any other URL names no repository bay can
+                // read, and its hash fixes the bytes its host published.
+                switch (try forgeOf(c.a, at.url)) {
+                    .elsewhere => {},
+                    .unread => |host| try wrong.append(c.a, try c.a.print("{s} (a URL on {s} that bay cannot read as an archive of one revision; pin a version tag: bay update)", .{ dependency.name, host })),
+                    .archive => |archive| if (!isRelease(try advertised.tags(c.io, c.a, try c.a.print("git+{s}", .{archive.repository})), archive.revision))
+                        try wrong.append(c.a, try c.a.print("{s} (an archive of {s}, no version tag of its repository)", .{ dependency.name, archive.revision })),
+                }
                 continue;
             }
             const pin = releasePin(at.url) orelse {
@@ -406,64 +410,145 @@ fn isRelease(tags: []const advertised.Tag, revision: []const u8) bool {
     return false;
 }
 
-/// The repository (`https://host/owner/repo`) and revision a forge's archive URL names:
-/// `/owner/repo/archive/<revision>.<ext>` (GitHub, Codeberg, Forgejo, Gitea; the revision may be
-/// `refs/tags/<tag>`), GitLab's `/owner/repo/-/archive/<revision>/<file>`, and GitHub's
-/// `codeload.github.com/owner/repo/<format>/<revision>`. Null for any other URL.
-fn archived(a: std.mem.Allocator, url: []const u8) !?struct { repository: []const u8, revision: []const u8 } {
-    const scheme = "https://";
-    if (!std.mem.startsWith(u8, url, scheme)) return null;
-    const end = std.mem.findAny(u8, url, "?#") orelse url.len;
-    const host_end = std.mem.findScalarPos(u8, url[0..end], scheme.len, '/') orelse return null;
-    const host = url[scheme.len..host_end];
-    var segments = std.mem.splitScalar(u8, url[host_end + 1 .. end], '/');
-    const owner = segments.next() orelse return null;
-    const repo = segments.next() orelse return null;
-    if (owner.len == 0 or repo.len == 0) return null;
-    const repo_end = @intFromPtr(repo.ptr) - @intFromPtr(url.ptr) + repo.len;
-    const kind = segments.next() orelse return null;
-    const rest = segments.rest();
-    if (std.mem.eql(u8, host, "codeload.github.com")) {
-        if (rest.len == 0) return null;
-        return .{ .repository = try a.print("https://github.com{s}", .{url[host_end..repo_end]}), .revision = rest };
+/// What a pin's URL is as a forge's: an archive of one revision of a repository (`archive`), a
+/// URL on a known forge that bay cannot read as one (`unread`, naming the host: refused, for a
+/// release must show its pin is one), or a URL of no known forge (`elsewhere`: its hash fixes
+/// the bytes its host published).
+const Forge = union(enum) {
+    archive: struct { repository: []const u8, revision: []const u8 },
+    unread: []const u8,
+    elsewhere,
+};
+
+/// The forges whose URLs bay reads. On any of them, a URL that is no archive form bay knows
+/// is refused, never passed on its hash.
+const known_forges = [_][]const u8{ "github.com", "api.github.com", "codeload.github.com", "gitlab.com", "bitbucket.org", "codeberg.org" };
+
+/// The forms read, the repository as `https://host/owner/repo`:
+/// - `/owner/repo/archive/<revision>.<ext>` (GitHub, Codeberg and any Forgejo or Gitea; the
+///   revision may be `refs/tags/<tag>`);
+/// - GitHub's `/owner/repo/{tarball,zipball}/<revision>`, `api.github.com/repos/owner/repo/
+///   {tarball,zipball}/<revision>` and `codeload.github.com/owner/repo/<format>/<revision>`;
+/// - GitLab's `/group/.../repo/-/archive/<revision>/<file>`, subgroups included;
+/// - Bitbucket's `/owner/repo/get/<revision>.<ext>`.
+/// A host is compared without its case. On a known forge, a URL with an empty path segment, a
+/// query or a fragment, or not https, is unread.
+fn forgeOf(a: std.mem.Allocator, url: []const u8) !Forge {
+    const separator = std.mem.find(u8, url, "://") orelse return .elsewhere;
+    const host_start = separator + "://".len;
+    const host_end = std.mem.findAnyPos(u8, url, host_start, "/?#") orelse url.len;
+    const host = try std.ascii.allocLowerString(a, url[host_start..host_end]);
+    const known = for (known_forges) |forge| {
+        if (std.mem.eql(u8, host, forge)) break true;
+    } else false;
+    const archive_at = try archiveAt(a, host, url[0..separator], url[host_end..]);
+    if (archive_at) |archive| return .{ .archive = .{ .repository = archive.repository, .revision = archive.revision } };
+    return if (known) .{ .unread = host } else .elsewhere;
+}
+
+const Archive = struct { repository: []const u8, revision: []const u8 };
+
+fn archiveAt(a: std.mem.Allocator, host: []const u8, scheme: []const u8, rest: []const u8) !?Archive {
+    if (!std.mem.eql(u8, scheme, "https") or rest.len < 2 or rest[0] != '/' or std.mem.findAny(u8, rest, "?#") != null) return null;
+    const path = rest[1..];
+    var segments: [64][]const u8 = undefined;
+    var count: usize = 0;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or count == segments.len) return null;
+        segments[count] = part;
+        count += 1;
     }
-    if (std.mem.eql(u8, kind, "archive")) {
-        for ([_][]const u8{ ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tar", ".zip" }) |suffix| {
-            if (std.mem.endsWith(u8, rest, suffix) and rest.len > suffix.len) return .{ .repository = url[0..repo_end], .revision = rest[0 .. rest.len - suffix.len] };
+    const s = segments[0..count];
+    // The path from segment `from` to segment `to`, inclusive, as the URL writes it.
+    const span = struct {
+        fn of(text: []const u8, all: []const []const u8, from: usize, to: usize) []const u8 {
+            const start = @intFromPtr(all[from].ptr) - @intFromPtr(text.ptr);
+            return text[start .. @intFromPtr(all[to].ptr) - @intFromPtr(text.ptr) + all[to].len];
+        }
+    }.of;
+    const github = std.mem.eql(u8, host, "github.com");
+    if (std.mem.eql(u8, host, "codeload.github.com")) {
+        if (s.len < 4) return null;
+        for ([_][]const u8{ "tar.gz", "zip", "legacy.tar.gz", "legacy.zip" }) |format| {
+            if (std.mem.eql(u8, s[2], format)) return .{ .repository = try a.print("https://github.com/{s}", .{span(path, s, 0, 1)}), .revision = span(path, s, 3, s.len - 1) };
         }
         return null;
     }
-    if (std.mem.eql(u8, kind, "-") and std.mem.startsWith(u8, rest, "archive/")) {
-        const revision = rest["archive/".len..];
-        const slash = std.mem.findScalarLast(u8, revision, '/') orelse return null;
-        if (slash == 0) return null;
-        return .{ .repository = url[0..repo_end], .revision = revision[0..slash] };
+    if (std.mem.eql(u8, host, "api.github.com")) {
+        if (s.len < 5 or !std.mem.eql(u8, s[0], "repos")) return null;
+        if (!std.mem.eql(u8, s[3], "tarball") and !std.mem.eql(u8, s[3], "zipball")) return null;
+        return .{ .repository = try a.print("https://github.com/{s}", .{span(path, s, 1, 2)}), .revision = span(path, s, 4, s.len - 1) };
+    }
+    if (github and s.len >= 4 and (std.mem.eql(u8, s[2], "tarball") or std.mem.eql(u8, s[2], "zipball"))) {
+        return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, 1) }), .revision = span(path, s, 3, s.len - 1) };
+    }
+    if (std.mem.eql(u8, host, "bitbucket.org")) {
+        if (s.len != 4 or !std.mem.eql(u8, s[2], "get")) return null;
+        const revision = withoutArchiveSuffix(s[3]) orelse return null;
+        return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, 1) }), .revision = revision };
+    }
+    // GitLab's form, its project path any depth of groups: `/-/archive/<revision>/<file>`.
+    for (s, 0..) |segment, i| if (std.mem.eql(u8, segment, "-")) {
+        if (i < 2 or s.len < i + 4 or !std.mem.eql(u8, s[i + 1], "archive")) return null;
+        return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, i - 1) }), .revision = span(path, s, i + 2, s.len - 2) };
+    };
+    if (s.len >= 4 and std.mem.eql(u8, s[2], "archive")) {
+        const revision = withoutArchiveSuffix(span(path, s, 3, s.len - 1)) orelse return null;
+        return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, 1) }), .revision = revision };
     }
     return null;
 }
 
-test "a forge's archive names its repository and revision; any other URL names none" {
+/// `name` without the archive format it ends in, or null when it ends in none or is nothing more.
+fn withoutArchiveSuffix(name: []const u8) ?[]const u8 {
+    for ([_][]const u8{ ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tar", ".zip" }) |suffix| {
+        if (std.mem.endsWith(u8, name, suffix) and name.len > suffix.len) return name[0 .. name.len - suffix.len];
+    }
+    return null;
+}
+
+test "a forge's archive names its repository and revision; a known forge's URL bay cannot read is unread; any other URL is elsewhere" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
+    const a = arena.allocator();
     const commit = "5d2a92141f0298d76dc5fd602526d55a62b4e11a";
     for ([_]struct { []const u8, []const u8, []const u8 }{
         .{ "https://github.com/o/r/archive/" ++ commit ++ ".tar.gz", "https://github.com/o/r", commit },
         .{ "https://github.com/o/r/archive/refs/tags/v1.2.0.tar.gz", "https://github.com/o/r", "refs/tags/v1.2.0" },
         .{ "https://github.com/o/r/archive/v1.2.0.zip", "https://github.com/o/r", "v1.2.0" },
+        .{ "https://GITHUB.COM/o/r/archive/v1.2.0.zip", "https://github.com/o/r", "v1.2.0" },
+        .{ "https://github.com/o/r/tarball/" ++ commit, "https://github.com/o/r", commit },
+        .{ "https://github.com/o/r/zipball/refs/tags/v1.2.0", "https://github.com/o/r", "refs/tags/v1.2.0" },
+        .{ "https://api.github.com/repos/o/r/tarball/v1.2.0", "https://github.com/o/r", "v1.2.0" },
+        .{ "https://codeload.github.com/o/r/tar.gz/refs/tags/v1.2.0", "https://github.com/o/r", "refs/tags/v1.2.0" },
+        .{ "https://codeload.github.com/o/r/legacy.tar.gz/" ++ commit, "https://github.com/o/r", commit },
         .{ "https://codeberg.org/o/r/archive/v1.2.0.tar.gz", "https://codeberg.org/o/r", "v1.2.0" },
         .{ "https://gitlab.com/o/r/-/archive/v1.2.0/r-v1.2.0.tar.gz", "https://gitlab.com/o/r", "v1.2.0" },
-        .{ "https://codeload.github.com/o/r/tar.gz/refs/tags/v1.2.0", "https://github.com/o/r", "refs/tags/v1.2.0" },
+        .{ "https://gitlab.com/g/sub/r/-/archive/" ++ commit ++ "/r-" ++ commit ++ ".tar.gz", "https://gitlab.com/g/sub/r", commit },
+        .{ "https://bitbucket.org/o/r/get/v1.2.0.tar.gz", "https://bitbucket.org/o/r", "v1.2.0" },
+        .{ "https://git.example.org/o/r/archive/v1.2.0.tar.gz", "https://git.example.org/o/r", "v1.2.0" },
     }) |case| {
-        const got = (try archived(arena.allocator(), case[0])).?;
+        const got = (try forgeOf(a, case[0])).archive;
         try std.testing.expectEqualStrings(case[1], got.repository);
         try std.testing.expectEqualStrings(case[2], got.revision);
     }
+    // review-1029b N9: each passed on its hash.
+    for ([_][]const u8{
+        "https://github.com//o/r/archive/" ++ commit ++ ".tar.gz",
+        "https://github.com/o/r.git?ref=main#" ++ commit,
+        "https://github.com/o/r/archive/.tar.gz",
+        "https://github.com/o/r/releases/download/v1.2.0/r.tar.gz",
+        "http://github.com/o/r/archive/v1.2.0.tar.gz",
+        "https://api.github.com/repos/o/r/tarball",
+        "https://gitlab.com/o/-/archive/v1.2.0/r.tar.gz",
+        "https://bitbucket.org/o/r/get/v1.2.0",
+        "https://codeberg.org/o/r/archive/v1.2.0.tar.gz?x=1",
+    }) |url| try std.testing.expect(try forgeOf(a, url) == .unread);
     for ([_][]const u8{
         "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/riscv64/alpine-minirootfs-3.24.2-riscv64.tar.gz",
         "https://example.org/lib-1.0.tar.gz",
-        "https://github.com/o/r/archive/.tar.gz",
-        "http://github.com/o/r/archive/v1.2.0.tar.gz",
-    }) |url| try std.testing.expect(try archived(arena.allocator(), url) == null);
+    }) |url| try std.testing.expect(try forgeOf(a, url) == .elsewhere);
 }
 
 test "a revision is a release at a version tag, by name or by the commit it names" {
