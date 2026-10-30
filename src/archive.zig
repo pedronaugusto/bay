@@ -605,7 +605,7 @@ fn zstdOf(a: std.mem.Allocator, data: []const u8, exponent: u5) ![]u8 {
     while (true) {
         const size = @min(rest.len, 1 << 16);
         const last = size == rest.len;
-        try out.writer.writeInt(u24, @as(u24, @intCast(size)) << 3 | @intFromBool(last), .little);
+        try out.writer.writeInt(u24, (@as(u24, @intCast(size)) << 3) | @intFromBool(last), .little);
         try out.writer.writeAll(rest[0..size]);
         rest = rest[size..];
         if (last) return out.written();

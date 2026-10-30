@@ -82,7 +82,7 @@ fn parseKey(body: []const u8) Error!Key {
     if (body.len < 6) return error.Malformed;
     if (body[0] != 4) return error.UnsupportedVersion;
     var fingerprint: Sha1 = .init(.{});
-    fingerprint.update(&.{ 0x99, @intCast(body.len >> 8 & 0xff), @intCast(body.len & 0xff) });
+    fingerprint.update(&.{ 0x99, @intCast((body.len >> 8) & 0xff), @intCast(body.len & 0xff) });
     if (body.len > 0xffff) return error.Malformed;
     fingerprint.update(body);
     var key: Key = .{ .fingerprint = fingerprint.finalResult(), .public = undefined };
@@ -333,7 +333,7 @@ const Packets = struct {
         var tag: u8 = undefined;
         var length: usize = undefined;
         if (header & 0x40 == 0) {
-            tag = header >> 2 & 0x0f;
+            tag = (header >> 2) & 0x0f;
             length = switch (header & 3) {
                 0 => try fields.byte(),
                 1 => try fields.int(u16),
