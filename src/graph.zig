@@ -162,11 +162,13 @@ pub fn vendor(r: resolve.Resolution, hosts: Hosts) !void {
             .remote => |remote| remote,
             .directory => continue,
         };
-        // A package with no manifest is read by no selection: a build that takes it fetches it.
+        // A package with no manifest is read by no selection, and a build that takes it fetches
+        // it. Zig fetches no prebuilt: bay brings one into Zig's cache, from which Zig unpacks it
+        // with the rest, by its hash, never reaching its URL.
         const unnamed = store.unnamed(remote.hash);
-        if (unnamed and hosts == .this_host) continue;
+        if (unnamed and remote.prebuilt == null and hosts == .this_host) continue;
         // Zig fetches what only git reaches from its cache, where resolution put it.
-        if (!unnamed) _ = try r.store.directoryOf(remote);
+        if (!unnamed or remote.prebuilt != null) _ = try r.store.directoryOf(remote);
         const entry = try a.print(".p{d} = .{{ .url = \"{f}\", .hash = \"{f}\" }}, ", .{ count, std.zig.fmtString(remote.url), std.zig.fmtString(remote.hash) });
         count += 1;
         switch (hosts) {

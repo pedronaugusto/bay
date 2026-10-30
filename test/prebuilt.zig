@@ -173,6 +173,23 @@ test "a prebuilt pin is brought by bay fetch, checked by its digest and its publ
     try std.testing.expect(succeeded(ran));
     try std.testing.expect(std.mem.find(u8, ran.stderr, "from the prebuilt") != null);
 
+    // Vendored, the prebuilt is in the package's zig-pkg: gone from Zig's cache and from bay's,
+    // the build takes it from there and downloads nothing.
+    // The build unpacked it there already, as Zig 0.17 unpacks what a build takes, and Zig and
+    // bay keep it: all gone first, so vendoring brings it.
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "app", "zig-pkg" }));
+    try layers.uncached(&f);
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "data", "bay", "prebuilt" }));
+    const vendored = try f.bay("app", &.{"vendor"});
+    if (!succeeded(vendored)) std.debug.print("{s}\n", .{vendored.stderr});
+    try std.testing.expect(succeeded(vendored));
+    try layers.uncached(&f);
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "data", "bay", "prebuilt" }));
+    const offline = try f.bay("app", &.{ "build", "run" });
+    if (!succeeded(offline)) std.debug.print("{s}\n", .{offline.stderr});
+    try std.testing.expect(succeeded(offline));
+    try std.testing.expect(!layers.kept(&f));
+
     // A tree Zig holds by its hash is that tree: bay downloads nothing then, and checks
     // nothing. Out of Zig's cache again, the forged pin's archive is downloaded and refused.
     try layers.uncached(&f);
