@@ -847,7 +847,7 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         const before_text = try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory});
         // Tidied as the train tidies it, in memory: the dry run writes nothing.
         const zig = try toolchain.forPackage(c.io, c.a, c.environ, car.directory);
-        const tidied = tidying.tidied(.{ .io = c.io, .a = c.a, .zig = zig, .package = car.directory }, before_text) catch |err| switch (err) {
+        const tidied = tidying.tidied(.{ .io = c.io, .a = c.a, .environ = c.environ, .zig = zig, .package = car.directory }, before_text) catch |err| switch (err) {
             error.Reported => try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name}),
             else => return err,
         };

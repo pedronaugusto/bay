@@ -137,7 +137,7 @@ fn buildCommand(c: Context, work: []const u8, stage: []const u8, cache: []const 
     const zig = try toolchain.forPackage(c.io, c.a, c.environ, work);
     const manifest_path = try std.fs.path.join(c.a, &.{ work, "build.zig.zon" });
     var text = try c.a.dupeSentinel(u8, try aegis.own.readFile(c.io, Io.Dir.cwd(), manifest_path, c.a, .fromRaw(1 << 20)), 0);
-    const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text), .development = false });
+    const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .environ = c.environ, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text), .development = false });
     for (resolution.raises) |raise| text = try manifest.put(c.a, text, raise.kind, raise.to);
     try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = manifest_path, .data = text });
     var argv: std.ArrayList([]const u8) = .empty;
@@ -160,7 +160,7 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
         // As `bay add` keeps them: packages unpacked under the store's place, fetches in a
         // scratch beside them, which each fetch empties.
         const place = try std.fs.path.join(c.a, &.{ data, "fetch" });
-        const packages = try store.Store.init(c.io, c.a, c.zig, place);
+        const packages = try store.Store.init(c.io, c.a, c.environ, c.zig, place);
         const scratch = try std.fs.path.join(c.a, &.{ place, root.directory, "add" });
         // A repository's URL is installed at its newest release, as `bay add` pins it.
         const url = try published.fetchable(c.io, c.a, c.zig, packages, scratch, source);

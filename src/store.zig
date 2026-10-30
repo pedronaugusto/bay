@@ -9,6 +9,7 @@ const manifest = @import("manifest.zig");
 const select = @import("select.zig");
 const say = @import("say.zig");
 const git = @import("git.zig");
+const prebuilt = @import("prebuilt.zig");
 const tree = @import("tree.zig");
 const scratchManifest = @import("root.zig").scratchManifest;
 
@@ -19,6 +20,8 @@ pub const Store = struct {
     io: Io,
     a: std.mem.Allocator,
     zig: []const u8,
+    /// Where bay keeps a prebuilt's archive: its data directory, read from it.
+    environ: *const std.process.Environ.Map,
     /// Directories holding unpacked packages by hash, searched in order.
     directories: []const []const u8,
     /// Zig's global cache, whose `p` holds packages as archives.
@@ -29,10 +32,10 @@ pub const Store = struct {
     found: std.array_hash_map.String([]const u8) = .empty,
 
     /// The store for a package: its `zig-pkg`, which both its builds use, and bay's unpacked copies.
-    pub fn init(io: Io, a: std.mem.Allocator, zig: []const u8, package: []const u8) !*Store {
+    pub fn init(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, zig: []const u8, package: []const u8) !*Store {
         const store = try a.create(Store);
         const unpacked = try std.fs.path.join(a, &.{ package, unpacked_directory });
-        store.* = .{ .io = io, .a = a, .zig = zig, .global = try globalCache(io, a, zig), .unpacked = unpacked, .directories = try a.dupe([]const u8, &.{
+        store.* = .{ .io = io, .a = a, .environ = environ, .zig = zig, .global = try globalCache(io, a, zig), .unpacked = unpacked, .directories = try a.dupe([]const u8, &.{
             try std.fs.path.join(a, &.{ package, "zig-pkg" }),
             unpacked,
         }) };
@@ -53,6 +56,8 @@ pub const Store = struct {
     /// The directory of a pinned package: unpacked already, unpacked from Zig's
     /// archive, or fetched by Zig first.
     pub fn directoryOf(store: *Store, remote: select.Place.Remote) ![]const u8 {
+        // Zig fetches no prebuilt: bay brings it into Zig's cache, checked, and reads it there.
+        if (remote.prebuilt) |pin| if (!try store.withZig(remote.hash)) try prebuilt.bring(.{ .io = store.io, .a = store.a, .environ = store.environ, .zig = store.zig, .global = store.global }, remote.url, remote.hash, pin);
         // Zig never fetches what only git reaches: such a package must be where Zig
         // looks, the project's zig-pkg or Zig's cache, not only in bay's copy.
         if (git.handles(remote.url) and !try store.withZig(remote.hash)) try store.fetch(remote);
@@ -232,11 +237,22 @@ pub fn pins(a: std.mem.Allocator, directory: []const u8, dependencies: []const m
         .key = dependency.name,
         .lazy = dependency.lazy,
         .place = switch (dependency.source) {
-            .remote => |remote| .{ .remote = .{ .url = remote.url, .hash = remote.hash } },
+            .remote => |remote| .{ .remote = .{ .url = remote.url, .hash = remote.hash, .prebuilt = if (dependency.prebuilt) |fields| try placedPrebuilt(a, directory, fields) else null } },
             .path => |relative| .{ .directory = try std.fs.path.resolveAlloc(a, &.{ directory, relative }) },
         },
     };
     return list;
+}
+
+/// A prebuilt's `fields` as the manifest in `directory` holds them, its OpenPGP key file's path made
+/// whole: a dependency's pin is checked with the key its package ships.
+fn placedPrebuilt(a: std.mem.Allocator, directory: []const u8, fields: manifest.Prebuilt) !manifest.Prebuilt {
+    var placed_pin = fields;
+    switch (fields.publisher) {
+        .openpgp => |key_file| placed_pin.publisher = .{ .openpgp = try std.fs.path.resolveAlloc(a, &.{ directory, key_file }) },
+        .minisign, .nuget, .none => {},
+    }
+    return placed_pin;
 }
 
 /// Zig's global cache, as `zig env` reports it.

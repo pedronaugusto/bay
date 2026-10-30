@@ -347,7 +347,7 @@ const Env = struct {
     }
 
     fn input(env: Env) tidying.Input {
-        return .{ .io = env.io, .a = env.a, .zig = env.zig, .package = env.package };
+        return .{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig, .package = env.package };
     }
 
     fn readManifest(env: Env) ![:0]const u8 {
@@ -686,7 +686,7 @@ fn add(env: Env, args: Add) !?[:0]const u8 {
 
 /// What `bay add` fetches for `where` (`published.fetchable`), its scratch beside the package.
 fn addable(env: Env, where: []const u8) ![]const u8 {
-    const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
+    const packages = try store.Store.init(env.io, env.a, env.environ, env.zig, env.package);
     return published.fetchable(env.io, env.a, env.zig, packages, try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" }), where);
 }
 
@@ -814,7 +814,7 @@ fn upgrade(env: Env, names: []const []const u8) !?[:0]const u8 {
         if (!among(parsed.normal, name) and !among(parsed.dev, name)) try say.fail(env.io, "{s} is not a dependency", .{name});
     }
     var text = try env.readManifest();
-    const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
+    const packages = try store.Store.init(env.io, env.a, env.environ, env.zig, env.package);
     const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
     for ([_]manifest.Kind{ .normal, .dev }) |kind| {
         for (if (kind == .normal) parsed.normal else parsed.dev) |dependency| {
@@ -855,7 +855,7 @@ fn releaseOnLine(env: Env, url: []const u8) ![]const u8 {
     const hash = std.mem.findScalarLast(u8, url, '#') orelse return url;
     const pinned = remotes.versionOf(.{ .name = url[hash + 1 ..], .commit = "" }) orelse return url;
     const repository = remotes.repository(url) orelse return url;
-    const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
+    const packages = try store.Store.init(env.io, env.a, env.environ, env.zig, env.package);
     const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
     const latest = try published.newest(env.io, env.a, env.zig, packages, scratch, url) orelse return url;
     const newest = remotes.newestOnLine(try remotes.tags(env.io, env.a, url), pinned, latest.retracted) orelse return url;
@@ -1049,6 +1049,7 @@ test {
     _ = manifest;
     _ = @import("minisign.zig");
     _ = @import("openpgp.zig");
+    _ = @import("prebuilt.zig");
     _ = published;
     _ = release;
     _ = remotes;

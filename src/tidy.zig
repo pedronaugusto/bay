@@ -17,6 +17,7 @@ const root = @import("root.zig");
 pub const Input = struct {
     io: Io,
     a: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
     /// The Zig the package builds with.
     zig: []const u8,
     /// The package's directory.
@@ -52,7 +53,7 @@ pub fn tidied(input: Input, text: [:0]const u8) !Tidied {
         // Releases first: what they pin is then part of the selection.
         const scratch = try std.fs.path.join(a, &.{ input.package, root.directory, "add" });
         const owner: published.Owned = .{ .directory = input.package, .parsed = try manifest.parse(a, out) };
-        const syncs = try published.syncs(input.io, a, input.zig, try store.Store.init(input.io, a, input.zig, input.package), scratch, &.{owner}, try std.mem.concat(a, []const u8, &.{ &.{input.package}, others }));
+        const syncs = try published.syncs(input.io, a, input.zig, try store.Store.init(input.io, a, input.environ, input.zig, input.package), scratch, &.{owner}, try std.mem.concat(a, []const u8, &.{ &.{input.package}, others }));
         out = try repin(input, &moves, out, syncs, .released, null);
     }
     const resolution = try resolved(input, try manifest.parse(a, out));
@@ -112,7 +113,7 @@ fn shared(own: manifest.Manifest, name: []const u8) ?@FieldType(manifest.Source,
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.
 pub fn resolved(input: Input, parsed: manifest.Manifest) !resolve.Resolution {
-    return resolve.resolve(.{ .io = input.io, .a = input.a, .zig = input.zig, .package = input.package, .parsed = parsed, .members = try workspace.members(input.io, input.a, input.package) });
+    return resolve.resolve(.{ .io = input.io, .a = input.a, .environ = input.environ, .zig = input.zig, .package = input.package, .parsed = parsed, .members = try workspace.members(input.io, input.a, input.package) });
 }
 
 /// A dependency's selected revision as a person reads it: name, version, hash.

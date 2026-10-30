@@ -12,6 +12,7 @@
 //! package is one the root lets coexist, whose compatible lines are then
 //! selected apart.
 const std = @import("std");
+const manifest = @import("manifest.zig");
 const Allocator = std.mem.Allocator;
 const Version = std.SemanticVersion;
 
@@ -30,7 +31,12 @@ pub const Place = union(enum) {
     remote: Remote,
     directory: []const u8,
 
-    pub const Remote = struct { url: []const u8, hash: []const u8 };
+    pub const Remote = struct {
+        url: []const u8,
+        hash: []const u8,
+        /// A prebuilt's fields, an OpenPGP key file's path made whole: what bay checks before it unpacks.
+        prebuilt: ?manifest.Prebuilt = null,
+    };
 
     /// The hash, or the directory: one key per place.
     pub fn key(place: Place) []const u8 {
