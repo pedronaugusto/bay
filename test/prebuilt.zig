@@ -257,3 +257,77 @@ test "a build brings the prebuilts it takes: one not lazy before it runs, a lazy
     try std.testing.expect(std.mem.find(u8, asking.stderr, "from the one asked for") != null);
     try std.testing.expect(asked.kept(&f));
 }
+
+test "bay add pins a prebuilt as it is served once its publisher vouches for it, and writes nothing when it does not" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const a = f.a;
+    const layers: Published = try .init(&f, "layers-1", &.{
+        .{ .path = "LICENSE", .body = "MIT License\n" },
+        .{ .path = "lib/data.zig", .body = "pub const text = \"from the prebuilt\";\n" },
+    });
+    const two: Published = try .init(&f, "two-1", &.{
+        .{ .path = "LICENSE", .body = "MIT License\n" },
+        .{ .path = "third/COPYING", .body = "GPL\n" },
+    });
+    const signer: Signer = .{ .pair = try .generateDeterministic(@splat(9)) };
+    const stranger: Signer = .{ .pair = try .generateDeterministic(@splat(10)) };
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(f.io, .{});
+    defer listener.deinit(f.io);
+    const origin = try a.print("http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    var sha512: [std.crypto.hash.sha2.Sha512.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha512.hash(layers.archive, &sha512, .{});
+    var sha512_text: [88]u8 = undefined;
+    // A NuGet feed as nuget.org serves one: its service index, a registration leaf, a catalog entry.
+    const served = [_]Served{
+        .{ .path = "/layers-1.tar.gz", .body = layers.archive },
+        .{ .path = "/layers-1.tar.gz.minisig", .body = try signer.sign(a, layers.archive, "layers-1.tar.gz") },
+        .{ .path = "/two-1.tar.gz", .body = two.archive },
+        .{ .path = "/v3/index.json", .body = try a.print("{{\"resources\":[{{\"@id\":\"{s}/flat/\",\"@type\":\"PackageBaseAddress/3.0.0\"}},{{\"@id\":\"{s}/reg/\",\"@type\":\"RegistrationsBaseUrl\"}}]}}", .{ origin, origin }) },
+        .{ .path = "/reg/layers/1.0.0.json", .body = try a.print("{{\"catalogEntry\":\"{s}/catalog/layers.1.0.0.json\"}}", .{origin}) },
+        .{ .path = "/catalog/layers.1.0.0.json", .body = try a.print("{{\"id\":\"Layers\",\"version\":\"1.0.0\",\"packageHash\":\"{s}\",\"packageHashAlgorithm\":\"SHA512\"}}", .{std.base64.standard.Encoder.encode(&sha512_text, &sha512)}) },
+        .{ .path = "/flat/layers/1.0.0/layers.1.0.0.nupkg", .body = layers.archive },
+    };
+    var server = try f.io.concurrent(serve, .{ f.io, &listener, &served });
+    defer server.cancel(f.io) catch {};
+    try consumer(&f, "app", "", build_from_layers);
+    const manifest_path = try std.fs.path.join(a, &.{ "app", "build.zig.zon" });
+    const url = try a.print("bay+{s}/layers-1.tar.gz", .{origin});
+
+    // Another key's signature: refused, the manifest as it was.
+    const before = try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16));
+    const unvouched = try f.bay("app", &.{ "add", "--name", "layers", "--minisign", try stranger.publicKey(a), url });
+    try std.testing.expect(refused(unvouched));
+    try std.testing.expect(std.mem.find(u8, unvouched.stderr, "is not what its publisher vouches for") != null);
+    try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)));
+
+    const added = try f.bay("app", &.{ "add", "--name", "layers", "--minisign", try signer.publicKey(a), url });
+    if (!succeeded(added)) std.debug.print("{s}\n", .{added.stderr});
+    try std.testing.expect(succeeded(added));
+    const pinned = try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16));
+    for ([_][]const u8{ layers.hash, try a.print("{x}", .{&layers.sha256}), try a.print(".size = {d}", .{layers.archive.len}), try a.print(".minisign = \"{s}\"", .{try signer.publicKey(a)}), ".license = \"LICENSE\"" }) |part| {
+        if (std.mem.find(u8, pinned, part) == null) std.debug.print("{s} lacks {s}\n", .{ pinned, part });
+        try std.testing.expect(std.mem.find(u8, pinned, part) != null);
+    }
+    const ran = try f.bay("app", &.{ "build", "run" });
+    if (!succeeded(ran)) std.debug.print("{s}\n", .{ran.stderr});
+    try std.testing.expect(std.mem.find(u8, ran.stderr, "from the prebuilt") != null);
+
+    // A NuGet package, its SHA-512 the feed's catalog's.
+    const nuget = try f.bay("app", &.{ "add", "--name", "nupkg", "--nuget", try a.print("bay+{s}/flat/layers/1.0.0/layers.1.0.0.nupkg", .{origin}) });
+    if (!succeeded(nuget)) std.debug.print("{s}\n", .{nuget.stderr});
+    try std.testing.expect(succeeded(nuget));
+    try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)), ".publisher = .nuget") != null);
+
+    // Two files name a licence: one must be chosen.
+    const two_url = try a.print("bay+{s}/two-1.tar.gz", .{origin});
+    const unchosen = try f.bay("app", &.{ "add", "--name", "two", "--no-publisher", two_url });
+    try std.testing.expect(refused(unchosen));
+    try std.testing.expect(std.mem.find(u8, unchosen.stderr, "several licence files (LICENSE, third/COPYING)") != null or std.mem.find(u8, unchosen.stderr, "several licence files (third/COPYING, LICENSE)") != null);
+    const chosen = try f.bay("app", &.{ "add", "--name", "two", "--no-publisher", "--license", "third/COPYING", two_url });
+    if (!succeeded(chosen)) std.debug.print("{s}\n", .{chosen.stderr});
+    try std.testing.expect(succeeded(chosen));
+    try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)), ".license = \"third/COPYING\"") != null);
+}

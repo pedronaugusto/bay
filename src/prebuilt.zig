@@ -54,32 +54,85 @@ pub const Context = struct {
     environ: *const std.process.Environ.Map,
     /// The Zig whose cache takes the tree: the one the package builds with.
     zig: []const u8,
-    /// NuGet's service index, which names the catalog a `.nuget` publisher is read from.
-    nuget_index: []const u8 = "https://api.nuget.org/v3/index.json",
 };
 
 /// Puts the prebuilt pinned at `url` as `hash` in Zig's cache: its archive, kept or
 /// downloaded and authenticated, unpacked within the size the hash records, and
 /// fetched by Zig from the tree, refused unless Zig's hash is the pin's. An OpenPGP
-/// publisher's key file is the path `pin` names, as the package holding the pin resolves it.
-pub fn bring(c: Context, url: []const u8, hash: []const u8, pin: manifest.Prebuilt) !void {
+/// publisher's key file is the path `fields` names, as the package holding the pin resolves it.
+pub fn bring(c: Context, url: []const u8, hash: []const u8, fields: manifest.Prebuilt) !void {
     const io = c.io;
     const a = c.a;
-    const https = publisherUrl(url) catch try say.fail(io, "{s}: a prebuilt is fetched over https (bay+https://), or plain http from this machine's loopback address", .{url});
+    const https = try httpsOf(c, url);
     const bound = treeSize(hash) orelse try say.fail(io, "{s} is pinned as {s}, which is no hash Zig gives a package", .{ url, hash });
-    const kept = try std.fs.path.join(a, &.{ try dirs.data(io, a, c.environ), "prebuilt" });
-    try Io.Dir.cwd().createDirPath(io, kept);
+    const kept = try keptDirectory(c);
     // One at a time: another bay bringing a prebuilt waits here, then finds what it brought.
     const lock = try Io.Dir.cwd().createFile(io, try std.fs.path.join(a, &.{ kept, "fetch.lock" }), .{ .lock = .exclusive, .truncate = false });
     defer lock.close(io);
-    const path = try std.fs.path.join(a, &.{ kept, try a.print("{x}", .{&pin.sha256}) });
-    const expected: archive.Expected = .{ .sha256 = pin.sha256, .size = pin.size };
-    const authenticated = try keptArchive(c, path, expected) orelse try fetchArchive(c, https, path, expected, pin.publisher);
-    const tree = try a.print("{s}.tree", .{path});
-    // What a bring that stopped left; the lock says no other is using it.
+    const expected: archive.Expected = .{ .sha256 = fields.sha256, .size = fields.size };
+    const authenticated = try keptArchive(c, try std.fs.path.join(a, &.{ kept, try a.print("{x}", .{&fields.sha256}) }), expected) orelse
+        (try fetchArchive(c, https, kept, expected, fields.publisher, fields.publisher)).archive;
+    const tree = try unpacked(c, url, authenticated, bound, hash);
+    const fetched = try zigFetch(c, tree);
+    if (!std.mem.eql(u8, fetched, hash)) try say.fail(io, "{s} unpacks to {s}, but it is pinned as {s}: the pin names another tree", .{ url, fetched, hash });
+    try Io.Dir.cwd().deleteTree(io, tree);
+}
+
+/// What `bay add` pins of a prebuilt: Zig's hash of its tree, and bay's fields.
+pub const Pinned = struct { hash: []const u8, prebuilt: manifest.Prebuilt };
+
+/// The largest archive `pin` downloads, and the largest tree it unpacks: past 4 GiB, Zig's
+/// hash no longer records the tree's size (`treeSize`), so no later fetch could bound it.
+const largest: u64 = std.math.maxInt(u32);
+
+/// The prebuilt at `url` pinned as it is served now, its publisher `publisher`, and its
+/// licence stated by `license` in its tree, else by the tree's one licence file: the archive
+/// downloaded and checked against its publisher, unpacked, and fetched by Zig for its hash.
+/// An OpenPGP key file is the path `publisher` names in `package`, and must be inside it.
+pub fn pin(c: Context, url: []const u8, publisher: manifest.Publisher, package: []const u8, license: ?[]const u8) !Pinned {
+    const io = c.io;
+    const a = c.a;
+    const https = try httpsOf(c, url);
+    const word: manifest.Publisher = switch (publisher) {
+        .openpgp => |key_file| key: {
+            const whole = try std.fs.path.resolveAlloc(a, &.{ package, key_file });
+            if (!std.mem.startsWith(u8, whole, package) or whole.len == package.len or !std.fs.path.isSep(whole[package.len]))
+                try say.fail(io, "{s} is not in the package: a dependency's pin is checked with the key its package ships", .{key_file});
+            break :key .{ .openpgp = whole };
+        },
+        .minisign, .nuget, .none => publisher,
+    };
+    const kept = try keptDirectory(c);
+    const lock = try Io.Dir.cwd().createFile(io, try std.fs.path.join(a, &.{ kept, "fetch.lock" }), .{ .lock = .exclusive, .truncate = false });
+    defer lock.close(io);
+    const fetched = try fetchArchive(c, https, kept, null, word, publisher);
+    const tree = try unpacked(c, url, fetched.archive, largest, null);
+    const hash = try zigFetch(c, tree);
+    const stated = try licenseIn(c, url, tree, license);
+    try Io.Dir.cwd().deleteTree(io, tree);
+    return .{ .hash = hash, .prebuilt = .{ .sha256 = fetched.expected.sha256, .size = fetched.expected.size, .publisher = publisher, .license = stated } };
+}
+
+fn httpsOf(c: Context, url: []const u8) ![]const u8 {
+    return publisherUrl(url) catch try say.fail(c.io, "{s}: a prebuilt is fetched over https (bay+https://), or plain http from this machine's loopback address", .{url});
+}
+
+/// Where bay keeps prebuilt archives, by their SHA-256: in its data directory.
+fn keptDirectory(c: Context) ![]const u8 {
+    const kept = try std.fs.path.join(c.a, &.{ try dirs.data(c.io, c.a, c.environ), "prebuilt" });
+    try Io.Dir.cwd().createDirPath(c.io, kept);
+    return kept;
+}
+
+/// The archive's tree, unpacked beside it as Zig's fetch unpacks, no larger than `bound`
+/// (the size `hash` records, when a pin gives one); every refusal named.
+fn unpacked(c: Context, url: []const u8, authenticated: archive.Authenticated, bound: u64, hash: ?[]const u8) ![]const u8 {
+    const io = c.io;
+    const tree = try c.a.print("{s}.tree", .{authenticated.path});
+    // What a fetch that stopped left; the lock says no other is using it.
     try Io.Dir.cwd().deleteTree(io, tree);
     var diagnostic: archive.Diagnostic = .{};
-    archive.unpack(io, a, authenticated, tree, bound, &diagnostic) catch |err| switch (err) {
+    archive.unpack(io, c.a, authenticated, tree, bound, &diagnostic) catch |err| switch (err) {
         error.Malformed => try say.fail(io, "{s} is not an archive std reads", .{url}),
         error.WindowTooLarge => try say.fail(io, "{s} declares a zstd window above 128 MiB, or none", .{url}),
         error.UnsupportedEntry => try say.fail(io, "{s} holds {s}, which is neither a file, a directory nor a link", .{ url, diagnostic.entry }),
@@ -88,13 +141,14 @@ pub fn bring(c: Context, url: []const u8, hash: []const u8, pin: manifest.Prebui
         error.UnsafeName => try say.fail(io, "{s} holds {s}, a name that leaves the tree or that some system cannot hold", .{ url, diagnostic.entry }),
         error.NameClash => try say.fail(io, "{s} holds {s} twice where case folds, or as a file and a directory", .{ url, diagnostic.entry }),
         error.LinkOutside => try say.fail(io, "{s} holds {s}, a link out of its tree", .{ url, diagnostic.entry }),
-        error.TooLarge => try say.fail(io, "{s} unpacks past {d} bytes, the size {s} records, at {s}", .{ url, bound, hash, diagnostic.entry }),
-        error.ArchiveChanged => try say.fail(io, "{s} changed while it was read", .{path}),
+        error.TooLarge => if (hash) |pinned|
+            try say.fail(io, "{s} unpacks past {d} bytes, the size {s} records, at {s}", .{ url, bound, pinned, diagnostic.entry })
+        else
+            try say.fail(io, "{s} unpacks past 4 GiB, at {s}: Zig's hash records no larger tree", .{ url, diagnostic.entry }),
+        error.ArchiveChanged => try say.fail(io, "{s} changed while it was read", .{authenticated.path}),
         else => |e| return e,
     };
-    const fetched = try zigFetch(c, tree);
-    if (!std.mem.eql(u8, fetched, hash)) try say.fail(io, "{s} unpacks to {s}, but it is pinned as {s}: the pin names another tree", .{ url, fetched, hash });
-    try Io.Dir.cwd().deleteTree(io, tree);
+    return tree;
 }
 
 /// The archive kept at `path`, if it is there and still the pin's; one that is not
@@ -110,28 +164,33 @@ fn keptArchive(c: Context, path: []const u8, expected: archive.Expected) !?archi
     };
 }
 
-/// The archive downloaded to `path`, no longer than its pin says, then authenticated
-/// by its pin and its publisher: kept only once both hold.
-fn fetchArchive(c: Context, https: []const u8, path: []const u8, expected: archive.Expected, publisher: manifest.Publisher) !archive.Authenticated {
+/// An archive downloaded, checked and kept, and its digest.
+const Fetched = struct { archive: archive.Authenticated, expected: archive.Expected };
+
+/// The archive downloaded, no longer than `expected` says when a pin gives it (else than
+/// `largest`, and taken as served), then authenticated by its digest and by `publisher`,
+/// whose key file is found where `word` says: kept in `kept` by its SHA-256 only once both hold.
+fn fetchArchive(c: Context, https: []const u8, kept: []const u8, expected: ?archive.Expected, word: manifest.Publisher, publisher: manifest.Publisher) !Fetched {
     const io = c.io;
     const a = c.a;
     var client: std.http.Client = .{ .allocator = a, .io = io };
     defer client.deinit();
     client.initDefaultProxies(a, c.environ) catch |err| try say.fail(io, "the proxy settings are not usable: {t}", .{err});
-    const partial = try a.print("{s}.partial", .{path});
+    const partial = try std.fs.path.join(a, &.{ kept, "download.partial" });
     {
         const file = try Io.Dir.cwd().createFile(io, partial, .{});
         defer file.close(io);
         var buffer: [64 * 1024]u8 = undefined;
         var writer = file.writer(io, &buffer);
         try say.note(io, "downloading {s}", .{https});
-        _ = download.get(&client, https, &writer.interface, expected.size) catch |err| switch (err) {
+        _ = download.get(&client, https, &writer.interface, if (expected) |pinned| pinned.size else largest) catch |err| switch (err) {
             error.WriteFailed => return writer.err orelse err,
             else => |e| return e,
         };
         try writer.interface.flush();
     }
-    const word: archive.Publisher = switch (publisher) {
+    const checked = expected orelse try digestOf(c, partial);
+    const vouched: archive.Publisher = switch (word) {
         .none => .none,
         .minisign => |key| .{ .minisign = .{ .key = key, .signature = try download.getAlloc(&client, a, try a.print("{s}.minisig", .{https}), 4096), .file = fileName(https) } },
         .openpgp => |key_file| .{ .openpgp = .{
@@ -140,8 +199,8 @@ fn fetchArchive(c: Context, https: []const u8, path: []const u8, expected: archi
         } },
         .nuget => .{ .sha512 = try nugetHash(c, &client, https) },
     };
-    const authenticated = archive.authenticate(io, a, partial, expected, word) catch |err| switch (err) {
-        error.SizeMismatch => try say.fail(io, "{s} is not {d} bytes, as its pin says", .{ https, expected.size }),
+    const authenticated = archive.authenticate(io, a, partial, checked, vouched) catch |err| switch (err) {
+        error.SizeMismatch => try say.fail(io, "{s} is not {d} bytes, as its pin says", .{ https, checked.size }),
         error.DigestMismatch => try say.fail(io, "{s}'s SHA-256 is not its pin's: it is another archive", .{https}),
         error.PublisherMismatch => try say.fail(io, "{s} is not what its publisher vouches for ({t})", .{ https, publisher }),
         error.Xz => try say.fail(io, "{s} is xz, which bay does not read", .{https}),
@@ -149,8 +208,62 @@ fn fetchArchive(c: Context, https: []const u8, path: []const u8, expected: archi
         error.UnknownFormat => try say.fail(io, "{s} is no archive bay reads: a tar in gzip or zstd, or a zip", .{https}),
         else => |e| return e,
     };
+    const path = try std.fs.path.join(a, &.{ kept, try a.print("{x}", .{&checked.sha256}) });
     try Io.Dir.rename(.cwd(), partial, .cwd(), path, io);
-    return .{ .path = path, .format = authenticated.format };
+    return .{ .archive = .{ .path = path, .format = authenticated.format }, .expected = checked };
+}
+
+/// The SHA-256 and length of the file at `path`, as served.
+fn digestOf(c: Context, path: []const u8) !archive.Expected {
+    const file = try Io.Dir.cwd().openFile(c.io, path, .{});
+    defer file.close(c.io);
+    var reader = file.readerStreaming(c.io, &.{});
+    var sha256: std.crypto.hash.sha2.Sha256 = .init(.{});
+    var buffer: [64 * 1024]u8 = undefined;
+    var length: u64 = 0;
+    while (true) {
+        try c.io.checkCancel();
+        const n = reader.interface.readSliceShort(&buffer) catch return reader.err orelse error.ReadFailed;
+        sha256.update(buffer[0..n]);
+        length += n;
+        if (n < buffer.len) break;
+    }
+    return .{ .sha256 = sha256.finalResult(), .size = length };
+}
+
+/// The file in `tree` that states the licence: `given`, which must be there, else the tree's
+/// one file named as a licence is (LICENSE, LICENCE or COPYING, any case, any extension);
+/// none, or several, is refused naming them, for `--license` to choose.
+fn licenseIn(c: Context, url: []const u8, tree: []const u8, given: ?[]const u8) ![]const u8 {
+    const io = c.io;
+    const a = c.a;
+    if (given) |path| {
+        Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ tree, path }), .{}) catch |err| switch (err) {
+            error.FileNotFound => try say.fail(io, "{s} holds no {s}: --license names a file in the archive's tree", .{ url, path }),
+            else => |e| return e,
+        };
+        return path;
+    }
+    var dir = try Io.Dir.cwd().openDir(io, tree, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(a);
+    defer walker.deinit();
+    var found: std.ArrayList([]const u8) = .empty;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file or !licenseName(entry.basename)) continue;
+        const relative = try a.dupe(u8, entry.path);
+        std.mem.replaceScalar(u8, relative, '\\', '/');
+        try found.append(a, relative);
+    }
+    if (found.items.len == 1) return found.items[0];
+    if (found.items.len == 0) try say.fail(io, "{s} holds no file named as a licence: give --license <path in the archive>", .{url});
+    try say.fail(io, "{s} holds several licence files ({s}): give --license <one of them>", .{ url, try std.mem.join(a, ", ", found.items) });
+}
+
+/// Whether `name` names a licence file: LICENSE, LICENCE or COPYING, any case, any extension.
+fn licenseName(name: []const u8) bool {
+    for ([_][]const u8{ "license", "licence", "copying" }) |stem| if (std.ascii.startsWithIgnoreCase(name, stem)) return true;
+    return false;
 }
 
 /// The last part of a URL's path: the file a publisher's signature names.
@@ -170,16 +283,18 @@ fn zigFetch(c: Context, tree: []const u8) ![]const u8 {
     return std.mem.trim(u8, result.stdout, " \r\n");
 }
 
-/// The SHA-512 nuget.org's catalog holds for the package at `https`, which must be in
-/// the index's package base, as `<id>/<version>/<id>.<version>.nupkg`: nuget.org's word
-/// over TLS, read apart from the package (designs/bay.md §11).
+/// The SHA-512 the NuGet catalog holds for the package at `https`: the service index at its
+/// host's `/v3/index.json` (nuget.org's own, for nuget.org) must name a package base the URL
+/// is in, as `<id>/<version>/<id>.<version>.nupkg`. nuget.org's word over TLS, read apart
+/// from the package (designs/bay.md §11).
 fn nugetHash(c: Context, client: *std.http.Client, https: []const u8) ![Sha512.digest_length]u8 {
     const io = c.io;
     const a = c.a;
-    const resources = nugetResources(a, try download.getAlloc(client, a, c.nuget_index, 1 << 20)) catch
-        try say.fail(io, "{s} is not a NuGet service index bay can read", .{c.nuget_index});
+    const index = try serviceIndex(a, https);
+    const resources = nugetResources(a, try download.getAlloc(client, a, index, 1 << 20)) catch
+        try say.fail(io, "{s} is not a NuGet service index bay can read", .{index});
     const package = nugetPackage(resources.base, https) orelse
-        try say.fail(io, "{s} is not a package under {s}, the base {s} names, as <id>/<version>/<id>.<version>.nupkg", .{ https, resources.base, c.nuget_index });
+        try say.fail(io, "{s} is not a package under {s}, the base {s} names, as <id>/<version>/<id>.<version>.nupkg", .{ https, resources.base, index });
     const registration_url = try a.print("{s}{s}/{s}.json", .{ resources.registrations, package.id, package.version });
     const entry = catalogEntry(a, try download.getAlloc(client, a, registration_url, 1 << 20)) catch
         try say.fail(io, "{s} names no catalog entry", .{registration_url});
@@ -189,6 +304,13 @@ fn nugetHash(c: Context, client: *std.http.Client, https: []const u8) ![Sha512.d
         error.NotSha512 => try say.fail(io, "{s} gives the package's hash by another algorithm than SHA-512", .{entry}),
         error.Unreadable => try say.fail(io, "{s} gives no package hash bay can read", .{entry}),
     };
+}
+
+/// The NuGet service index of the host serving `url`: its origin's `/v3/index.json`.
+fn serviceIndex(a: std.mem.Allocator, url: []const u8) ![]const u8 {
+    const scheme_end = (std.mem.find(u8, url, "://") orelse return error.InvalidUrl) + "://".len;
+    const origin_end = std.mem.findScalarPos(u8, url, scheme_end, '/') orelse url.len;
+    return a.print("{s}/v3/index.json", .{url[0..origin_end]});
 }
 
 /// The two resources of a NuGet service index a `.nuget` publisher reads.
@@ -309,6 +431,7 @@ test "nuget.org's index, registration and catalog give the package's SHA-512" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    try testing.expectEqualStrings("https://api.nuget.org/v3/index.json", try serviceIndex(a, "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.619.6/microsoft.direct3d.d3d12.1.619.6.nupkg"));
     const resources = try nugetResources(a, recorded_index);
     try testing.expectEqualStrings("https://api.nuget.org/v3-flatcontainer/", resources.base);
     try testing.expectEqualStrings("https://api.nuget.org/v3/registration5-semver1/", resources.registrations);

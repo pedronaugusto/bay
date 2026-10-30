@@ -15,6 +15,7 @@ const git = @import("git.zig");
 const published = @import("published.zig");
 const each = @import("each.zig");
 const store = @import("store.zig");
+const prebuilt = @import("prebuilt.zig");
 const select = @import("select.zig");
 const licenses = @import("licenses.zig");
 const audit = @import("audit.zig");
@@ -106,6 +107,11 @@ const Add = struct {
     lazy: bool = false,
     tidy: bool = true,
     name: ?[]const u8 = null,
+    minisign: ?[]const u8 = null,
+    openpgp: ?[]const u8 = null,
+    nuget: bool = false,
+    no_publisher: bool = false,
+    license: ?[]const u8 = null,
     sources: []const []const u8,
     pub const spec: ensign.Spec(@This()) = .{
         .about = "Fetch and pin dependencies, then tidy once",
@@ -114,6 +120,11 @@ const Add = struct {
             .lazy = .{ .help = "Fetched only when a build uses it" },
             .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
             .name = .{ .help = "The name to pin the one source given under" },
+            .minisign = .{ .value_name = "KEY", .help = "A prebuilt (bay+https://): its publisher's minisign key; the signature is at the URL plus .minisig" },
+            .openpgp = .{ .value_name = "FILE", .hint = .file, .help = "A prebuilt: its publisher's OpenPGP key, a file in the package; the signature is at the URL plus .sig" },
+            .nuget = .{ .help = "A prebuilt: a NuGet package, its SHA-512 read from nuget.org's catalog" },
+            .no_publisher = .{ .help = "A prebuilt whose publisher signs nothing: its digest alone holds it" },
+            .license = .{ .value_name = "PATH", .help = "A prebuilt: the file in its tree that states its licence, when it holds no one licence file" },
             .sources = .{ .positional = true, .value_name = "URL-OR-DIRECTORY", .hint = .directory, .help = "A repository's URL (pinned at its newest release), a git URL with a ref, an archive URL, or a directory" },
         },
     };
@@ -724,11 +735,59 @@ fn add(env: Env, args: Add) !?[:0]const u8 {
     const pinned = try manifest.parse(env.a, try env.readManifest());
     var text = try env.readManifest();
     const kind: manifest.Kind = if (args.dev) .dev else .normal;
+    const publisher = try publisherOf(env, args);
     for (args.sources) |where| {
+        if (prebuilt.handles(where)) {
+            text = try pinInto(env, pinned, text, try prebuiltPin(env, where, args, publisher orelse
+                try say.fail(env.io, "{s} is a prebuilt: name its publisher, --minisign <key>, --openpgp <file>, --nuget, or --no-publisher", .{where})), kind, args.lazy);
+            continue;
+        }
+        if (publisher != null or args.license != null) try say.fail(env.io, "{s} is not a prebuilt (bay+https://): a publisher and --license are a prebuilt's", .{where});
         const dependency = if (try isDirectory(env, where)) try local(env, where, args.name) else try fetched(env, try addable(env, where), args.name) orelse return null;
         text = try pinInto(env, pinned, text, dependency, kind, args.lazy);
     }
     return text;
+}
+
+/// The publisher `bay add` names: at most one of its four, or none.
+fn publisherOf(env: Env, args: Add) !?manifest.Publisher {
+    var named: ?manifest.Publisher = null;
+    var count: usize = 0;
+    if (args.minisign) |key| {
+        named = .{ .minisign = key };
+        count += 1;
+    }
+    if (args.openpgp) |file| {
+        named = .{ .openpgp = file };
+        count += 1;
+    }
+    if (args.nuget) {
+        named = .nuget;
+        count += 1;
+    }
+    if (args.no_publisher) {
+        named = .none;
+        count += 1;
+    }
+    if (count > 1) try say.fail(env.io, "a prebuilt has one publisher: name one of --minisign, --openpgp, --nuget and --no-publisher", .{});
+    return named;
+}
+
+/// The pin of the prebuilt at `url`: downloaded, checked against `publisher`, unpacked and
+/// hashed by Zig; written only once every check holds. Its name is given, as it has no manifest.
+fn prebuiltPin(env: Env, url: []const u8, args: Add, publisher: manifest.Publisher) !manifest.Dependency {
+    const name = args.name orelse try say.fail(env.io, "{s} is a prebuilt, with no manifest to name it: give --name", .{url});
+    if (args.sources.len > 1) try say.fail(env.io, "a prebuilt is added alone, with its --name and publisher", .{});
+    // An OpenPGP key file is the package's, by its path from the package's directory.
+    const key_publisher: manifest.Publisher = switch (publisher) {
+        .openpgp => |file| .{ .openpgp = blk: {
+            const here = try Io.Dir.cwd().realPathFileAlloc(env.io, ".", env.a);
+            break :blk try std.fs.path.relativeAlloc(env.a, here, env.environ, env.package, try std.fs.path.resolveAlloc(env.a, &.{ here, file }));
+        } },
+        .minisign, .nuget, .none => publisher,
+    };
+    const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig }, url, key_publisher, env.package, args.license);
+    return .{ .name = name, .source = .{ .remote = .{ .url = url, .hash = pinned.hash } }, .prebuilt = pinned.prebuilt };
 }
 
 /// What `bay add` fetches for `where` (`published.fetchable`), its scratch beside the package.
