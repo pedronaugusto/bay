@@ -57,7 +57,7 @@ pub const Store = struct {
     /// archive, or fetched by Zig first.
     pub fn directoryOf(store: *Store, remote: select.Place.Remote) ![]const u8 {
         // Zig fetches no prebuilt: bay brings it into Zig's cache, checked, and reads it there.
-        if (remote.prebuilt) |pin| if (!try store.withZig(remote.hash)) try prebuilt.bring(.{ .io = store.io, .a = store.a, .environ = store.environ, .zig = store.zig, .global = store.global }, remote.url, remote.hash, pin);
+        if (remote.prebuilt) |pin| if (!try store.withZig(remote.hash)) try prebuilt.bring(.{ .io = store.io, .a = store.a, .environ = store.environ, .zig = store.zig }, remote.url, remote.hash, pin);
         // Zig never fetches what only git reaches: such a package must be where Zig
         // looks, the project's zig-pkg or Zig's cache, not only in bay's copy.
         if (git.handles(remote.url) and !try store.withZig(remote.hash)) try store.fetch(remote);

@@ -644,10 +644,19 @@ fn step(env: Env, name: []const u8, args: []const []const u8) !u8 {
     return built(env, parsed, resolution, .development, &.{name}, args);
 }
 
-/// `bay fetch`: both builds configured, so Zig fetches what each takes on this host.
+/// `bay fetch`: every prebuilt of the graph brought into Zig's cache, lazy or not, as
+/// Zig fetches none, then both builds configured, so Zig fetches what each takes on
+/// this host.
 fn fetchAll(env: Env) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
-    return configured(env, parsed, try buildable(env, parsed));
+    const resolution = try buildable(env, parsed);
+    for (resolution.graph.read.values()) |revision| switch (revision.place) {
+        .remote => |remote| if (remote.prebuilt != null) {
+            _ = try resolution.store.directoryOf(remote);
+        },
+        .directory => {},
+    };
+    return configured(env, parsed, resolution);
 }
 
 /// Configures the package's build and its development build, so Zig fetches into

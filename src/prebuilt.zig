@@ -20,10 +20,20 @@ pub fn handles(url: []const u8) bool {
     return std.mem.startsWith(u8, url, manifest.prebuilt_prefix);
 }
 
-/// The publisher's URL behind bay's prefix: https alone is fetched.
+/// The publisher's URL behind bay's prefix: https, or plain http to this machine's
+/// loopback address by number (`127.0.0.0/8`, `[::1]`), which no network carries, as a
+/// mirror on this machine serves.
 pub fn publisherUrl(url: []const u8) error{NotHttps}![]const u8 {
     const rest = url[manifest.prebuilt_prefix.len..];
-    if (!std.mem.startsWith(u8, rest, "https://")) return error.NotHttps;
+    if (std.mem.startsWith(u8, rest, "https://")) return rest;
+    if (!std.mem.startsWith(u8, rest, "http://")) return error.NotHttps;
+    const uri = std.Uri.parse(rest) catch return error.NotHttps;
+    const host = switch (uri.host orelse return error.NotHttps) {
+        inline else => |text| text,
+    };
+    if (std.mem.eql(u8, host, "[::1]") or std.mem.eql(u8, host, "::1")) return rest;
+    const address = Io.net.Ip4Address.parse(host, 0) catch return error.NotHttps;
+    if (address.bytes[0] != 127) return error.NotHttps;
     return rest;
 }
 
@@ -42,9 +52,8 @@ pub const Context = struct {
     io: Io,
     a: std.mem.Allocator,
     environ: *const std.process.Environ.Map,
+    /// The Zig whose cache takes the tree: the one the package builds with.
     zig: []const u8,
-    /// Zig's global cache, where `zig fetch` keeps the tree.
-    global: []const u8,
     /// NuGet's service index, which names the catalog a `.nuget` publisher is read from.
     nuget_index: []const u8 = "https://api.nuget.org/v3/index.json",
 };
@@ -56,7 +65,7 @@ pub const Context = struct {
 pub fn bring(c: Context, url: []const u8, hash: []const u8, pin: manifest.Prebuilt) !void {
     const io = c.io;
     const a = c.a;
-    const https = publisherUrl(url) catch try say.fail(io, "{s}: a prebuilt is fetched over https alone (bay+https://)", .{url});
+    const https = publisherUrl(url) catch try say.fail(io, "{s}: a prebuilt is fetched over https (bay+https://), or plain http from this machine's loopback address", .{url});
     const bound = treeSize(hash) orelse try say.fail(io, "{s} is pinned as {s}, which is no hash Zig gives a package", .{ url, hash });
     const kept = try std.fs.path.join(a, &.{ try dirs.data(io, a, c.environ), "prebuilt" });
     try Io.Dir.cwd().createDirPath(io, kept);
@@ -152,7 +161,7 @@ fn fileName(url: []const u8) []const u8 {
 
 /// Zig's hash of the tree at `tree`, as `zig fetch` prints it, the tree kept in Zig's cache.
 fn zigFetch(c: Context, tree: []const u8) ![]const u8 {
-    const result = std.process.run(c.a, c.io, .{ .argv = &.{ c.zig, "fetch", "--global-cache-dir", c.global, tree }, .stdout_limit = .limited(1024), .stderr_limit = .limited(1 << 20) }) catch |err|
+    const result = std.process.run(c.a, c.io, .{ .argv = &.{ c.zig, "fetch", tree }, .stdout_limit = .limited(1024), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(c.io, "could not run {s} fetch: {t}", .{ c.zig, err });
     if (result.term != .exited or result.term.exited != 0) {
         try say.relay(c.io, result.stderr);
@@ -260,6 +269,12 @@ test "a prebuilt's URL is bay's prefix before https; any other scheme is refused
     try testing.expectEqualStrings("https://repo.msys2.org/a.pkg.tar.zst", try publisherUrl("bay+https://repo.msys2.org/a.pkg.tar.zst"));
     try testing.expectError(error.NotHttps, publisherUrl("bay+http://repo.msys2.org/a.pkg.tar.zst"));
     try testing.expectError(error.NotHttps, publisherUrl("bay+file:///tmp/a.zip"));
+    // Plain http only to this machine's loopback address, by number: a name could be anywhere.
+    try testing.expectEqualStrings("http://127.0.0.1:8080/a.zip", try publisherUrl("bay+http://127.0.0.1:8080/a.zip"));
+    try testing.expectEqualStrings("http://[::1]:8080/a.zip", try publisherUrl("bay+http://[::1]:8080/a.zip"));
+    try testing.expectError(error.NotHttps, publisherUrl("bay+http://localhost:8080/a.zip"));
+    try testing.expectError(error.NotHttps, publisherUrl("bay+http://10.0.0.1/a.zip"));
+    try testing.expectError(error.NotHttps, publisherUrl("bay+http://127.0.0.1.example.org/a.zip"));
 }
 
 test "the tree's size is what Zig's hash records" {
