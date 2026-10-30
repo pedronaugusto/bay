@@ -109,11 +109,16 @@ pub const Pinned = struct { hash: []const u8, prebuilt: manifest.Prebuilt };
 /// hash no longer records the tree's size (`treeSize`), so no later fetch could bound it.
 const largest: u64 = std.math.maxInt(u32);
 
+/// Where a pin's licence is read in its tree: the path `--license` gives, which must be there;
+/// the path the pin held before it moved, kept while the tree still holds it; else, and when
+/// neither is given, the tree's one licence file.
+pub const License = union(enum) { given: []const u8, before: []const u8, found };
+
 /// The prebuilt at `url` pinned as it is served now, its publisher `publisher`, and its
-/// licence stated by `license` in its tree, else by the tree's one licence file: the archive
-/// downloaded and checked against its publisher, unpacked, and fetched by Zig for its hash.
-/// An OpenPGP key file is the path `publisher` names in `package`, and must be inside it.
-pub fn pin(c: Context, url: []const u8, publisher: manifest.Publisher, package: []const u8, license: ?[]const u8) !Pinned {
+/// licence where `license` says: the archive downloaded and checked against its publisher,
+/// unpacked, and fetched by Zig for its hash. An OpenPGP key file is the path `publisher`
+/// names in `package`, and must be inside it.
+pub fn pin(c: Context, url: []const u8, publisher: manifest.Publisher, package: []const u8, license: License) !Pinned {
     const io = c.io;
     const a = c.a;
     const https = try httpsOf(c, url, publisher);
@@ -259,18 +264,18 @@ fn digestOf(c: Context, path: []const u8) !archive.Expected {
     return .{ .sha256 = sha256.finalResult(), .size = length };
 }
 
-/// The file in `tree` that states the licence: `given`, which must be there, else the tree's
-/// one file named as a licence is (LICENSE, LICENCE or COPYING, any case, any extension);
-/// none, or several, is refused naming them, for `--license` to choose.
-fn licenseIn(c: Context, url: []const u8, tree: []const u8, given: ?[]const u8) ![]const u8 {
+/// The file in `tree` that states the licence, as `license` says, else the tree's one file
+/// named as a licence (LICENSE, LICENCE or COPYING, any case, any extension); none, or
+/// several, is refused naming them, for `--license` to choose.
+fn licenseIn(c: Context, url: []const u8, tree: []const u8, license: License) ![]const u8 {
     const io = c.io;
     const a = c.a;
-    if (given) |path| {
-        Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ tree, path }), .{}) catch |err| switch (err) {
-            error.FileNotFound => try say.fail(io, "{s} holds no {s}: --license names a file in the archive's tree", .{ url, path }),
+    switch (license) {
+        .given, .before => |path| if (Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ tree, path }), .{})) |_| return path else |err| switch (err) {
+            error.FileNotFound => if (license == .given) try say.fail(io, "{s} holds no {s}: --license names a file in the archive's tree", .{ url, path }),
             else => |e| return e,
-        };
-        return path;
+        },
+        .found => {},
     }
     var dir = try Io.Dir.cwd().openDir(io, tree, .{ .iterate = true });
     defer dir.close(io);

@@ -39,7 +39,7 @@ pub const Cli = struct {
         dev: Pass,
         add: Add,
         remove: Remove,
-        update: Names,
+        update: Update,
         upgrade: Names,
         tidy: Tidy,
         tree: Tree,
@@ -179,6 +179,16 @@ const Names = struct {
     } };
 };
 
+/// `bay update`'s: `Names`, a prebuilt's name followed by the URL it moves to.
+const Update = struct {
+    tidy: bool = true,
+    names: []const []const u8 = &.{},
+    pub const spec: ensign.Spec(@This()) = .{ .options = .{
+        .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
+        .names = .{ .positional = true, .value_name = "NAME", .help = "The dependencies to move, every one when none is named; a prebuilt's name followed by the bay+https:// URL it moves to" },
+    } };
+};
+
 const Tree = struct {
     why: ?[]const u8 = null,
     duplicates: bool = false,
@@ -255,7 +265,8 @@ fn deferTidy(cli: *Cli) bool {
     switch (cli.command.?) { // safe: dispatch runs only with a command
         .add => |*args| args.tidy = false,
         .remove => |*args| args.tidy = false,
-        .update, .upgrade => |*args| args.tidy = false,
+        .update => |*args| args.tidy = false,
+        .upgrade => |*args| args.tidy = false,
         else => return false,
     }
     return true;
@@ -786,7 +797,7 @@ fn prebuiltPin(env: Env, url: []const u8, args: Add, publisher: manifest.Publish
         } },
         .minisign, .nuget, .none => publisher,
     };
-    const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig }, url, key_publisher, env.package, args.license);
+    const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig }, url, key_publisher, env.package, if (args.license) |path| .{ .given = path } else .found);
     return .{ .name = name, .source = .{ .remote = .{ .url = url, .hash = pinned.hash } }, .prebuilt = pinned.prebuilt };
 }
 
@@ -879,10 +890,16 @@ fn removedFrom(parsed: manifest.Manifest, name: []const u8, dev: bool) ?manifest
 /// at its head, a release tag at the newest release on its line, as `cargo update`
 /// and `go get -u` move within what is compatible. A pin to an exact commit, or a
 /// directory, has nothing to follow and stays; a new line is `bay add` at its tag.
+/// A prebuilt follows no ref either: its name followed by a `bay+` URL moves it there,
+/// downloaded and checked as `bay add` checks it, by the publisher its pin names.
 fn update(env: Env, names: []const []const u8) !?[:0]const u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
-    // Each name given must be a dependency, in either list.
-    for (names) |name| {
+    // Each name given must be a dependency, in either list; a URL, the prebuilt named before it.
+    for (names, 0..) |name, i| {
+        if (prebuilt.handles(name)) {
+            if (i == 0 or prebuilt.handles(names[i - 1])) try say.fail(env.io, "{s}: a URL follows the name of the prebuilt it moves", .{name});
+            continue;
+        }
         if (!among(parsed.normal, name) and !among(parsed.dev, name)) try say.fail(env.io, "{s} is not a dependency", .{name});
     }
     var text = try env.readManifest();
@@ -894,18 +911,39 @@ fn update(env: Env, names: []const []const u8) !?[:0]const u8 {
                 .remote => |remote| remote,
                 .path => continue,
             };
-            const url = try manifest.following(env.a, remote.url) orelse {
-                try say.note(env.io, "{s} is pinned to an exact commit; bay add it with a branch or tag to follow one", .{dependency.name});
+            const to = movedTo(names, dependency.name);
+            const fields = dependency.prebuilt orelse {
+                if (to) |url| try say.fail(env.io, "{s} is not a prebuilt, so it moves by its ref, not to {s}: bay add a source to pin another", .{ dependency.name, url });
+                const url = try manifest.following(env.a, remote.url) orelse {
+                    try say.note(env.io, "{s} is pinned to an exact commit; bay add it with a branch or tag to follow one", .{dependency.name});
+                    continue;
+                };
+                var next = try fetched(env, try releaseOnLine(env, url), dependency.name) orelse return null;
+                next.lazy = dependency.lazy;
+                if (std.mem.eql(u8, next.source.remote.hash, remote.hash)) continue;
+                text = try manifest.put(env.a, text, kind, next);
+                try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
                 continue;
             };
-            var next = try fetched(env, try releaseOnLine(env, url), dependency.name) orelse return null;
-            next.lazy = dependency.lazy;
-            if (std.mem.eql(u8, next.source.remote.hash, remote.hash)) continue;
-            text = try manifest.put(env.a, text, kind, next);
-            try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
+            const url = to orelse {
+                try say.note(env.io, "{s} is a prebuilt, which follows no ref; bay update {s} <bay+https://…> moves it", .{ dependency.name, dependency.name });
+                continue;
+            };
+            const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig }, url, fields.publisher, env.package, .{ .before = fields.license });
+            if (std.mem.eql(u8, pinned.hash, remote.hash) and std.mem.eql(u8, url, remote.url)) continue;
+            text = try manifest.put(env.a, text, kind, .{ .name = dependency.name, .source = .{ .remote = .{ .url = url, .hash = pinned.hash } }, .lazy = dependency.lazy, .prebuilt = pinned.prebuilt });
+            try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, pinned.hash });
         }
     }
     return text;
+}
+
+/// The URL `names` moves the prebuilt `name` to: the `bay+` URL right after it.
+fn movedTo(names: []const []const u8, name: []const u8) ?[]const u8 {
+    for (names, 1..) |given, next| {
+        if (next < names.len and std.mem.eql(u8, given, name) and prebuilt.handles(names[next])) return names[next];
+    }
+    return null;
 }
 
 /// `bay upgrade`: each dependency named, or every one with a git URL when none

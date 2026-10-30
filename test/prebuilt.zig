@@ -326,3 +326,64 @@ test "bay add pins a prebuilt as it is served once its publisher vouches for it,
     try std.testing.expect(succeeded(chosen));
     try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)), ".license = \"third/COPYING\"") != null);
 }
+
+test "bay update moves a prebuilt to another URL as bay add checks it, and follows no ref of its own" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const a = f.a;
+    const one: Published = try .init(&f, "layers-1", &.{
+        .{ .path = "LICENSE", .body = "MIT License\n" },
+        .{ .path = "lib/data.zig", .body = "pub const text = \"from the first\";\n" },
+    });
+    const two: Published = try .init(&f, "layers-2", &.{
+        .{ .path = "LICENSE", .body = "MIT License\n" },
+        .{ .path = "lib/data.zig", .body = "pub const text = \"from the second\";\n" },
+    });
+    const signer: Signer = .{ .pair = try .generateDeterministic(@splat(9)) };
+    const stranger: Signer = .{ .pair = try .generateDeterministic(@splat(10)) };
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(f.io, .{});
+    defer listener.deinit(f.io);
+    const origin = try a.print("bay+http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    const served = [_]Served{
+        .{ .path = "/layers-1.tar.gz", .body = one.archive },
+        .{ .path = "/layers-2.tar.gz", .body = two.archive },
+        .{ .path = "/layers-2.tar.gz.minisig", .body = try signer.sign(a, two.archive, "layers-2.tar.gz") },
+        .{ .path = "/unvouched/layers-2.tar.gz", .body = two.archive },
+        .{ .path = "/unvouched/layers-2.tar.gz.minisig", .body = try stranger.sign(a, two.archive, "layers-2.tar.gz") },
+    };
+    var server = try f.io.concurrent(serve, .{ f.io, &listener, &served });
+    defer server.cancel(f.io) catch {};
+    const publisher = try a.print(".{{ .minisign = \"{s}\" }}", .{try signer.publicKey(a)});
+    try consumer(&f, "app", try one.pin(&f, "layers", try a.print("{s}/layers-1.tar.gz", .{origin}), publisher, false), build_from_layers);
+    const manifest_path = try std.fs.path.join(a, &.{ "app", "build.zig.zon" });
+    const before = try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16));
+
+    // Named alone, a prebuilt has nothing to follow: it stays, and bay says how it moves.
+    const alone = try f.bay("app", &.{ "update", "layers" });
+    try std.testing.expect(succeeded(alone));
+    try std.testing.expect(std.mem.find(u8, alone.stderr, "layers is a prebuilt, which follows no ref; bay update layers <bay+https://…> moves it") != null);
+    try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)));
+
+    // Its publisher does not vouch for what the new URL serves: refused, the manifest as it was.
+    const unvouched = try f.bay("app", &.{ "update", "layers", try a.print("{s}/unvouched/layers-2.tar.gz", .{origin}) });
+    try std.testing.expect(refused(unvouched));
+    try std.testing.expect(std.mem.find(u8, unvouched.stderr, "is not what its publisher vouches for") != null);
+    try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)));
+
+    // A URL with no name before it moves nothing.
+    try std.testing.expect(refused(try f.bay("app", &.{ "update", try a.print("{s}/layers-2.tar.gz", .{origin}) })));
+
+    const moved = try f.bay("app", &.{ "update", "layers", try a.print("{s}/layers-2.tar.gz", .{origin}) });
+    if (!succeeded(moved)) std.debug.print("{s}\n", .{moved.stderr});
+    try std.testing.expect(succeeded(moved));
+    const pinned = try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16));
+    for ([_][]const u8{ "/layers-2.tar.gz\"", two.hash, try a.print("{x}", .{&two.sha256}), try a.print(".size = {d}", .{two.archive.len}), try a.print(".minisign = \"{s}\"", .{try signer.publicKey(a)}), ".license = \"LICENSE\"" }) |part| {
+        if (std.mem.find(u8, pinned, part) == null) std.debug.print("{s} lacks {s}\n", .{ pinned, part });
+        try std.testing.expect(std.mem.find(u8, pinned, part) != null);
+    }
+    const ran = try f.bay("app", &.{ "build", "run" });
+    if (!succeeded(ran)) std.debug.print("{s}\n", .{ran.stderr});
+    try std.testing.expect(std.mem.find(u8, ran.stderr, "from the second") != null);
+}
