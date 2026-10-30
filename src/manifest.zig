@@ -26,7 +26,37 @@ pub const Source = union(enum) {
     path: []const u8,
 };
 
-pub const Dependency = struct { name: []const u8, source: Source, lazy: bool = false };
+pub const Dependency = struct {
+    name: []const u8,
+    source: Source,
+    lazy: bool = false,
+    /// bay's fields of a pin whose URL is `bay+`: an archive bay fetches and checks.
+    prebuilt: ?Prebuilt = null,
+};
+
+/// A prebuilt pin's fields beside Zig's (designs/bay.md §11): what bay checks of the
+/// archive before it unpacks a byte, and where its licence is stated.
+pub const Prebuilt = struct {
+    /// The archive's SHA-256.
+    sha256: [32]u8,
+    /// The archive's length: the download stops past it.
+    size: u64,
+    publisher: Publisher,
+    /// The path, in the unpacked tree, of the file that states the licence.
+    license: []const u8,
+};
+
+/// Who vouches for a prebuilt's archive besides its pin.
+pub const Publisher = union(enum) {
+    /// A minisign public key (`RW…`); the signature is at the URL plus `.minisig`.
+    minisign: []const u8,
+    /// An OpenPGP key file in the package; the signature is at the URL plus `.sig`.
+    openpgp: []const u8,
+    /// nuget.org's catalog: the package's SHA-512 as nuget.org holds it.
+    nuget,
+    /// No one, written by hand so the choice is seen.
+    none,
+};
 
 /// One entry of the manifest in `directory` that must change: `from`, in the
 /// list `kind`, becomes `to`.
@@ -90,13 +120,7 @@ pub fn parse(arena: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest
         } else if (std.mem.eql(u8, field, "zig_version")) {
             manifest.zig_version = try string(arena, value);
         } else if (std.mem.eql(u8, field, "fingerprint")) {
-            manifest.fingerprint = switch (value) {
-                .int_literal => |number| switch (number) {
-                    .small => |small| std.math.cast(u64, small) orelse return error.InvalidManifest,
-                    .big => |big| big.toInt(u64) catch return error.InvalidManifest,
-                },
-                else => return error.InvalidManifest,
-            };
+            manifest.fingerprint = try unsigned(value);
         } else if (std.mem.eql(u8, field, "overrides")) {
             manifest.overrides = try dependencies(arena, &zoir, value);
         } else if (std.mem.eql(u8, field, "coexist")) {
@@ -193,10 +217,23 @@ fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Pa
         var hash: ?[]const u8 = null;
         var path: ?[]const u8 = null;
         var lazy = false;
+        // A prebuilt's fields, each at most once.
+        var sha256: ?[32]u8 = null;
+        var size: ?u64 = null;
+        var publisher: ?Publisher = null;
+        var license: ?[]const u8 = null;
         var fields: Fields = .of(value.struct_literal);
         while (fields.next(zoir)) |pair| {
             const field = pair.name;
-            switch (pair.value) {
+            if (std.mem.eql(u8, field, "sha256")) {
+                sha256 = try digest(pair.value);
+            } else if (std.mem.eql(u8, field, "size")) {
+                size = try unsigned(pair.value);
+            } else if (std.mem.eql(u8, field, "publisher")) {
+                publisher = try publisherOf(arena, zoir, pair.value);
+            } else if (std.mem.eql(u8, field, "license")) {
+                license = try string(arena, pair.value);
+            } else switch (pair.value) {
                 .string_literal => |text| {
                     const copy = try arena.dupe(u8, text);
                     if (std.mem.eql(u8, field, "url")) url = copy else if (std.mem.eql(u8, field, "hash")) hash = copy else if (std.mem.eql(u8, field, "path")) path = copy else return error.InvalidManifest;
@@ -209,9 +246,60 @@ fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Pa
             }
         }
         const source: Source = if (path) |p| .{ .path = p } else .{ .remote = .{ .url = url orelse return error.InvalidManifest, .hash = hash orelse return error.InvalidManifest } };
-        try list.append(arena, .{ .name = try arena.dupe(u8, entry.name), .source = source, .lazy = lazy });
+        // A `bay+` URL is a prebuilt and has every one of its fields; no other pin has any.
+        const prebuilt: ?Prebuilt = if (source == .remote and std.mem.startsWith(u8, source.remote.url, prebuilt_prefix)) .{
+            .sha256 = sha256 orelse return error.InvalidManifest,
+            .size = size orelse return error.InvalidManifest,
+            .publisher = publisher orelse return error.InvalidManifest,
+            .license = license orelse return error.InvalidManifest,
+        } else if (sha256 != null or size != null or publisher != null or license != null) return error.InvalidManifest else null;
+        try list.append(arena, .{ .name = try arena.dupe(u8, entry.name), .source = source, .lazy = lazy, .prebuilt = prebuilt });
     }
     return list.items;
+}
+
+/// What a prebuilt's URL starts with: the publisher's URL behind bay's prefix.
+pub const prebuilt_prefix = "bay+";
+
+/// A SHA-256 written as 64 hexadecimal digits.
+fn digest(node: Zoir.Node) ParseError![32]u8 {
+    if (node != .string_literal or node.string_literal.len != 64) return error.InvalidManifest;
+    var bytes: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&bytes, node.string_literal) catch return error.InvalidManifest;
+    return bytes;
+}
+
+/// A whole number that fits a u64.
+fn unsigned(node: Zoir.Node) ParseError!u64 {
+    return switch (node) {
+        .int_literal => |literal| switch (literal) {
+            .small => |small| std.math.cast(u64, small) orelse error.InvalidManifest,
+            .big => |big| big.toInt(u64) catch error.InvalidManifest,
+        },
+        else => error.InvalidManifest,
+    };
+}
+
+/// `.nuget`, `.none`, or `.{ .minisign = "<key>" }`, `.{ .openpgp = "<key file>" }`.
+fn publisherOf(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError!Publisher {
+    switch (node) {
+        .enum_literal => |name| {
+            const text = name.get(zoir);
+            if (std.mem.eql(u8, text, "nuget")) return .nuget;
+            if (std.mem.eql(u8, text, "none")) return .none;
+            return error.InvalidManifest;
+        },
+        .struct_literal => |literal| {
+            var fields: Fields = .of(literal);
+            const only = fields.next(zoir) orelse return error.InvalidManifest;
+            if (fields.next(zoir) != null) return error.InvalidManifest;
+            const text = try string(arena, only.value);
+            if (std.mem.eql(u8, only.name, "minisign")) return .{ .minisign = text };
+            if (std.mem.eql(u8, only.name, "openpgp")) return .{ .openpgp = text };
+            return error.InvalidManifest;
+        },
+        else => return error.InvalidManifest,
+    }
 }
 
 /// `source` with `dependency` in the `kind` list, added or replaced in place,
@@ -223,7 +311,8 @@ pub fn put(gpa: std.mem.Allocator, source: [:0]const u8, kind: Kind, dependency:
     const text = try a.print(".{f} = {f},\n", .{ std.zig.fmtId(dependency.name), entryText(dependency) });
     const located = try locate(a, source, kind, dependency.name);
     const edited = if (located.entry) |range|
-        try splice(a, source, range, text)
+        // The entry's own line ending stays after it.
+        try splice(a, source, range, text[0 .. text.len - 1])
     else if (located.list) |list|
         try splice(a, source, .{ .start = list.close, .end = list.close }, try a.print("{s}{s}", .{ if (list.needs_comma) "," else "", text }))
     else
@@ -306,6 +395,15 @@ fn writeEntry(dependency: Dependency, w: *std.Io.Writer) std.Io.Writer.Error!voi
         .path => |path| try w.print(".path = \"{f}\",\n", .{portable(path)}),
     }
     if (dependency.lazy) try w.writeAll(".lazy = true,\n");
+    if (dependency.prebuilt) |prebuilt| {
+        try w.print(".sha256 = \"{x}\",\n.size = {d},\n", .{ &prebuilt.sha256, prebuilt.size });
+        switch (prebuilt.publisher) {
+            .minisign => |key| try w.print(".publisher = .{{ .minisign = \"{f}\" }},\n", .{std.zig.fmtString(key)}),
+            .openpgp => |file| try w.print(".publisher = .{{ .openpgp = \"{f}\" }},\n", .{portable(file)}),
+            .nuget, .none => try w.print(".publisher = .{t},\n", .{prebuilt.publisher}),
+        }
+        try w.print(".license = \"{f}\",\n", .{portable(prebuilt.license)});
+    }
     try w.writeAll("}");
 }
 
@@ -487,12 +585,81 @@ test "a dependency missing its hash is refused" {
     try std.testing.expectError(error.InvalidManifest, parse(arena.allocator(), ".{ .name = .demo, .dev_dependencies = .{ .tool = .{ .url = \"x\" } } }"));
 }
 
+test "a prebuilt pin's fields are read, and put writes them back as they were" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text =
+        \\.{
+        \\    .name = .demo,
+        \\    .dev_dependencies = .{
+        \\        .layers = .{
+        \\            .url = "bay+https://repo.msys2.org/mingw/clang64/layers-1.4.363.0-1-any.pkg.tar.zst",
+        \\            .hash = "N-V-__8AAC_9ngkzIdjDIfoFKFszRY5WsaeewthaOGDNyBWZ",
+        \\            .lazy = true,
+        \\            .sha256 = "d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20",
+        \\            .size = 6218920,
+        \\            .publisher = .{ .openpgp = "keys/msys2.pgp" },
+        \\            .license = "clang64/share/licenses/vulkan-validation-layers/LICENSE",
+        \\        },
+        \\        .agility = .{
+        \\            .url = "bay+https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.619.6/microsoft.direct3d.d3d12.1.619.6.nupkg",
+        \\            .hash = "N-V-__8AAGVbtgC1hJ0Cm64qW3BbGIMGb--Sg6Rb7t8GVPbY",
+        \\            .sha256 = "08f04892000000000000000000000000000000000000000000000000000af1e9",
+        \\            .size = 35477552,
+        \\            .publisher = .nuget,
+        \\            .license = "LICENSE.txt",
+        \\        },
+        \\    },
+        \\}
+        \\
+    ;
+    const parsed = try parse(a, text);
+    try std.testing.expectEqual(2, parsed.dev.len);
+    const layers = parsed.dev[0].prebuilt.?;
+    try std.testing.expectEqualStrings("d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20", &std.fmt.bytesToHex(layers.sha256, .lower));
+    try std.testing.expectEqual(6218920, layers.size);
+    try std.testing.expectEqualStrings("keys/msys2.pgp", layers.publisher.openpgp);
+    try std.testing.expectEqualStrings("clang64/share/licenses/vulkan-validation-layers/LICENSE", layers.license);
+    try std.testing.expect(parsed.dev[0].lazy);
+    try std.testing.expectEqual(Publisher.nuget, parsed.dev[1].prebuilt.?.publisher);
+    // Each entry put back as read leaves the manifest as it was.
+    var edited: [:0]const u8 = text;
+    for (parsed.dev) |dependency| edited = try put(a, edited, .dev, dependency);
+    try std.testing.expectEqualStrings(text, edited);
+}
+
+test "a prebuilt's fields belong to a bay+ URL, which must have them all" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fields = ".sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .publisher = .none, .license = \"LICENSE\"";
+    for ([_][]const u8{
+        // bay's fields on an archive Zig fetches.
+        ".url = \"https://example.org/a.tar.gz\", .hash = \"N-V-x\", " ++ fields,
+        // A prebuilt without its publisher, its size or its digest.
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .license = \"LICENSE\"",
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .publisher = .none, .license = \"LICENSE\"",
+        // A digest that is not 64 hexadecimal digits, a size that is not a number, a publisher bay does not know.
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8\", .size = 1, .publisher = .none, .license = \"LICENSE\"",
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = \"1\", .publisher = .none, .license = \"LICENSE\"",
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .publisher = .{ .x509 = \"k\" }, .license = \"LICENSE\"",
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .publisher = .{ .openpgp = \"k\", .minisign = \"RW\" }, .license = \"LICENSE\"",
+        // A prebuilt is fetched, never a path.
+        ".path = \"a\", " ++ fields,
+    }) |entry| {
+        const text = try a.dupeSentinel(u8, try std.mem.concat(a, u8, &.{ ".{ .name = .demo, .dependencies = .{ .a = .{ ", entry, " } } }" }), 0);
+        try std.testing.expectError(error.InvalidManifest, parse(a, text));
+    }
+}
+
 test "any bytes parse or are refused, and a dependency put into what parses parses back" {
     const shakedown = @import("shakedown");
     const examples: []const []const u8 = &.{
         ".{ .name = .demo, .version = \"0.0.0\", .dependencies = .{} }",
         ".{ .name = .demo, .dependencies = .{ .a = .{ .url = \"git+https://example.org/a#1\", .hash = \"a-1\", .lazy = true } }, .dev_dependencies = .{ .t = .{ .path = \"../t\" } } }",
         ".{ .name = .demo, .paths = .{\"\"} }",
+        ".{ .name = .demo, .dependencies = .{ .p = .{ .url = \"bay+https://example.org/p.zip\", .hash = \"N-V-p\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 6218920, .publisher = .{ .openpgp = \"keys/k.pgp\" }, .license = \"LICENSE\" } } }",
     };
     const property = struct {
         fn body(_: void, case: *shakedown.Case) anyerror!void {
