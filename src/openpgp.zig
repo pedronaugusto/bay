@@ -446,6 +446,14 @@ pub fn verifyAll(a: std.mem.Allocator, key_text: []const u8, signature_text: []c
     try verifier.verify();
 }
 
+/// A file signed by an RSA key, with the key and its armored signature, for the tests of
+/// what verifies through this file.
+pub const sample: struct { signed: []const u8, key: []const u8, signature: []const u8 } = .{
+    .signed = signed,
+    .key = rsa_key,
+    .signature = rsa_sha256,
+};
+
 const testing = std.testing;
 
 // Made with GnuPG 2.4.9 in a scratch GNUPGHOME on 2026-10-25: an RSA-3072 key and an

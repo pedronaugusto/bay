@@ -1033,6 +1033,7 @@ test "remove finds a name in the list that holds it" {
 
 // Every file's tests, each named: one left out would never run.
 test {
+    _ = @import("archive.zig");
     _ = @import("changelog.zig");
     _ = @import("dirs.zig");
     _ = @import("download.zig");

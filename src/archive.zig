@@ -100,8 +100,8 @@ pub fn authenticate(io: Io, a: std.mem.Allocator, path: []const u8, expected: Ex
         const n = reader.interface.readSliceShort(&buffer) catch return reader.err orelse error.ReadFailed;
         if (length < head.len) {
             const at: usize = @intCast(length); // safe: below the head's length
-            const take = @min(head.len - at, n);
-            @memcpy(head[at..][0..take], buffer[0..take]);
+            const count = @min(head.len - at, n);
+            @memcpy(head[at..][0..count], buffer[0..count]);
         }
         length += n;
         // A longer file is refused as soon as it is seen to be longer.
@@ -258,9 +258,13 @@ fn stripped(root: []const u8, name: []const u8) ?[]const u8 {
     return name[root.len + 1 ..];
 }
 
+fn closeFile(file: *Io.File, io: Io) void {
+    file.close(io);
+}
+
 /// A tar's entries, read through the archive's decompressor.
 const Tar = struct {
-    file: Io.File,
+    file: aegis.own.OwnedIo(Io.File, closeFile),
     reader: Io.File.Reader,
     buffer: [64 * 1024]u8,
     /// The decompressor the tar is read through, and its window.
@@ -273,9 +277,9 @@ const Tar = struct {
 
     /// Opens the archive in place: the readers point into `tar`.
     fn open(tar: *Tar, io: Io, a: std.mem.Allocator, archive: Authenticated) !void {
-        tar.file = try Io.Dir.cwd().openFile(io, archive.path, .{});
-        errdefer tar.file.close(io);
-        tar.reader = tar.file.reader(io, &tar.buffer);
+        tar.file = .init(try Io.Dir.cwd().openFile(io, archive.path, .{}));
+        errdefer tar.file.deinit(io);
+        tar.reader = tar.file.borrow().reader(io, &tar.buffer);
         tar.diagnostics = .{ .allocator = a };
         const input = &tar.reader.interface;
         const decompressed = switch (archive.format) {
@@ -285,7 +289,7 @@ const Tar = struct {
                 break :gzip &tar.decompress.tar_gzip.reader;
             },
             .tar_zstd => zstd: {
-                const window = try windowOf(io, tar.file);
+                const window = try windowOf(io, tar.file.borrow().*);
                 tar.window = try a.alloc(u8, window + zstd.block_size_max);
                 tar.decompress = .{ .tar_zstd = .init(input, tar.window, .{ .window_len = window }) };
                 break :zstd &tar.decompress.tar_zstd.reader;
@@ -295,7 +299,7 @@ const Tar = struct {
     }
 
     fn close(tar: *Tar, io: Io) void {
-        tar.file.close(io);
+        tar.file.deinit(io);
     }
 
     /// The next file, directory or link; an entry of another kind is refused by name.
@@ -416,11 +420,16 @@ fn tarOf(a: std.mem.Allocator, members: []const Member) ![]u8 {
         .directory => try writer.writeDir(member.name, .{}),
         .link => try writer.writeLink(member.name, member.data, .{}),
         .hard_link => {
-            var header: std.tar.Writer.Header = .init(.hard_link);
+            // A link's header with its type made a hard link's ('1') and its checksum summed again.
+            var header: std.tar.Writer.Header = .init(.symbolic_link);
             try header.setPath("", member.name);
             try header.setLinkname(member.data);
-            try header.setSize(0);
-            try header.write(&out.writer);
+            const bytes = std.mem.asBytes(&header);
+            bytes[156] = '1';
+            var sum: u32 = ' '; // the checksum field counts as spaces, its last byte too
+            for (bytes) |byte| sum += byte;
+            _ = try std.mem.print(bytes[148..156], "{o:0>6}\x00 ", .{sum});
+            try out.writer.writeAll(bytes);
         },
     };
     return out.written();
@@ -595,7 +604,7 @@ test "an entry that climbs out, a link that leaves the tree, a hard link and a n
         .{ .members = &.{ .{ .name = "pkg/a", .data = "a" }, .{ .name = "pkg/a", .data = "b" } }, .err = error.NameClash, .entry = "pkg/a" },
         // A file written through a link: the link is a name, and nothing goes under it.
         .{ .members = &.{ .{ .name = "pkg/dir", .kind = .link, .data = "real" }, .{ .name = "pkg/real/x", .data = "a" }, .{ .name = "pkg/dir/y", .data = "b" } }, .err = error.NameClash, .entry = "pkg/dir" },
-        .{ .members = &.{.{ .name = "pkg/big", .data = "x" ** 2048 }}, .err = error.TooLarge, .entry = "pkg/big" },
+        .{ .members = &.{.{ .name = "pkg/big", .data = &@as([2048]u8, @splat('x')) }}, .err = error.TooLarge, .entry = "pkg/big" },
     }) |case| {
         var fixture: Fixture = try .init(a, try gzipOf(a, try tarOf(a, case.members)));
         defer fixture.deinit();
@@ -627,7 +636,7 @@ test "a stream cut short or damaged is refused as malformed" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const gzip = try gzipOf(a, try tarOf(a, &.{.{ .name = "pkg/a", .data = "a" ** 600 }}));
+    const gzip = try gzipOf(a, try tarOf(a, &.{.{ .name = "pkg/a", .data = &@as([600]u8, @splat('a')) }}));
     var cut: Fixture = try .init(a, gzip[0 .. gzip.len / 2]);
     defer cut.deinit();
     var diagnostic: Diagnostic = .{};
