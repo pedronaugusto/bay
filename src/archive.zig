@@ -409,6 +409,8 @@ const Zip = struct {
                 return error.UnsupportedMethod;
             },
         }
+        // A stored entry is its bytes: stored at another length than it declares, it is no zip.
+        if (entry.compression_method == .store and entry.compressed_size != entry.uncompressed_size) return error.Malformed;
         // A directory's name ends in a slash, and it holds no bytes.
         const directory = name[name.len - 1] == '/';
         if (directory and entry.uncompressed_size != 0) return error.Malformed;
@@ -568,6 +570,8 @@ const ZipMember = struct {
     data: []const u8 = "",
     method: std.zip.CompressionMethod = .deflate,
     encrypted: bool = false,
+    /// The size both headers declare, when not the data's own.
+    declared: ?u32 = null,
 };
 
 /// A zip of `members`, written by hand, as std writes none: each entry's header and bytes,
@@ -595,7 +599,7 @@ fn zipOf(a: std.mem.Allocator, members: []const ZipMember) ![]u8 {
             .last_modification_date = 0,
             .crc32 = crc,
             .compressed_size = @intCast(data.len),
-            .uncompressed_size = @intCast(member.data.len),
+            .uncompressed_size = member.declared orelse @intCast(member.data.len),
             .filename_len = @intCast(member.name.len),
             .extra_len = 0,
         }, .little);
@@ -611,7 +615,7 @@ fn zipOf(a: std.mem.Allocator, members: []const ZipMember) ![]u8 {
             .last_modification_date = 0,
             .crc32 = crc,
             .compressed_size = @intCast(data.len),
-            .uncompressed_size = @intCast(member.data.len),
+            .uncompressed_size = member.declared orelse @intCast(member.data.len),
             .filename_len = @intCast(member.name.len),
             .extra_len = 0,
             .comment_len = 0,
@@ -878,4 +882,65 @@ test "a zip cut short, or whose entry's header disagrees with its directory, is 
     var disagreeing: Fixture = try .init(a, changed);
     defer disagreeing.deinit();
     try testing.expectError(error.Malformed, disagreeing.unpacked(a, &diagnostic));
+}
+
+test "a zip entry holding more than it declares is never written past its declared size, and a stored one is refused" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var deflated: Fixture = try .init(a, try zipOf(a, &.{.{ .name = "pkg/a", .data = "declared, and more", .declared = 8 }}));
+    defer deflated.deinit();
+    var diagnostic: Diagnostic = .{};
+    try expectFile(a, try deflated.unpacked(a, &diagnostic), "a", "declared");
+    var stored: Fixture = try .init(a, try zipOf(a, &.{.{ .name = "pkg/a", .data = "declared, and more", .method = .store, .declared = 8 }}));
+    defer stored.deinit();
+    try testing.expectError(error.Malformed, stored.unpacked(a, &diagnostic));
+}
+
+test "any bytes made from a zip unpack within the bound or are refused" {
+    const shakedown = @import("shakedown");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const examples: []const []const u8 = &.{
+        try zipOf(a, &.{ .{ .name = "pkg/", .method = .store }, .{ .name = "pkg/bin/tool", .data = "#!/bin/sh\n" }, .{ .name = "pkg/lib", .data = "library", .method = .store } }),
+        try zipOf(a, &.{.{ .name = "a", .data = "declared, and more", .declared = 8 }}),
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const where = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    const Context = struct { examples: []const []const u8, tmp: Io.Dir, path: []const u8, into: []const u8 };
+    const property = struct {
+        const bound = 4096;
+        fn body(context: Context, case: *shakedown.Case) anyerror!void {
+            var bytes: [4096]u8 = undefined;
+            const input = shakedown.gen.mutated(case.source, &bytes, context.examples);
+            var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer scratch.deinit();
+            const s = scratch.allocator();
+            try context.tmp.deleteTree(testing.io, "tree");
+            try context.tmp.writeFile(testing.io, .{ .sub_path = "archive", .data = input });
+            var digest: [Sha256.digest_length]u8 = undefined;
+            Sha256.hash(input, &digest, .{});
+            const archive = authenticate(testing.io, s, context.path, .{ .sha256 = digest, .size = input.len }, .none) catch return;
+            if (archive.format != .zip) return;
+            var diagnostic: Diagnostic = .{};
+            unpack(testing.io, s, archive, context.into, bound, &diagnostic) catch return;
+            // What was written is no larger than the bound, every byte of it in the tree.
+            var dir = try context.tmp.openDir(testing.io, "tree", .{ .iterate = true });
+            defer dir.close(testing.io);
+            var walker = try dir.walk(s);
+            var total: u64 = 0;
+            while (try walker.next(testing.io)) |entry| {
+                if (entry.kind == .file) total += (try entry.dir.statFile(testing.io, entry.basename, .{})).size;
+            }
+            try testing.expect(total <= bound);
+        }
+    };
+    try shakedown.check(testing.allocator, Context{
+        .examples = examples,
+        .tmp = tmp.dir,
+        .path = try std.fs.path.join(a, &.{ where, "archive" }),
+        .into = try std.fs.path.join(a, &.{ where, "tree" }),
+    }, property.body, .{});
 }
