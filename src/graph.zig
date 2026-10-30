@@ -115,16 +115,22 @@ fn duplicates(r: resolve.Resolution) !void {
 }
 
 /// `bay outdated`: each package the builds use whose remote has a newer
-/// release, and each built at a version its newest release retracts.
+/// release, and each built at a version its newest release retracts. A prebuilt is
+/// not listed, as no version protocol is common to its sources, and bay says so.
 pub fn outdated(r: resolve.Resolution) !void {
     const a = r.input.a;
     const scratch = try std.fs.path.join(a, &.{ r.input.package, ".zig-cache", "bay", "add" });
+    var prebuilts: std.array_hash_map.String(void) = .empty;
+    for ([_][]const select.Revision{ r.graph.mains.values(), r.graph.selected.values() }) |revisions| for (revisions) |revision| for (revision.pins) |pin| {
+        if (pin.place == .remote and pin.place.remote.prebuilt != null) try prebuilts.put(a, pin.key, {});
+    };
     var any = false;
     for (r.graph.selected.values()) |selected| {
         const remote = switch (selected.place) {
             .remote => |remote| remote,
             .directory => continue,
         };
+        if (remote.prebuilt != null) continue;
         const latest = try published.newest(r.input.io, a, r.input.zig, r.store, scratch, remote.url) orelse continue;
         if (remotes.isRetracted(latest.retracted, selected.version)) {
             any = true;
@@ -136,6 +142,7 @@ pub fn outdated(r: resolve.Resolution) !void {
         try say.out(r.input.io, "{s} {f} -> {f} (tag {s}{s})\n", .{ selected.identity.name, selected.version, latest.version, latest.tag, line });
     }
     if (!any) try say.note(r.input.io, "every package is at its newest release, and none is retracted", .{});
+    if (prebuilts.count() != 0) try say.note(r.input.io, "not listed, as prebuilts follow no version bay can read: {s}; bay update <name> <bay+https://…> moves one", .{try std.mem.join(a, ", ", prebuilts.keys())});
 }
 
 /// The hosts a vendored `zig-pkg` builds on.

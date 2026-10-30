@@ -173,6 +173,13 @@ fn string(arena: std.mem.Allocator, node: Zoir.Node) ParseError![]const u8 {
     return arena.dupe(u8, node.string_literal);
 }
 
+/// A path in a prebuilt's tree or its package, as a pin names it: one that stays inside
+/// (`tree.Inside`), as a dependency's manifest is another's word.
+fn inside(arena: std.mem.Allocator, node: Zoir.Node) ParseError![]const u8 {
+    const kept = @import("aegis").input.Untrusted([]const u8).init(try string(arena, node)).parse({}, @import("tree.zig").Inside.parse) catch return error.InvalidManifest;
+    return kept.path;
+}
+
 /// A list of strings: `.{ "0.2.1", "0.3.0" }`.
 fn strings(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError![]const []const u8 {
     const range = switch (node) {
@@ -232,7 +239,7 @@ fn dependencies(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Pa
             } else if (std.mem.eql(u8, field, "publisher")) {
                 publisher = try publisherOf(arena, zoir, pair.value);
             } else if (std.mem.eql(u8, field, "license")) {
-                license = try string(arena, pair.value);
+                license = try inside(arena, pair.value);
             } else switch (pair.value) {
                 .string_literal => |text| {
                     const copy = try arena.dupe(u8, text);
@@ -295,7 +302,7 @@ fn publisherOf(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Par
             if (fields.next(zoir) != null) return error.InvalidManifest;
             const text = try string(arena, only.value);
             if (std.mem.eql(u8, only.name, "minisign")) return .{ .minisign = text };
-            if (std.mem.eql(u8, only.name, "openpgp")) return .{ .openpgp = text };
+            if (std.mem.eql(u8, only.name, "openpgp")) return .{ .openpgp = try inside(arena, only.value) };
             return error.InvalidManifest;
         },
         else => return error.InvalidManifest,
@@ -647,6 +654,11 @@ test "a prebuilt's fields belong to a bay+ URL, which must have them all" {
         ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .publisher = .{ .openpgp = \"k\", .minisign = \"RW\" }, .license = \"LICENSE\"",
         // A prebuilt is fetched, never a path.
         ".path = \"a\", " ++ fields,
+        // A licence or key file outside the tree or the package: a dependency's manifest reaches no further.
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .publisher = .none, .license = \"../../.ssh/id_ed25519\"",
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .publisher = .none, .license = \"/etc/passwd\"",
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .publisher = .{ .openpgp = \"C:\\\\keys\\\\k.asc\" }, .license = \"LICENSE\"",
+        ".url = \"bay+https://example.org/a.zip\", .hash = \"N-V-x\", .sha256 = \"d1a8baa9b2309edf9fd11dff8cf3bbbfc7104f9093894ef2f2221445960a7e20\", .size = 1, .publisher = .{ .openpgp = \"keys/../../k.asc\" }, .license = \"LICENSE\"",
     }) |entry| {
         const text = try a.dupeSentinel(u8, try std.mem.concat(a, u8, &.{ ".{ .name = .demo, .dependencies = .{ .a = .{ ", entry, " } } }" }), 0);
         try std.testing.expectError(error.InvalidManifest, parse(a, text));

@@ -5,16 +5,20 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
+const manifest = @import("manifest.zig");
 const select = @import("select.zig");
 const resolve = @import("resolve.zig");
 const store = @import("store.zig");
 const say = @import("say.zig");
 
 /// Lists the packages the package's builds contain, its dependencies' dependencies
-/// included; `dev` adds what only its development uses.
+/// included; `dev` adds what only its development uses. A prebuilt is listed by the name
+/// its pin gives, with what its pin's licence file says, or that bay does not read it.
 pub fn list(r: resolve.Resolution, dev: bool) !void {
     const a = r.input.a;
-    var seen: std.array_hash_map.String(select.Revision) = .empty;
+    const io = r.input.io;
+    const Listed = struct { name: []const u8, revision: select.Revision, prebuilt: ?manifest.Prebuilt };
+    var seen: std.array_hash_map.String(Listed) = .empty;
     var pending: std.ArrayList(select.Pin) = .empty;
     try pending.appendSlice(a, try store.pins(a, r.input.package, r.input.parsed.normal));
     if (dev) try pending.appendSlice(a, try store.pins(a, r.input.package, r.input.parsed.dev));
@@ -22,28 +26,43 @@ pub fn list(r: resolve.Resolution, dev: bool) !void {
         const revision = r.graph.resolve(pin.place) orelse continue;
         const entry = try seen.getOrPut(a, revision.identity.name);
         if (entry.found_existing) continue;
-        entry.value_ptr.* = revision;
+        const prebuilt = if (pin.place == .remote) pin.place.remote.prebuilt else null;
+        entry.value_ptr.* = .{ .name = if (prebuilt != null) pin.key else revision.identity.name, .revision = revision, .prebuilt = prebuilt };
         try pending.appendSlice(a, revision.pins);
     }
     const Order = struct {
-        names: []const []const u8,
+        listed: []const Listed,
         pub fn lessThan(order: @This(), x: usize, y: usize) bool {
-            return std.mem.order(u8, order.names[x], order.names[y]) == .lt;
+            return std.mem.order(u8, order.listed[x].name, order.listed[y].name) == .lt;
         }
     };
-    seen.sort(Order{ .names = seen.keys() });
+    seen.sort(Order{ .listed = seen.values() });
     var unknown: usize = 0;
-    for (seen.values()) |revision| {
-        const directory = switch (revision.place) {
+    for (seen.values()) |listed| {
+        const directory = switch (listed.revision.place) {
             .remote => |remote| try r.store.directoryOf(remote),
             .directory => |directory| directory,
         };
-        const stated = try licenseOf(r.input.io, a, directory);
+        if (listed.prebuilt) |fields| {
+            try say.out(io, "{s} (prebuilt)  {s}\n", .{ listed.name, try prebuiltLicense(io, a, directory, fields.license) });
+            continue;
+        }
+        const stated = try licenseOf(io, a, directory);
         if (stated == null) unknown += 1;
-        try say.out(r.input.io, "{s} {f}  {s}\n", .{ revision.identity.name, revision.version, stated orelse "no license found" });
+        try say.out(io, "{s} {f}  {s}\n", .{ listed.name, listed.revision.version, stated orelse "no license found" });
     }
-    if (seen.count() == 0) try say.note(r.input.io, "the package has no dependencies", .{});
-    if (unknown != 0) try say.note(r.input.io, "{d} {s} no license bay can read: look at {s} before shipping", .{ unknown, if (unknown == 1) "package states" else "packages state", if (unknown == 1) "it" else "them" });
+    if (seen.count() == 0) try say.note(io, "the package has no dependencies", .{});
+    if (unknown != 0) try say.note(io, "{d} {s} no license bay can read: look at {s} before shipping", .{ unknown, if (unknown == 1) "package states" else "packages state", if (unknown == 1) "it" else "them" });
+}
+
+/// What a prebuilt's licence file, `file` in its tree at `directory`, states: its SPDX line
+/// or wording, read as a package's is, else that bay does not read it.
+fn prebuiltLicense(io: Io, a: std.mem.Allocator, directory: []const u8, file: []const u8) ![]const u8 {
+    const text = aegis.own.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, file }), a, .fromRaw(1 << 20)) catch |err| switch (err) {
+        error.FileNotFound => return a.print("no {s} in its tree, which its pin names: look before shipping", .{file}),
+        else => |e| return e,
+    };
+    return try identify(a, text) orelse a.print("terms in {s} that bay does not read: look before shipping", .{file});
 }
 
 /// The license a package's files state, as SPDX names it: each license file's,
@@ -103,6 +122,7 @@ pub fn identify(a: std.mem.Allocator, text: []const u8) !?[]const u8 {
         .{ .id = "GPL-3.0", .all = &.{ "GNU GENERAL PUBLIC LICENSE", "Version 3" } },
         .{ .id = "GPL-2.0", .all = &.{ "GNU GENERAL PUBLIC LICENSE", "Version 2" } },
         .{ .id = "MPL-2.0", .all = &.{"Mozilla Public License Version 2.0"} },
+        .{ .id = "Apache-2.0 WITH LLVM-exception", .all = &.{ "Apache License", "Version 2.0", "LLVM Exceptions to the Apache 2.0 License" } },
         .{ .id = "Apache-2.0", .all = &.{ "Apache License", "Version 2.0" } },
         .{ .id = "Unlicense", .all = &.{"This is free and unencumbered software released into the public domain"} },
         .{ .id = "BSL-1.0", .all = &.{"Boost Software License - Version 1.0"} },
@@ -141,6 +161,8 @@ test "a license is known by its identifier line or its wording, however it is wr
         .{ "MIT", "MIT License\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software" },
         .{ "MIT OR Apache-2.0", "// SPDX-License-Identifier: MIT OR Apache-2.0\n" },
         .{ "Apache-2.0", "                                 Apache License\n                           Version 2.0, January 2004" },
+        // LLVM's, as libc++ ships it: Apache's text with LLVM's exceptions after it.
+        .{ "Apache-2.0 WITH LLVM-exception", "The LLVM Project is under the Apache License v2.0 with LLVM Exceptions:\n\n                                 Apache License\n                           Version 2.0, January 2004\n...\n---- LLVM Exceptions to the Apache 2.0 License ----\n\nAs an exception, if, as a result of your compiling your source code" },
         .{ "BSD-3-Clause", "Redistribution and use in source and binary forms, with or without\nmodification... 3. Neither the name of the copyright holder" },
         .{ "BSD-2-Clause", "Redistribution and use in source and binary forms, with or without modification" },
         .{ "ISC", "Permission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice" },

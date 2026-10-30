@@ -327,7 +327,7 @@ test "bay add pins a prebuilt as it is served once its publisher vouches for it,
     try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)), ".license = \"third/COPYING\"") != null);
 }
 
-test "bay update moves a prebuilt to another URL as bay add checks it, and follows no ref of its own" {
+test "bay update moves a prebuilt to another URL as bay add checks it; bay outdated and bay licenses say what they read of it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var f: Fixture = try .init(arena.allocator());
@@ -338,7 +338,7 @@ test "bay update moves a prebuilt to another URL as bay add checks it, and follo
         .{ .path = "lib/data.zig", .body = "pub const text = \"from the first\";\n" },
     });
     const two: Published = try .init(&f, "layers-2", &.{
-        .{ .path = "LICENSE", .body = "MIT License\n" },
+        .{ .path = "LICENSE", .body = "SPDX-License-Identifier: MIT\n" },
         .{ .path = "lib/data.zig", .body = "pub const text = \"from the second\";\n" },
     });
     const signer: Signer = .{ .pair = try .generateDeterministic(@splat(9)) };
@@ -348,6 +348,7 @@ test "bay update moves a prebuilt to another URL as bay add checks it, and follo
     const origin = try a.print("bay+http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
     const served = [_]Served{
         .{ .path = "/layers-1.tar.gz", .body = one.archive },
+        .{ .path = "/layers-1.tar.gz.minisig", .body = try signer.sign(a, one.archive, "layers-1.tar.gz") },
         .{ .path = "/layers-2.tar.gz", .body = two.archive },
         .{ .path = "/layers-2.tar.gz.minisig", .body = try signer.sign(a, two.archive, "layers-2.tar.gz") },
         .{ .path = "/unvouched/layers-2.tar.gz", .body = two.archive },
@@ -365,6 +366,14 @@ test "bay update moves a prebuilt to another URL as bay add checks it, and follo
     try std.testing.expect(succeeded(alone));
     try std.testing.expect(std.mem.find(u8, alone.stderr, "layers is a prebuilt, which follows no ref; bay update layers <bay+https://…> moves it") != null);
     try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)));
+    // Its licence file's wording is no licence bay knows, and bay licenses says to look.
+    const unread = try f.bay("app", &.{"licenses"});
+    try std.testing.expect(succeeded(unread));
+    try std.testing.expect(std.mem.find(u8, unread.stdout, "layers (prebuilt)  terms in LICENSE that bay does not read: look before shipping\n") != null);
+    // Nor has bay outdated a version of it to compare, and it says so.
+    const outdated = try f.bay("app", &.{"outdated"});
+    try std.testing.expect(succeeded(outdated));
+    try std.testing.expect(std.mem.find(u8, outdated.stderr, "not listed, as prebuilts follow no version bay can read: layers;") != null);
 
     // Its publisher does not vouch for what the new URL serves: refused, the manifest as it was.
     const unvouched = try f.bay("app", &.{ "update", "layers", try a.print("{s}/unvouched/layers-2.tar.gz", .{origin}) });
@@ -386,4 +395,8 @@ test "bay update moves a prebuilt to another URL as bay add checks it, and follo
     const ran = try f.bay("app", &.{ "build", "run" });
     if (!succeeded(ran)) std.debug.print("{s}\n", .{ran.stderr});
     try std.testing.expect(std.mem.find(u8, ran.stderr, "from the second") != null);
+    // bay licenses reads the licence file its pin names: an SPDX line now.
+    const stated = try f.bay("app", &.{"licenses"});
+    try std.testing.expect(succeeded(stated));
+    try std.testing.expect(std.mem.find(u8, stated.stdout, "layers (prebuilt)  MIT\n") != null);
 }

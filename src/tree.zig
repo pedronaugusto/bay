@@ -23,6 +23,19 @@ pub fn contained(path: []const u8) bool {
     return true;
 }
 
+/// A path a tree names that stays inside it (`contained`), read from what another
+/// wrote: a prebuilt pin's licence or key file, by its package's manifest.
+pub const Inside = struct {
+    path: []const u8,
+
+    pub const Error = error{Outside};
+
+    pub fn parse(_: void, text: []const u8) Error!Inside {
+        if (!contained(text)) return error.Outside;
+        return .{ .path = text };
+    }
+};
+
 /// A link's target as the tree stores it, written as it is, and the path inside the
 /// tree it reaches when it stays inside: `..` and `.` resolved by name from the link's
 /// folder. A target that leaves the tree, or is absolute, reaches nothing here.

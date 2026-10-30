@@ -270,6 +270,8 @@ fn digestOf(c: Context, path: []const u8) !archive.Expected {
 fn licenseIn(c: Context, url: []const u8, tree: []const u8, license: License) ![]const u8 {
     const io = c.io;
     const a = c.a;
+    if (license == .given and !@import("tree.zig").contained(license.given))
+        try say.fail(io, "{s}: --license names a file in the archive's tree, by a path inside it", .{license.given});
     switch (license) {
         .given, .before => |path| if (Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ tree, path }), .{})) |_| return path else |err| switch (err) {
             error.FileNotFound => if (license == .given) try say.fail(io, "{s} holds no {s}: --license names a file in the archive's tree", .{ url, path }),
