@@ -404,3 +404,94 @@ test "bay update moves a prebuilt to another URL as bay add checks it; bay outda
     try std.testing.expect(succeeded(stated));
     try std.testing.expect(std.mem.find(u8, stated.stdout, "layers (prebuilt)  MIT\n") != null);
 }
+
+/// An OpenPGP key and the detached signatures it makes, binary, as RFC 9580 writes a v4
+/// Ed25519 one: the public key packet, and a signature of a binary document over SHA-256
+/// whose hashed part names the key's fingerprint.
+const PgpSigner = struct {
+    pair: Ed25519.KeyPair,
+
+    /// The key packet (tag 6): version 4, created at 1, Ed25519 (27), the 32-byte point.
+    fn key(signer: PgpSigner) [40]u8 {
+        return [_]u8{ 0xc6, 38, 4, 0, 0, 0, 1, 27 } ++ signer.pair.public_key.toBytes();
+    }
+
+    fn sign(signer: PgpSigner, a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+        var fingerprint: [20]u8 = undefined;
+        std.crypto.hash.Sha1.hash(&([_]u8{ 0x99, 0, 38 } ++ signer.key()[2..].*), &fingerprint, .{});
+        // Version, binary document, Ed25519, SHA-256, then 29 bytes of subpackets: the issuer's
+        // fingerprint (33) and the creation time (2).
+        const hashed = [_]u8{ 4, 0x00, 27, 8, 0, 29 } ++ [_]u8{ 22, 33, 4 } ++ fingerprint ++ [_]u8{ 5, 2, 0, 0, 0, 1 };
+        var sha256: Sha256 = .init(.{});
+        sha256.update(bytes);
+        sha256.update(&hashed);
+        sha256.update(&[_]u8{ 4, 0xff, 0, 0, 0, hashed.len });
+        const digest = sha256.finalResult();
+        const value = (try signer.pair.sign(&digest, null)).toBytes();
+        const body = hashed ++ [_]u8{ 0, 0 } ++ digest[0..2].* ++ value;
+        return a.dupe(u8, &([_]u8{ 0xc2, body.len } ++ body));
+    }
+};
+
+test "a prebuilt whose publisher signs with OpenPGP is pinned by the key file its package ships, and brought again by it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const a = f.a;
+    const layers: Published = try .init(&f, "layers-1", &.{
+        .{ .path = "LICENSE", .body = "SPDX-License-Identifier: Apache-2.0\n" },
+        .{ .path = "lib/data.zig", .body = "pub const text = \"from the signed prebuilt\";\n" },
+    });
+    const publisher: PgpSigner = .{ .pair = try .generateDeterministic(@splat(11)) };
+    const stranger: PgpSigner = .{ .pair = try .generateDeterministic(@splat(12)) };
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(f.io, .{});
+    defer listener.deinit(f.io);
+    const origin = try a.print("bay+http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    const served = [_]Served{
+        .{ .path = "/layers-1.tar.gz", .body = layers.archive },
+        .{ .path = "/layers-1.tar.gz.sig", .body = try publisher.sign(a, layers.archive) },
+        .{ .path = "/forged/layers-1.tar.gz", .body = layers.archive },
+        .{ .path = "/forged/layers-1.tar.gz.sig", .body = try stranger.sign(a, layers.archive) },
+    };
+    var server = try f.io.concurrent(serve, .{ f.io, &listener, &served });
+    defer server.cancel(f.io) catch {};
+    try consumer(&f, "app", "", build_from_layers);
+    try f.tmp.dir.createDirPath(f.io, "app/keys");
+    try f.write("app", "keys/publisher.gpg", &publisher.key());
+    try f.write(".", "outside.gpg", &publisher.key());
+    const manifest_path = try std.fs.path.join(a, &.{ "app", "build.zig.zon" });
+    const before = try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16));
+
+    // A key from outside the package: a dependency's pin is checked with the key its package ships.
+    const outside = try f.bay("app", &.{ "add", "--name", "layers", "--openpgp", "../outside.gpg", try a.print("{s}/layers-1.tar.gz", .{origin}) });
+    try std.testing.expect(refused(outside));
+    try std.testing.expect(std.mem.find(u8, outside.stderr, "is not in the package") != null);
+    // A signature by a key the file does not hold: refused, the manifest as it was.
+    const forged = try f.bay("app", &.{ "add", "--name", "layers", "--openpgp", "keys/publisher.gpg", try a.print("{s}/forged/layers-1.tar.gz", .{origin}) });
+    try std.testing.expect(refused(forged));
+    try std.testing.expect(std.mem.find(u8, forged.stderr, "is not what its publisher vouches for") != null);
+    try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)));
+
+    const added = try f.bay("app", &.{ "add", "--name", "layers", "--openpgp", "keys/publisher.gpg", try a.print("{s}/layers-1.tar.gz", .{origin}) });
+    if (!succeeded(added)) std.debug.print("{s}\n", .{added.stderr});
+    try std.testing.expect(succeeded(added));
+    const pinned = try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16));
+    for ([_][]const u8{ layers.hash, ".publisher = .{ .openpgp = \"keys/publisher.gpg\" }", ".license = \"LICENSE\"" }) |part| {
+        if (std.mem.find(u8, pinned, part) == null) std.debug.print("{s} lacks {s}\n", .{ pinned, part });
+        try std.testing.expect(std.mem.find(u8, pinned, part) != null);
+    }
+
+    // Gone from the package's zig-pkg, Zig's cache and bay's, it is downloaded and checked
+    // again by the key file the pin names, read from the package's directory.
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "app", "zig-pkg" }));
+    try layers.uncached(&f);
+    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "data", "bay", "prebuilt" }));
+    const ran = try f.bay("app", &.{ "build", "run" });
+    if (!succeeded(ran)) std.debug.print("{s}\n", .{ran.stderr});
+    try std.testing.expect(std.mem.find(u8, ran.stderr, "from the signed prebuilt") != null);
+    try std.testing.expect(layers.kept(&f));
+    const stated = try f.bay("app", &.{"licenses"});
+    try std.testing.expect(succeeded(stated));
+    try std.testing.expect(std.mem.find(u8, stated.stdout, "layers (prebuilt)  Apache-2.0\n") != null);
+}
