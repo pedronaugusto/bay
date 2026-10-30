@@ -102,7 +102,7 @@ fn install(io: Io, a: std.mem.Allocator, client: *std.http.Client, version: []co
     var verifier = minisign.Verifier.init(signature, zig_key) catch |err|
         try say.fail(io, "{s} is not Zig's signature: {t}", .{ signature_url, err });
     // A signature for another of Zig's files is still Zig's: the trusted comment names the file it signs.
-    if (!signs(signature.trusted_comment, file)) try say.fail(io, "{s} signs another file than {s}: {s}", .{ signature_url, file, signature.trusted_comment });
+    if (!minisign.signs(signature.trusted_comment, file)) try say.fail(io, "{s} signs another file than {s}: {s}", .{ signature_url, file, signature.trusted_comment });
 
     // Beside the toolchains, so the last step is a rename within one file system.
     const partial = try a.print("{s}.partial", .{home});
@@ -185,14 +185,6 @@ fn known(a: std.mem.Allocator, text: []const u8) ![]const u8 {
         try list.appendSlice(a, name);
     }
     return list.items;
-}
-
-/// Whether minisign's trusted comment, tab-separated `key:value` fields as
-/// Zig writes it, names `file` as the file signed.
-fn signs(comment: []const u8, file: []const u8) bool {
-    var fields = std.mem.splitScalar(u8, comment, '\t');
-    while (fields.next()) |field| if (std.mem.startsWith(u8, field, "file:")) return std.mem.eql(u8, field["file:".len..], file);
-    return false;
 }
 
 /// Downloads `build` to `archive`, no longer than the index says it is.
@@ -315,12 +307,6 @@ test "a release is found by its version, a development version only as master" {
     try testing.expectError(error.InvalidIndex, lookup(a, "[]", "0.17.0", "aarch64-macos"));
     try testing.expectError(error.InvalidBuild, lookup(a, "{\"0.17.0\": {\"aarch64-macos\": {\"tarball\": \"x\", \"shasum\": \"00\", \"size\": \"1\"}}}", "0.17.0", "aarch64-macos"));
     try testing.expectEqualStrings("0.18.0-dev.146+35accc06e, 0.17.0", try known(a, recorded_index));
-}
-
-test "the trusted comment must name the file downloaded" {
-    try testing.expect(signs("timestamp:1790965659\tfile:zig-aarch64-macos-0.17.0.tar.xz\thashed", "zig-aarch64-macos-0.17.0.tar.xz"));
-    try testing.expect(!signs("timestamp:1790965659\tfile:zig-aarch64-macos-0.16.0.tar.xz\thashed", "zig-aarch64-macos-0.17.0.tar.xz"));
-    try testing.expect(!signs("timestamp:1790965659", "zig-aarch64-macos-0.17.0.tar.xz"));
 }
 
 test {

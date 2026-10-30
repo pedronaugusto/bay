@@ -19,9 +19,11 @@ const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha512 = std.crypto.hash.sha2.Sha512;
 const zstd = std.compress.zstd;
 const flate = std.compress.flate;
 const openpgp = @import("openpgp.zig");
+const minisign = @import("minisign.zig");
 const tree = @import("tree.zig");
 
 /// A prebuilt archive's format.
@@ -52,8 +54,72 @@ pub const Publisher = union(enum) {
     /// An OpenPGP detached signature over the archive by a key of `keys` (openpgp.zig),
     /// each as the bytes read from its file.
     openpgp: struct { keys: []const u8, signature: []const u8 },
+    /// A minisign signature over the archive by `key` (minisign.zig), as its `.minisig`
+    /// holds it, whose trusted comment names `file`: the archive's name where it is published.
+    minisign: struct { key: []const u8, signature: []const u8, file: []const u8 },
+    /// The archive's SHA-512 as its publisher's index holds it, apart from the archive
+    /// (NuGet's catalog).
+    sha512: [Sha512.digest_length]u8,
     /// No one: chosen by hand, so the pin's digest is all that holds the archive.
     none,
+};
+
+/// The publisher's word, checked against the archive's bytes as they are read.
+const Witness = union(enum) {
+    openpgp: openpgp.Verifier,
+    minisign: minisign.Verifier,
+    sha512: struct { state: Sha512, expected: [Sha512.digest_length]u8 },
+    none,
+
+    /// Every publisher's word refused alike: the archive is not one it vouches for.
+    fn of(a: std.mem.Allocator, publisher: Publisher) !Witness {
+        switch (publisher) {
+            .none => return .none,
+            .sha512 => |expected| return .{ .sha512 = .{ .state = .init(.{}), .expected = expected } },
+            .openpgp => |signed| {
+                const keys = aegis.input.Untrusted([]const u8).init(signed.keys).parse(a, openpgp.Keys.parse) catch |err| switch (err) {
+                    error.OutOfMemory => |e| return e,
+                    else => return error.PublisherMismatch,
+                };
+                const signature = aegis.input.Untrusted([]const u8).init(signed.signature).parse(a, openpgp.Signature.parse) catch |err| switch (err) {
+                    error.OutOfMemory => |e| return e,
+                    else => return error.PublisherMismatch,
+                };
+                return .{ .openpgp = openpgp.Verifier.init(signature, keys) catch |err| switch (err) {
+                    error.OutOfMemory => |e| return e,
+                    else => return error.PublisherMismatch,
+                } };
+            },
+            .minisign => |signed| {
+                const key = minisign.PublicKey.parse(signed.key) catch return error.PublisherMismatch;
+                const signature = minisign.Signature.parse(signed.signature) catch return error.PublisherMismatch;
+                // A signature over another of the publisher's files is still the publisher's.
+                if (!minisign.signs(signature.trusted_comment, signed.file)) return error.PublisherMismatch;
+                return .{ .minisign = minisign.Verifier.init(signature, key) catch return error.PublisherMismatch };
+            },
+        }
+    }
+
+    fn update(witness: *Witness, bytes: []const u8) void {
+        switch (witness.*) {
+            .openpgp => |*verifier| verifier.update(bytes),
+            .minisign => |*verifier| verifier.update(bytes),
+            .sha512 => |*sha512| sha512.state.update(bytes),
+            .none => {},
+        }
+    }
+
+    fn verify(witness: *Witness) !void {
+        switch (witness.*) {
+            .openpgp => |*verifier| verifier.verify() catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                else => return error.PublisherMismatch,
+            },
+            .minisign => |*verifier| verifier.verify() catch return error.PublisherMismatch,
+            .sha512 => |*sha512| if (!std.mem.eql(u8, &sha512.state.finalResult(), &sha512.expected)) return error.PublisherMismatch,
+            .none => {},
+        }
+    }
 };
 
 /// An archive whose bytes are the pin's and its publisher's: the only thing `unpack` reads.
@@ -67,30 +133,16 @@ pub const AuthenticateError = error{
     SizeMismatch,
     /// Its SHA-256 is not the pin's.
     DigestMismatch,
-    /// The publisher's key or signature cannot be read, or the signature is not over these bytes.
-    SignatureMismatch,
+    /// The publisher's word does not hold: its key or signature cannot be read, the
+    /// signature is not over these bytes or names another file, or its index holds
+    /// another digest.
+    PublisherMismatch,
 } || FormatError;
 
 /// Checks the archive at `path` against the pin, then against its publisher, then
 /// tells its format: nothing of it is read as an archive before each passes.
 pub fn authenticate(io: Io, a: std.mem.Allocator, path: []const u8, expected: Expected, publisher: Publisher) !Authenticated {
-    var verifier: ?openpgp.Verifier = switch (publisher) {
-        .none => null,
-        .openpgp => |signed| verifier: {
-            const keys = aegis.input.Untrusted([]const u8).init(signed.keys).parse(a, openpgp.Keys.parse) catch |err| switch (err) {
-                error.OutOfMemory => |e| return e,
-                else => return error.SignatureMismatch,
-            };
-            const signature = aegis.input.Untrusted([]const u8).init(signed.signature).parse(a, openpgp.Signature.parse) catch |err| switch (err) {
-                error.OutOfMemory => |e| return e,
-                else => return error.SignatureMismatch,
-            };
-            break :verifier openpgp.Verifier.init(signature, keys) catch |err| switch (err) {
-                error.OutOfMemory => |e| return e,
-                else => return error.SignatureMismatch,
-            };
-        },
-    };
+    var witness: Witness = try .of(a, publisher);
     const file = try Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     var reader = file.readerStreaming(io, &.{});
@@ -110,15 +162,12 @@ pub fn authenticate(io: Io, a: std.mem.Allocator, path: []const u8, expected: Ex
         // A longer file is refused as soon as it is seen to be longer.
         if (length > expected.size) return error.SizeMismatch;
         sha256.update(buffer[0..n]);
-        if (verifier) |*v| v.update(buffer[0..n]);
+        witness.update(buffer[0..n]);
         if (n < buffer.len) break;
     }
     if (length != expected.size) return error.SizeMismatch;
     if (!std.mem.eql(u8, &sha256.finalResult(), &expected.sha256)) return error.DigestMismatch;
-    if (verifier) |*v| v.verify() catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        else => return error.SignatureMismatch,
-    };
+    try witness.verify();
     return .{ .path = path, .format = try formatOf(head[0..@min(head.len, length)]) };
 }
 
@@ -751,8 +800,8 @@ test "an archive that is not the pin's, or not its publisher's, is refused befor
     var forged: Fixture = try .init(a, changed);
     defer forged.deinit();
     // The pin follows the changed bytes; the publisher's signature does not.
-    try testing.expectError(error.SignatureMismatch, authenticate(testing.io, a, forged.path, forged.expected, by_key));
-    try testing.expectError(error.SignatureMismatch, authenticate(testing.io, a, forged.path, forged.expected, .{ .openpgp = .{ .keys = "not a key", .signature = openpgp.sample.signature } }));
+    try testing.expectError(error.PublisherMismatch, authenticate(testing.io, a, forged.path, forged.expected, by_key));
+    try testing.expectError(error.PublisherMismatch, authenticate(testing.io, a, forged.path, forged.expected, .{ .openpgp = .{ .keys = "not a key", .signature = openpgp.sample.signature } }));
     // An xz that is the pin's is refused by name once authenticated.
     var xz: Fixture = try .init(a, "\xfd7zXZ\x00\x00\x04");
     defer xz.deinit();
@@ -943,4 +992,31 @@ test "any bytes made from a zip unpack within the bound or are refused" {
         .path = try std.fs.path.join(a, &.{ where, "archive" }),
         .into = try std.fs.path.join(a, &.{ where, "tree" }),
     }, property.body, .{});
+}
+
+test "a minisign signature naming the archive, or the SHA-512 its publisher's index holds, vouches for it; another does not" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try zipOf(a, &.{.{ .name = "pkg/a", .data = "a" }});
+    var fixture: Fixture = try .init(a, bytes);
+    defer fixture.deinit();
+    var signer: minisign.Signer = try .init(3, "keyid-03".*);
+    defer signer.deinit();
+    var key_buffer: [64]u8 = undefined;
+    const key = signer.publicKey(&key_buffer);
+    const signature = try signer.sign(a, bytes, .prehashed, "timestamp:1\tfile:layers.zip\thashed");
+    _ = try authenticate(testing.io, a, fixture.path, fixture.expected, .{ .minisign = .{ .key = key, .signature = signature, .file = "layers.zip" } });
+    // The publisher's signature over another of its files.
+    try testing.expectError(error.PublisherMismatch, authenticate(testing.io, a, fixture.path, fixture.expected, .{ .minisign = .{ .key = key, .signature = signature, .file = "other.zip" } }));
+    // Another key's.
+    var other: minisign.Signer = try .init(4, "keyid-04".*);
+    defer other.deinit();
+    var other_buffer: [64]u8 = undefined;
+    try testing.expectError(error.PublisherMismatch, authenticate(testing.io, a, fixture.path, fixture.expected, .{ .minisign = .{ .key = other.publicKey(&other_buffer), .signature = signature, .file = "layers.zip" } }));
+    var sha512: [Sha512.digest_length]u8 = undefined;
+    Sha512.hash(bytes, &sha512, .{});
+    _ = try authenticate(testing.io, a, fixture.path, fixture.expected, .{ .sha512 = sha512 });
+    sha512[0] ^= 1;
+    try testing.expectError(error.PublisherMismatch, authenticate(testing.io, a, fixture.path, fixture.expected, .{ .sha512 = sha512 }));
 }
