@@ -47,6 +47,30 @@ pub fn treeSize(hash: []const u8) ?u64 {
     return std.mem.readInt(u32, plus[4..8], .little);
 }
 
+/// The hash Zig gives a package, read as `zig fetch` prints it: `name-version-` and 44
+/// base64url characters, no longer than `Package.Hash.max_len`, the name an identifier's
+/// characters and the version semver's. Zig keeps the tree under it as one folder's name, as
+/// bay's store does, so it holds no separator and no `..`.
+pub const ZigHash = struct {
+    text: []const u8,
+
+    pub const Error = error{NotPackageHash};
+
+    pub fn parse(_: void, text: []const u8) Error!ZigHash {
+        const hash = std.mem.trim(u8, text, " \r\n");
+        if (hash.len < 44 or hash.len > 32 + 1 + 32 + 1 + 44) return error.NotPackageHash;
+        const head = hash[0 .. hash.len - 44];
+        const name_end = std.mem.findScalar(u8, head, '-') orelse return error.NotPackageHash;
+        if (name_end == 0 or name_end > 32 or name_end + 2 >= head.len or head[head.len - 1] != '-') return error.NotPackageHash;
+        for (head[0..name_end]) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_') return error.NotPackageHash;
+        const version = head[name_end + 1 .. head.len - 1];
+        if (version.len > 32 or std.mem.find(u8, version, "..") != null) return error.NotPackageHash;
+        for (version) |byte| if (!std.ascii.isAlphanumeric(byte) and std.mem.findScalar(u8, "-.+", byte) == null) return error.NotPackageHash;
+        if (treeSize(hash) == null) return error.NotPackageHash;
+        return .{ .text = hash };
+    }
+};
+
 /// What bringing a prebuilt needs of this machine.
 pub const Context = struct {
     io: Io,
@@ -284,7 +308,9 @@ fn zigFetch(c: Context, tree: []const u8) ![]const u8 {
         try say.relay(c.io, result.stderr);
         try say.fail(c.io, "{s} fetch refused {s}", .{ c.zig, tree });
     }
-    return std.mem.trim(u8, result.stdout, " \r\n");
+    const hash = aegis.input.Untrusted([]const u8).init(result.stdout).parse({}, ZigHash.parse) catch
+        try say.fail(c.io, "{s} fetch printed no package hash for {s}: {s}", .{ c.zig, tree, result.stdout });
+    return hash.text;
 }
 
 /// The SHA-512 nuget.org's catalog holds for the package at `https`, which must be in the
@@ -412,6 +438,16 @@ test "the tree's size is what Zig's hash records" {
     var encoded: [44]u8 = undefined;
     _ = std.base64.url_safe_no_pad.Encoder.encode(&encoded, &plus);
     try testing.expectEqual(6218920, treeSize("N-V-" ++ encoded));
+}
+
+test "zig fetch's output is read as a package hash, one folder's name" {
+    const plus = "AAAAACj6XgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    try testing.expectEqualStrings("app-0.1.0-" ++ plus, (try ZigHash.parse({}, "app-0.1.0-" ++ plus ++ "\n")).text);
+    try testing.expectEqualStrings("zlib_ng-2.2.4+zig.1-rc-" ++ plus, (try ZigHash.parse({}, "zlib_ng-2.2.4+zig.1-rc-" ++ plus)).text);
+    for ([_][]const u8{ "", "app-0.1.0-short", "app-" ++ plus, "-0.1.0-" ++ plus, "app--" ++ plus, "../a-0.1.0-" ++ plus, "app-0.1/..-" ++ plus, "app-..-" ++ plus, "a\\b-0.1.0-" ++ plus, "app-0.1.0-" ++ plus[0..43] ++ "/", "app-0.1.0-" ++ plus[0..43] ++ "=" }) |text|
+        try testing.expectError(error.NotPackageHash, ZigHash.parse({}, text));
+    try testing.expectError(error.NotPackageHash, ZigHash.parse({}, &@as([33]u8, @splat('a')) ++ "-0.1.0-" ++ plus));
+    try testing.expectError(error.NotPackageHash, ZigHash.parse({}, "app-" ++ &@as([33]u8, @splat('1')) ++ "-" ++ plus));
 }
 
 test "a publisher's signature names the file at the URL's end" {
