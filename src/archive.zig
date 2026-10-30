@@ -268,7 +268,7 @@ fn check(comptime Source: type, io: Io, a: std.mem.Allocator, archive: Authentic
             diagnostic.entry = entry.name;
             return error.LinkOutside;
         };
-        const target = try tree.LinkTarget.parse(.{ .a = a, .link = path }, entry.link);
+        const target = try aegis.input.Untrusted([]const u8).init(entry.link).parse(tree.LinkTarget.Where{ .a = a, .link = path }, tree.LinkTarget.parse);
         if (target.within == null) {
             diagnostic.entry = entry.name;
             return error.LinkOutside;
@@ -307,7 +307,7 @@ fn write(comptime Source: type, io: Io, a: std.mem.Allocator, archive: Authentic
                 };
                 try writer.interface.flush();
             },
-            .sym_link => try links.append(a, .{ .path = path, .target = try tree.LinkTarget.parse(.{ .a = a, .link = path }, entry.link) }),
+            .sym_link => try links.append(a, .{ .path = path, .target = try aegis.input.Untrusted([]const u8).init(entry.link).parse(tree.LinkTarget.Where{ .a = a, .link = path }, tree.LinkTarget.parse) }),
         }
     }
     if (index != plan.entries.len) return error.ArchiveChanged;

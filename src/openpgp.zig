@@ -53,7 +53,7 @@ pub const Keys = struct {
     pub fn parse(a: std.mem.Allocator, text: []const u8) Error!Keys {
         const bytes = try dearmor(a, text, "PUBLIC KEY BLOCK");
         var list: std.ArrayList(Key) = .empty;
-        var packets: Packets = .{ .bytes = bytes };
+        var packets: Packets = .{ .rest = bytes };
         while (try packets.next()) |packet| {
             // 6: a public key; 14: a public subkey.
             if (packet.tag != 6 and packet.tag != 14) continue;
@@ -86,7 +86,7 @@ fn parseKey(body: []const u8) Error!Key {
     if (body.len > 0xffff) return error.Malformed;
     fingerprint.update(body);
     var key: Key = .{ .fingerprint = fingerprint.finalResult(), .public = undefined };
-    var fields: Cursor = .{ .bytes = body[6..] };
+    var fields: Cursor = .{ .rest = body[6..] };
     switch (body[5]) {
         // RSA, and RSA sign-only.
         1, 3 => {
@@ -184,7 +184,7 @@ pub const Signature = struct {
     /// `text`, or into what `a` decoded it into.
     pub fn parse(a: std.mem.Allocator, text: []const u8) Error!Signature {
         const bytes = try dearmor(a, text, "SIGNATURE");
-        var packets: Packets = .{ .bytes = bytes };
+        var packets: Packets = .{ .rest = bytes };
         const packet = try packets.next() orelse return error.Malformed;
         if (packet.tag != 2 or try packets.next() != null) return error.Malformed;
         return parseSignature(packet.body);
@@ -192,14 +192,14 @@ pub const Signature = struct {
 };
 
 fn parseSignature(body: []const u8) Error!Signature {
-    var fields: Cursor = .{ .bytes = body };
+    var fields: Cursor = .{ .rest = body };
     if (try fields.byte() != 4) return error.UnsupportedVersion;
     // 0x00: a signature of a binary document.
     if (try fields.byte() != 0x00) return error.UnsupportedSignatureType;
     const algorithm = try fields.byte();
     const hash: Hash = try .of(try fields.byte());
     const hashed_subpackets = try fields.take(try fields.int(u16));
-    var signature: Signature = .{ .hash = hash, .hashed = body[0..fields.at], .issuer = null, .issuer_id = null, .left = undefined, .value = undefined };
+    var signature: Signature = .{ .hash = hash, .hashed = body[0 .. body.len - fields.rest.len], .issuer = null, .issuer_id = null, .left = undefined, .value = undefined };
     try readSubpackets(&signature, hashed_subpackets, true);
     try readSubpackets(&signature, try fields.take(try fields.int(u16)), false);
     if (signature.issuer == null and signature.issuer_id == null) return error.UnnamedKey;
@@ -219,13 +219,13 @@ fn parseSignature(body: []const u8) Error!Signature {
         27 => signature.value = .{ .ed25519 = (try fields.take(64))[0..64].* },
         else => return error.UnsupportedAlgorithm,
     }
-    if (fields.at != body.len) return error.Malformed;
+    if (fields.rest.len != 0) return error.Malformed;
     return signature;
 }
 
 fn readSubpackets(signature: *Signature, bytes: []const u8, hashed: bool) Error!void {
-    var fields: Cursor = .{ .bytes = bytes };
-    while (fields.at < bytes.len) {
+    var fields: Cursor = .{ .rest = bytes };
+    while (fields.rest.len != 0) {
         const first = try fields.byte();
         const length: usize = switch (first) {
             0...191 => first,
@@ -320,14 +320,14 @@ fn verifyRsa(key: Certificate.rsa.PublicKey, hash: Hash, digest: []const u8, val
 /// (an old packet's indeterminate one, a new packet's partial one) is not
 /// something a key or a signature is written with, and is refused.
 const Packets = struct {
-    bytes: []const u8,
-    at: usize = 0,
+    /// The packets not read yet.
+    rest: []const u8,
 
     const Packet = struct { tag: u8, body: []const u8 };
 
     fn next(packets: *Packets) Error!?Packet {
-        if (packets.at == packets.bytes.len) return null;
-        var fields: Cursor = .{ .bytes = packets.bytes, .at = packets.at };
+        if (packets.rest.len == 0) return null;
+        var fields: Cursor = .{ .rest = packets.rest };
         const header = try fields.byte();
         if (header & 0x80 == 0) return error.Malformed;
         var tag: u8 = undefined;
@@ -351,20 +351,20 @@ const Packets = struct {
             };
         }
         const body = try fields.take(length);
-        packets.at = fields.at;
+        packets.rest = fields.rest;
         return .{ .tag = tag, .body = body };
     }
 };
 
-/// Reads fields from the front of `bytes`, refusing to read past its end.
+/// Reads fields from the front of `rest`, the bytes not read yet, refusing to read past its end.
 const Cursor = struct {
-    bytes: []const u8,
-    at: usize = 0,
+    rest: []const u8,
 
     fn take(cursor: *Cursor, length: usize) Error![]const u8 {
-        if (length > cursor.bytes.len - cursor.at) return error.Malformed;
-        defer cursor.at += length;
-        return cursor.bytes[cursor.at..][0..length];
+        const rest = cursor.rest;
+        if (length > rest.len) return error.Malformed;
+        cursor.rest = rest[length..];
+        return rest[0..length];
     }
 
     fn byte(cursor: *Cursor) Error!u8 {
