@@ -67,75 +67,103 @@ const Signer = struct {
     }
 };
 
+/// An archive a publisher ships: a tar.gz of `files` under one top directory, its
+/// SHA-256, and the hash Zig gives the tree it holds, which is then taken out of Zig's
+/// cache, so only bay brings it back.
+const Published = struct {
+    archive: []const u8,
+    sha256: [Sha256.digest_length]u8,
+    hash: []const u8,
+
+    fn init(f: *Fixture, top: []const u8, files: []const Served) !Published {
+        const a = f.a;
+        var tar: Io.Writer.Allocating = .init(a);
+        var writer: std.tar.Writer = .{ .underlying_writer = &tar.writer };
+        try writer.setRoot(top);
+        for (files) |file| try writer.writeFileBytes(file.path, file.body, .{});
+        try writer.finishPedantically();
+        const archive = try gzipOf(a, tar.written());
+        var sha256: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(archive, &sha256, .{});
+        const tree = try a.print("{s}-tree", .{top});
+        for (files) |file| {
+            try f.tmp.dir.createDirPath(f.io, try std.fs.path.join(a, &.{ tree, std.fs.path.dirname(file.path) orelse "." }));
+            try f.write(tree, file.path, file.body);
+        }
+        const hashed = try std.process.run(a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(a, &.{ f.root, tree }) }, .environ_map = &f.env });
+        try std.testing.expect(succeeded(hashed));
+        const published: Published = .{ .archive = archive, .sha256 = sha256, .hash = std.mem.trim(u8, hashed.stdout, "\r\n") };
+        try published.uncached(f);
+        return published;
+    }
+
+    /// Zig's copy of the tree gone from its cache.
+    fn uncached(published: Published, f: *Fixture) !void {
+        const packages = try std.fs.path.join(f.a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
+        try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, published.hash }));
+        try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(f.a, &.{ packages, try f.a.print("{s}.tar.gz", .{published.hash}) }));
+    }
+
+    /// Whether bay keeps the archive in its data directory: it was brought.
+    fn kept(published: Published, f: *Fixture) bool {
+        const path = std.fs.path.join(f.a, &.{ f.root, "data", "bay", "prebuilt", f.a.print("{x}", .{&published.sha256}) catch return false }) catch return false;
+        Io.Dir.cwd().access(f.io, path, .{}) catch return false;
+        return true;
+    }
+
+    /// A dependency entry pinning the archive at `url`, its publisher `publisher` (ZON).
+    fn pin(published: Published, f: *Fixture, name: []const u8, url: []const u8, publisher: []const u8, lazy: bool) ![]const u8 {
+        return f.a.print(".{s} = .{{ .url = \"{s}\", .hash = \"{s}\", .lazy = {}, .sha256 = \"{x}\", .size = {d}, .publisher = {s}, .license = \"LICENSE\" }},", .{ name, url, published.hash, lazy, &published.sha256, published.archive.len, publisher });
+    }
+};
+
+/// A package `dir` whose build is `build` and whose program prints `@import("data").text`.
+fn consumer(f: *Fixture, dir: []const u8, dependencies: []const u8, build: []const u8) !void {
+    try f.tmp.dir.createDirPath(f.io, try std.fs.path.join(f.a, &.{ dir, "src" }));
+    try f.write(dir, "build.zig.zon", try f.a.print(".{{ .name = .{s}, .version = \"0.1.0\", .fingerprint = 0x{x}, .minimum_zig_version = \"0.17.0\", .paths = .{{\"\"}}, .dependencies = .{{ {s} }} }}\n", .{ dir, fixture.fingerprint(dir), dependencies }));
+    try f.write(dir, "build.zig", build);
+    try f.write(dir, "src/main.zig", "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"{s}\\n\", .{@import(\"data\").text}); }");
+}
+
+/// A build whose program's `data` is the prebuilt `layers`' `lib/data.zig`.
+const build_from_layers =
+    \\const std = @import("std");
+    \\pub fn build(b: *std.Build) void {
+    \\    const layers = b.dependency("layers", .{});
+    \\    const m = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = b.graph.host });
+    \\    m.addImport("data", b.createModule(.{ .root_source_file = layers.path("lib/data.zig") }));
+    \\    const exe = b.addExecutable(.{ .name = "app", .root_module = m });
+    \\    b.step("run", "Run").dependOn(&b.addRunArtifact(exe).step);
+    \\}
+    \\
+;
+
 test "a prebuilt pin is brought by bay fetch, checked by its digest and its publisher's signature, and built from" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var f: Fixture = try .init(arena.allocator());
     defer f.deinit();
     const a = f.a;
-    // What the publisher ships, under one top directory, as an archive Zig's fetch is not given.
-    const files = [_]Served{
+    const layers: Published = try .init(&f, "layers-1", &.{
         .{ .path = "LICENSE", .body = "MIT License\n" },
         .{ .path = "lib/data.zig", .body = "pub const text = \"from the prebuilt\";\n" },
-    };
-    var tar: Io.Writer.Allocating = .init(a);
-    var writer: std.tar.Writer = .{ .underlying_writer = &tar.writer };
-    try writer.setRoot("layers-1");
-    for (files) |file| try writer.writeFileBytes(file.path, file.body, .{});
-    try writer.finishPedantically();
-    const archive = try gzipOf(a, tar.written());
-    var sha256: [Sha256.digest_length]u8 = undefined;
-    Sha256.hash(archive, &sha256, .{});
-    // The hash Zig gives the tree the archive holds once its top directory is taken away;
-    // then out of Zig's cache, so only bay can bring it back.
-    for (files) |file| {
-        try f.tmp.dir.createDirPath(f.io, try std.fs.path.join(a, &.{ "tree", std.fs.path.dirname(file.path) orelse "." }));
-        try f.write("tree", file.path, file.body);
-    }
-    const hashed = try std.process.run(a, f.io, .{ .argv = &.{ options.zig, "fetch", try std.fs.path.join(a, &.{ f.root, "tree" }) }, .environ_map = &f.env });
-    try std.testing.expect(succeeded(hashed));
-    const hash = std.mem.trim(u8, hashed.stdout, "\r\n");
-    const packages = try std.fs.path.join(a, &.{ f.env.get("ZIG_GLOBAL_CACHE_DIR").?, "p" });
-    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ packages, hash }));
-    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ packages, try a.print("{s}.tar.gz", .{hash}) }));
-
+    });
     const signer: Signer = .{ .pair = try .generateDeterministic(@splat(9)) };
     var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(f.io, .{});
     defer listener.deinit(f.io);
     const served = [_]Served{
-        .{ .path = "/layers-1.tar.gz", .body = archive },
-        .{ .path = "/layers-1.tar.gz.minisig", .body = try signer.sign(a, archive, "layers-1.tar.gz") },
+        .{ .path = "/layers-1.tar.gz", .body = layers.archive },
+        .{ .path = "/layers-1.tar.gz.minisig", .body = try signer.sign(a, layers.archive, "layers-1.tar.gz") },
     };
     var server = try f.io.concurrent(serve, .{ f.io, &listener, &served });
     defer server.cancel(f.io) catch {};
     const url = try a.print("bay+http://127.0.0.1:{d}/layers-1.tar.gz", .{listener.socket.address.getPort()});
-
-    const build =
-        \\const std = @import("std");
-        \\pub fn build(b: *std.Build) void {
-        \\    const layers = b.dependency("layers", .{});
-        \\    const m = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = b.graph.host });
-        \\    m.addImport("data", b.createModule(.{ .root_source_file = layers.path("lib/data.zig") }));
-        \\    const exe = b.addExecutable(.{ .name = "app", .root_module = m });
-        \\    b.step("run", "Run").dependOn(&b.addRunArtifact(exe).step);
-        \\}
-        \\
-    ;
-    for ([_][]const u8{ "app", "forged" }) |dir| {
-        try f.tmp.dir.createDirPath(f.io, try std.fs.path.join(a, &.{ dir, "src" }));
-        // The forged pin holds another digest than the archive's.
-        var digest = sha256;
-        if (std.mem.eql(u8, dir, "forged")) digest[0] ^= 1;
-        try f.write(dir, "build.zig.zon", try a.print(
-            \\.{{ .name = .{s}, .version = "0.1.0", .fingerprint = 0x{x}, .minimum_zig_version = "0.17.0", .paths = .{{""}}, .dependencies = .{{ .layers = .{{
-            \\    .url = "{s}", .hash = "{s}", .sha256 = "{x}", .size = {d},
-            \\    .publisher = .{{ .minisign = "{s}" }}, .license = "LICENSE",
-            \\}} }} }}
-            \\
-        , .{ dir, fixture.fingerprint(dir), url, hash, &digest, archive.len, try signer.publicKey(a) }));
-        try f.write(dir, "build.zig", build);
-        try f.write(dir, "src/main.zig", "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"{s}\\n\", .{@import(\"data\").text}); }");
-    }
+    const publisher = try a.print(".{{ .minisign = \"{s}\" }}", .{try signer.publicKey(a)});
+    try consumer(&f, "app", try layers.pin(&f, "layers", url, publisher, false), build_from_layers);
+    // The forged pin holds another digest than the archive's.
+    var forged_pin = layers;
+    forged_pin.sha256[0] ^= 1;
+    try consumer(&f, "forged", try forged_pin.pin(&f, "layers", url, publisher, false), build_from_layers);
 
     const fetched = try f.bay("app", &.{"fetch"});
     if (!succeeded(fetched)) std.debug.print("{s}\n", .{fetched.stderr});
@@ -147,9 +175,68 @@ test "a prebuilt pin is brought by bay fetch, checked by its digest and its publ
 
     // A tree Zig holds by its hash is that tree: bay downloads nothing then, and checks
     // nothing. Out of Zig's cache again, the forged pin's archive is downloaded and refused.
-    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ packages, hash }));
-    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ packages, try a.print("{s}.tar.gz", .{hash}) }));
+    try layers.uncached(&f);
     const forged = try f.bay("forged", &.{"fetch"});
     try std.testing.expect(refused(forged));
     try std.testing.expect(std.mem.find(u8, forged.stderr, "SHA-256 is not its pin's") != null);
+}
+
+test "a build brings the prebuilts it takes: one not lazy before it runs, a lazy one only when its configuration asks for it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const a = f.a;
+    const always: Published = try .init(&f, "always-1", &.{
+        .{ .path = "LICENSE", .body = "MIT License\n" },
+        .{ .path = "lib/data.zig", .body = "pub const text = \"from the one always taken\";\n" },
+    });
+    const asked: Published = try .init(&f, "asked-1", &.{
+        .{ .path = "LICENSE", .body = "MIT License\n" },
+        .{ .path = "lib/data.zig", .body = "pub const text = \"from the one asked for\";\n" },
+    });
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(f.io, .{});
+    defer listener.deinit(f.io);
+    const served = [_]Served{
+        .{ .path = "/always-1.tar.gz", .body = always.archive },
+        .{ .path = "/asked-1.tar.gz", .body = asked.archive },
+    };
+    var server = try f.io.concurrent(serve, .{ f.io, &listener, &served });
+    defer server.cancel(f.io) catch {};
+    const port = listener.socket.address.getPort();
+    const pins = try std.mem.concat(a, u8, &.{
+        try always.pin(&f, "always", try a.print("bay+http://127.0.0.1:{d}/always-1.tar.gz", .{port}), ".none", false),
+        try asked.pin(&f, "asked", try a.print("bay+http://127.0.0.1:{d}/asked-1.tar.gz", .{port}), ".none", true),
+    });
+    try consumer(&f, "app", pins,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const always = b.dependency("always", .{});
+        \\    const data = if (b.option(bool, "asked", "Take the lazy prebuilt") orelse false)
+        \\        (b.lazyDependency("asked", .{}) orelse return).path("lib/data.zig")
+        \\    else
+        \\        always.path("lib/data.zig");
+        \\    const m = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = b.graph.host });
+        \\    m.addImport("data", b.createModule(.{ .root_source_file = data }));
+        \\    const exe = b.addExecutable(.{ .name = "app", .root_module = m });
+        \\    b.step("run", "Run").dependOn(&b.addRunArtifact(exe).step);
+        \\}
+        \\
+    );
+
+    const plain = try f.bay("app", &.{ "build", "run" });
+    if (!succeeded(plain)) std.debug.print("{s}\n", .{plain.stderr});
+    try std.testing.expect(succeeded(plain));
+    try std.testing.expect(std.mem.find(u8, plain.stderr, "from the one always taken") != null);
+    try std.testing.expect(always.kept(&f));
+    try std.testing.expect(!asked.kept(&f));
+
+    // The line bay's probe reads, as this Zig writes it: a Zig that changes it turns this red.
+    const probed = try f.run("app", &.{ options.zig, "build", "-Dasked", "-l" });
+    try std.testing.expect(std.mem.find(u8, probed.stderr, try a.print("info: fetching lazy dependency {s}\n", .{asked.hash})) != null);
+    const asking = try f.bay("app", &.{ "build", "-Dasked", "run" });
+    if (!succeeded(asking)) std.debug.print("{s}\n", .{asking.stderr});
+    try std.testing.expect(succeeded(asking));
+    try std.testing.expect(std.mem.find(u8, asking.stderr, "from the one asked for") != null);
+    try std.testing.expect(asked.kept(&f));
 }

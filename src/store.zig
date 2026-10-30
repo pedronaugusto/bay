@@ -109,7 +109,7 @@ pub const Store = struct {
 
     /// Whether Zig finds the package `hash` without fetching it: unpacked in the
     /// project's zig-pkg, or kept in Zig's cache.
-    fn withZig(store: *Store, hash: []const u8) !bool {
+    pub fn withZig(store: *Store, hash: []const u8) !bool {
         const places = [_][]const u8{
             try std.fs.path.join(store.a, &.{ store.directories[0], hash }),
             try std.fs.path.join(store.a, &.{ store.global, "p", hash }),

@@ -15,6 +15,7 @@ const git = @import("git.zig");
 const published = @import("published.zig");
 const each = @import("each.zig");
 const store = @import("store.zig");
+const select = @import("select.zig");
 const licenses = @import("licenses.zig");
 const audit = @import("audit.zig");
 const say = @import("say.zig");
@@ -398,6 +399,7 @@ fn buildable(env: Env, parsed: manifest.Manifest) !resolve.Resolution {
 
 /// Runs zig build over a resolved graph.
 fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where, before: []const []const u8, after: []const []const u8) !u8 {
+    try bringPrebuilts(env, parsed, resolution, where, before, after);
     const argv = try buildArgv(env, parsed, resolution, where, before, after);
     var child = std.process.spawn(env.io, .{ .argv = argv, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
@@ -405,6 +407,42 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
         .exited => |code| code,
         else => 1,
     };
+}
+
+/// What Zig logs, configuring a build, for each lazy package the configuration asks for,
+/// before it fetches any (Zig 0.17, `Maker.zig`). Zig's text, not an interface: should a
+/// Zig change it, the probe finds nothing and the build stops at the pin's own line,
+/// never running without it.
+const asks_lazy = "info: fetching lazy dependency ";
+
+/// The prebuilts a build of `where` takes, brought into Zig's cache, as Zig fetches none:
+/// every one that is not lazy, before the build; a lazy one only when the build, run with
+/// the same arguments to list its steps, asks for it as it configures. A lazy prebuilt
+/// nothing asks for is never fetched: another host's, or another option's.
+fn bringPrebuilts(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where, before: []const []const u8, after: []const []const u8) !void {
+    var lazy: std.array_hash_map.String(select.Place.Remote) = .empty;
+    for ([_][]const select.Revision{ resolution.graph.mains.values(), resolution.graph.selected.values() }) |revisions| for (revisions) |revision| for (revision.pins) |pin| {
+        const remote = switch (pin.place) {
+            .remote => |remote| remote,
+            .directory => continue,
+        };
+        // The package's build takes none of what only its development pins.
+        if (remote.prebuilt == null or (where == .package and pin.dev)) continue;
+        if (!pin.lazy) {
+            _ = try resolution.store.directoryOf(remote);
+        } else if (!try resolution.store.withZig(remote.hash)) try lazy.put(env.a, remote.hash, remote);
+    };
+    if (lazy.count() == 0) return;
+    // Zig names what the configuration asks for, then stops at a prebuilt's URL, which it cannot fetch.
+    const probe = try buildArgv(env, parsed, resolution, where, try std.mem.concat(env.a, []const u8, &.{ before, &.{"-l"} }), after);
+    const listed = std.process.run(env.a, env.io, .{ .argv = probe, .cwd = .{ .path = env.package }, .environ_map = env.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+        try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
+    var lines = std.mem.splitScalar(u8, listed.stderr, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.find(u8, line, asks_lazy) orelse continue;
+        const hash = std.mem.trim(u8, line[at + asks_lazy.len ..], " \r");
+        if (lazy.get(hash)) |remote| _ = try resolution.store.directoryOf(remote);
+    }
 }
 
 /// Zig's listing of the steps of the package's build (`.package`) or its development
