@@ -63,7 +63,7 @@ pub const Context = struct {
 pub fn bring(c: Context, url: []const u8, hash: []const u8, fields: manifest.Prebuilt) !void {
     const io = c.io;
     const a = c.a;
-    const https = try httpsOf(c, url);
+    const https = try httpsOf(c, url, fields.publisher);
     const bound = treeSize(hash) orelse try say.fail(io, "{s} is pinned as {s}, which is no hash Zig gives a package", .{ url, hash });
     const kept = try keptDirectory(c);
     // One at a time: another bay bringing a prebuilt waits here, then finds what it brought.
@@ -92,7 +92,7 @@ const largest: u64 = std.math.maxInt(u32);
 pub fn pin(c: Context, url: []const u8, publisher: manifest.Publisher, package: []const u8, license: ?[]const u8) !Pinned {
     const io = c.io;
     const a = c.a;
-    const https = try httpsOf(c, url);
+    const https = try httpsOf(c, url, publisher);
     const word: manifest.Publisher = switch (publisher) {
         .openpgp => |key_file| key: {
             const whole = try std.fs.path.resolveAlloc(a, &.{ package, key_file });
@@ -113,8 +113,12 @@ pub fn pin(c: Context, url: []const u8, publisher: manifest.Publisher, package: 
     return .{ .hash = hash, .prebuilt = .{ .sha256 = fetched.expected.sha256, .size = fetched.expected.size, .publisher = publisher, .license = stated } };
 }
 
-fn httpsOf(c: Context, url: []const u8) ![]const u8 {
-    return publisherUrl(url) catch try say.fail(c.io, "{s}: a prebuilt is fetched over https (bay+https://), or plain http from this machine's loopback address", .{url});
+/// The publisher's URL a pin names, refused by name before anything is downloaded: one
+/// over neither https nor loopback http, or one `.nuget` vouches for that is not nuget.org's.
+fn httpsOf(c: Context, url: []const u8, publisher: manifest.Publisher) ![]const u8 {
+    const https = publisherUrl(url) catch try say.fail(c.io, "{s}: a prebuilt is fetched over https (bay+https://), or plain http from this machine's loopback address", .{url});
+    if (publisher == .nuget and !onNuget(https)) try say.fail(c.io, "{s}: .nuget is nuget.org's word, read from {s}; a package on another feed is refused until its pin can name that feed's index", .{ url, nuget_index });
+    return https;
 }
 
 /// Where bay keeps prebuilt archives, by their SHA-256: in its data directory.
@@ -283,14 +287,13 @@ fn zigFetch(c: Context, tree: []const u8) ![]const u8 {
     return std.mem.trim(u8, result.stdout, " \r\n");
 }
 
-/// The SHA-512 the NuGet catalog holds for the package at `https`: the service index at its
-/// host's `/v3/index.json` (nuget.org's own, for nuget.org) must name a package base the URL
-/// is in, as `<id>/<version>/<id>.<version>.nupkg`. nuget.org's word over TLS, read apart
-/// from the package (designs/bay.md §11).
+/// The SHA-512 nuget.org's catalog holds for the package at `https`, which must be in the
+/// package base its service index names, as `<id>/<version>/<id>.<version>.nupkg`: nuget.org's
+/// word over TLS, read apart from the package (designs/bay.md §11).
 fn nugetHash(c: Context, client: *std.http.Client, https: []const u8) ![Sha512.digest_length]u8 {
     const io = c.io;
     const a = c.a;
-    const index = try serviceIndex(a, https);
+    const index = nuget_index;
     const resources = nugetResources(a, try download.getAlloc(client, a, index, 1 << 20)) catch
         try say.fail(io, "{s} is not a NuGet service index bay can read", .{index});
     const package = nugetPackage(resources.base, https) orelse
@@ -306,11 +309,14 @@ fn nugetHash(c: Context, client: *std.http.Client, https: []const u8) ![Sha512.d
     };
 }
 
-/// The NuGet service index of the host serving `url`: its origin's `/v3/index.json`.
-fn serviceIndex(a: std.mem.Allocator, url: []const u8) ![]const u8 {
-    const scheme_end = (std.mem.find(u8, url, "://") orelse return error.InvalidUrl) + "://".len;
-    const origin_end = std.mem.findScalarPos(u8, url, scheme_end, '/') orelse url.len;
-    return a.print("{s}/v3/index.json", .{url[0..origin_end]});
+/// nuget.org's service index: `.nuget` is nuget.org's word, read from there alone.
+const nuget_index = "https://api.nuget.org/v3/index.json";
+
+/// Whether `url` is nuget.org's, which a `.nuget` publisher vouches for. Another feed keeps
+/// its index where it likes (Azure Artifacts under `/_packaging/<feed>/nuget/v3/`), so its
+/// URL tells nothing of it: refused until a pin can name its feed's index.
+pub fn onNuget(url: []const u8) bool {
+    return std.mem.startsWith(u8, url, "https://api.nuget.org/");
 }
 
 /// The two resources of a NuGet service index a `.nuget` publisher reads.
@@ -431,7 +437,9 @@ test "nuget.org's index, registration and catalog give the package's SHA-512" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("https://api.nuget.org/v3/index.json", try serviceIndex(a, "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.619.6/microsoft.direct3d.d3d12.1.619.6.nupkg"));
+    try testing.expect(onNuget("https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.619.6/microsoft.direct3d.d3d12.1.619.6.nupkg"));
+    try testing.expect(!onNuget("https://pkgs.dev.azure.com/org/_packaging/feed/nuget/v3/flat2/x/1.0.0/x.1.0.0.nupkg"));
+    try testing.expect(!onNuget("https://api.nuget.org.example.com/x.nupkg"));
     const resources = try nugetResources(a, recorded_index);
     try testing.expectEqualStrings("https://api.nuget.org/v3-flatcontainer/", resources.base);
     try testing.expectEqualStrings("https://api.nuget.org/v3/registration5-semver1/", resources.registrations);

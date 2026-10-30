@@ -277,17 +277,10 @@ test "bay add pins a prebuilt as it is served once its publisher vouches for it,
     var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(f.io, .{});
     defer listener.deinit(f.io);
     const origin = try a.print("http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
-    var sha512: [std.crypto.hash.sha2.Sha512.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha512.hash(layers.archive, &sha512, .{});
-    var sha512_text: [88]u8 = undefined;
-    // A NuGet feed as nuget.org serves one: its service index, a registration leaf, a catalog entry.
     const served = [_]Served{
         .{ .path = "/layers-1.tar.gz", .body = layers.archive },
         .{ .path = "/layers-1.tar.gz.minisig", .body = try signer.sign(a, layers.archive, "layers-1.tar.gz") },
         .{ .path = "/two-1.tar.gz", .body = two.archive },
-        .{ .path = "/v3/index.json", .body = try a.print("{{\"resources\":[{{\"@id\":\"{s}/flat/\",\"@type\":\"PackageBaseAddress/3.0.0\"}},{{\"@id\":\"{s}/reg/\",\"@type\":\"RegistrationsBaseUrl\"}}]}}", .{ origin, origin }) },
-        .{ .path = "/reg/layers/1.0.0.json", .body = try a.print("{{\"catalogEntry\":\"{s}/catalog/layers.1.0.0.json\"}}", .{origin}) },
-        .{ .path = "/catalog/layers.1.0.0.json", .body = try a.print("{{\"id\":\"Layers\",\"version\":\"1.0.0\",\"packageHash\":\"{s}\",\"packageHashAlgorithm\":\"SHA512\"}}", .{std.base64.standard.Encoder.encode(&sha512_text, &sha512)}) },
         .{ .path = "/flat/layers/1.0.0/layers.1.0.0.nupkg", .body = layers.archive },
     };
     var server = try f.io.concurrent(serve, .{ f.io, &listener, &served });
@@ -315,11 +308,13 @@ test "bay add pins a prebuilt as it is served once its publisher vouches for it,
     if (!succeeded(ran)) std.debug.print("{s}\n", .{ran.stderr});
     try std.testing.expect(std.mem.find(u8, ran.stderr, "from the prebuilt") != null);
 
-    // A NuGet package, its SHA-512 the feed's catalog's.
+    // .nuget is nuget.org's word: a package on another feed is refused, downloading nothing.
+    const pinned_before = try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16));
     const nuget = try f.bay("app", &.{ "add", "--name", "nupkg", "--nuget", try a.print("bay+{s}/flat/layers/1.0.0/layers.1.0.0.nupkg", .{origin}) });
-    if (!succeeded(nuget)) std.debug.print("{s}\n", .{nuget.stderr});
-    try std.testing.expect(succeeded(nuget));
-    try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)), ".publisher = .nuget") != null);
+    try std.testing.expect(refused(nuget));
+    try std.testing.expect(std.mem.find(u8, nuget.stderr, ".nuget is nuget.org's word") != null);
+    try std.testing.expect(std.mem.find(u8, nuget.stderr, "downloading") == null);
+    try std.testing.expectEqualStrings(pinned_before, try f.tmp.dir.readFileAlloc(f.io, manifest_path, a, .limited(1 << 16)));
 
     // Two files name a licence: one must be chosen.
     const two_url = try a.print("bay+{s}/two-1.tar.gz", .{origin});
