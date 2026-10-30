@@ -1,9 +1,11 @@
 //! The archives bay unpacks itself: a prebuilt pin's (designs/bay.md §11), which
-//! Zig's fetch refuses. One format, a tar compressed by gzip or by zstd, told by
-//! its first bytes, never by its name or what the server calls it. xz and zip are
-//! refused by name, so std's xz reader, which panics where a tar is skipped through
-//! (`discard`), and its unzip, which checks no CRC, are never reached; bzip2 has no
-//! decoder in std.
+//! Zig's fetch refuses. Three formats, told by their first bytes, never by a name or
+//! what the server calls them: a tar compressed by gzip or by zstd, and a zip of
+//! stored or deflated entries (a NuGet package is one). xz is refused by name, so
+//! std's xz reader, which panics where a tar is skipped through (`discard`), is never
+//! reached; bzip2 has no decoder in std. A zip is read by std's own reader, an
+//! encrypted entry refused, and its CRCs are not checked (std's `verify_checksums`
+//! panics, unwritten).
 //!
 //! An archive is read only once it is authenticated (`authenticate`): its size and
 //! SHA-256 those the pin holds, then its publisher's signature over its bytes, so
@@ -23,17 +25,18 @@ const openpgp = @import("openpgp.zig");
 const tree = @import("tree.zig");
 
 /// A prebuilt archive's format.
-pub const Format = enum { tar_gzip, tar_zstd };
+pub const Format = enum { tar_gzip, tar_zstd, zip };
 
 /// The formats bay knows and refuses, and the bytes it does not know.
-pub const FormatError = error{ Xz, Zip, Bzip2, UnknownFormat };
+pub const FormatError = error{ Xz, Bzip2, UnknownFormat };
 
 /// The format an archive's first bytes say.
 pub fn formatOf(head: []const u8) FormatError!Format {
     if (std.mem.startsWith(u8, head, "\x1f\x8b")) return .tar_gzip;
     if (std.mem.startsWith(u8, head, "\x28\xb5\x2f\xfd")) return .tar_zstd;
+    // A zip's first entry, or the end record of a zip with none.
+    if (std.mem.startsWith(u8, head, "PK\x03\x04") or std.mem.startsWith(u8, head, "PK\x05\x06")) return .zip;
     if (std.mem.startsWith(u8, head, "\xfd7zXZ\x00")) return error.Xz;
-    if (std.mem.startsWith(u8, head, "PK\x03\x04") or std.mem.startsWith(u8, head, "PK\x05\x06")) return error.Zip;
     if (std.mem.startsWith(u8, head, "BZh")) return error.Bzip2;
     return error.UnknownFormat;
 }
@@ -124,12 +127,16 @@ pub fn authenticate(io: Io, a: std.mem.Allocator, path: []const u8, expected: Ex
 pub const zstd_window_max: u64 = 128 << 20;
 
 pub const UnpackError = error{
-    /// The compressed stream or the tar in it is not one std reads.
+    /// The compressed stream, the tar in it, or the zip is not one std reads.
     Malformed,
     /// A zstd frame declares a window above `zstd_window_max`, or none.
     WindowTooLarge,
     /// An entry other than a file, a directory or a symbolic link: a hard link, a device.
     UnsupportedEntry,
+    /// A zip entry compressed other than stored or deflated.
+    UnsupportedMethod,
+    /// An encrypted zip entry.
+    Encrypted,
     /// A name that is absolute, climbs out with `..`, or that some system cannot hold
     /// (a backslash, `:`, a control byte, a Windows device name, a trailing dot or space).
     UnsafeName,
@@ -147,17 +154,24 @@ pub const UnpackError = error{
 /// What an unpack refused, by name: the entry that made it refuse.
 pub const Diagnostic = struct { entry: []const u8 = "" };
 
-/// Unpacks `archive` into `into`, which it makes, as Zig's fetch unpacks a tar: every entry
-/// checked first, the tree no larger than `bytes`, then written with links last.
+/// Unpacks `archive` into `into`, which it makes, as Zig's fetch unpacks a tar or a zip:
+/// every entry checked first, the tree no larger than `bytes`, then written with links last.
 pub fn unpack(io: Io, a: std.mem.Allocator, archive: Authenticated, into: []const u8, bytes: u64, diagnostic: *Diagnostic) !void {
-    const plan = try check(io, a, archive, bytes, diagnostic);
-    var out = try Io.Dir.cwd().createDirPathOpen(io, into, .{});
-    defer out.close(io);
-    try write(io, a, archive, plan, out, diagnostic);
+    switch (archive.format) {
+        .tar_gzip, .tar_zstd => try unpackFrom(Tar, io, a, archive, into, bytes, diagnostic),
+        .zip => try unpackFrom(Zip, io, a, archive, into, bytes, diagnostic),
+    }
     try tree.markExecutables(io, a, into);
 }
 
-/// An entry as the first reading found it, its name made relative and plain.
+fn unpackFrom(comptime Source: type, io: Io, a: std.mem.Allocator, archive: Authenticated, into: []const u8, bytes: u64, diagnostic: *Diagnostic) !void {
+    const plan = try check(Source, io, a, archive, bytes, diagnostic);
+    var out = try Io.Dir.cwd().createDirPathOpen(io, into, .{});
+    defer out.close(io);
+    try write(Source, io, a, archive, plan, out, diagnostic);
+}
+
+/// An entry: as its archive spells it when read, its name made relative and plain in a plan.
 const Entry = struct {
     name: []const u8,
     kind: std.tar.FileKind,
@@ -172,31 +186,31 @@ const Plan = struct {
 };
 
 /// The first reading: every entry's name, kind, size and link checked, nothing written.
-fn check(io: Io, a: std.mem.Allocator, archive: Authenticated, bytes: u64, diagnostic: *Diagnostic) !Plan {
-    var tar: Tar = undefined;
-    try tar.open(io, a, archive);
-    defer tar.close(io);
+fn check(comptime Source: type, io: Io, a: std.mem.Allocator, archive: Authenticated, bytes: u64, diagnostic: *Diagnostic) !Plan {
+    var source: Source = undefined;
+    try source.open(io, a, archive);
+    defer source.close(io);
     var entries: std.ArrayList(Entry) = .empty;
     var names: std.StringHashMapUnmanaged(Seen) = .empty;
     var total: u64 = 0;
     var root: ?[]const u8 = null;
-    while (try tar.next(a, diagnostic)) |file| {
-        const name = try plain(a, file.name, diagnostic);
+    while (try source.next(a, diagnostic)) |found| {
+        const name = try plain(a, found.name, diagnostic);
         if (name.len == 0) continue;
-        try entries.append(a, .{ .name = name, .kind = file.kind, .size = file.size, .link = try a.dupe(u8, file.link_name) });
-        total +|= file.size;
+        try entries.append(a, .{ .name = name, .kind = found.kind, .size = found.size, .link = try a.dupe(u8, found.link) });
+        total +|= found.size;
         if (total > bytes) {
             diagnostic.entry = name;
             return error.TooLarge;
         }
-        // Zig's root rule (`std.tar.Diagnostics.findRoot`): every entry under one top
-        // directory, a top directory's own entry among them.
+        // Zig's root rule (`std.tar.Diagnostics.findRoot`, `std.zip.Diagnostics.nextFilename`):
+        // every entry under one top directory, a top directory's own entry among them.
         const first = name[0 .. std.mem.findScalar(u8, name, '/') orelse name.len];
-        const top = if (first.len < name.len or file.kind == .directory) first else "";
+        const top = if (first.len < name.len or found.kind == .directory) first else "";
         if (root) |seen| {
             if (!std.mem.eql(u8, seen, top)) root = "";
         } else root = top;
-        try claim(a, &names, name, file.kind, diagnostic);
+        try claim(a, &names, name, found.kind, diagnostic);
     }
     const plan: Plan = .{ .entries = entries.items, .root = root orelse "" };
     for (plan.entries) |entry| {
@@ -215,32 +229,32 @@ fn check(io: Io, a: std.mem.Allocator, archive: Authenticated, bytes: u64, diagn
 }
 
 /// The second reading: the tree written as the first found it, links last.
-fn write(io: Io, a: std.mem.Allocator, archive: Authenticated, plan: Plan, out: Io.Dir, diagnostic: *Diagnostic) !void {
-    var tar: Tar = undefined;
-    try tar.open(io, a, archive);
-    defer tar.close(io);
+fn write(comptime Source: type, io: Io, a: std.mem.Allocator, archive: Authenticated, plan: Plan, out: Io.Dir, diagnostic: *Diagnostic) !void {
+    var source: Source = undefined;
+    try source.open(io, a, archive);
+    defer source.close(io);
     var links: std.ArrayList(tree.Link) = .empty;
     var index: usize = 0;
     var contents: [16 * 1024]u8 = undefined;
-    while (try tar.next(a, diagnostic)) |file| {
-        const name = try plain(a, file.name, diagnostic);
+    while (try source.next(a, diagnostic)) |found| {
+        const name = try plain(a, found.name, diagnostic);
         if (name.len == 0) continue;
         if (index == plan.entries.len) return error.ArchiveChanged;
         const entry = plan.entries[index];
         index += 1;
-        if (!std.mem.eql(u8, entry.name, name) or entry.kind != file.kind or entry.size != file.size or !std.mem.eql(u8, entry.link, file.link_name)) return error.ArchiveChanged;
+        if (!std.mem.eql(u8, entry.name, name) or entry.kind != found.kind or entry.size != found.size or !std.mem.eql(u8, entry.link, found.link)) return error.ArchiveChanged;
         // The top directory's own entry, or a directory: made by what is in it, and an empty one dropped.
         const path = stripped(plan.root, name) orelse continue;
-        switch (file.kind) {
+        switch (found.kind) {
             .directory => {},
             .file => {
                 if (std.fs.path.dirname(path)) |parent| try out.createDirPath(io, parent);
                 const written = try out.createFile(io, path, .{ .exclusive = true });
                 defer written.close(io);
                 var writer = written.writer(io, &contents);
-                tar.iterator.streamRemaining(file, &writer.interface) catch |err| switch (err) {
+                source.contents(&writer.interface) catch |err| switch (err) {
                     error.WriteFailed => return writer.err orelse err,
-                    error.ReadFailed, error.EndOfStream => return tar.failure(),
+                    else => |e| return e,
                 };
                 try writer.interface.flush();
             },
@@ -268,9 +282,11 @@ const Tar = struct {
     reader: Io.File.Reader,
     buffer: [64 * 1024]u8,
     /// The decompressor the tar is read through, and its window.
-    decompress: union(Format) { tar_gzip: flate.Decompress, tar_zstd: zstd.Decompress },
+    decompress: union(enum) { gzip: flate.Decompress, zstd: zstd.Decompress },
     window: []u8,
     iterator: std.tar.Iterator,
+    /// The entry `next` found last.
+    current: std.tar.Iterator.File,
     diagnostics: std.tar.Diagnostics,
     file_name: [Io.Dir.max_path_bytes]u8,
     link_name: [Io.Dir.max_path_bytes]u8,
@@ -285,15 +301,16 @@ const Tar = struct {
         const decompressed = switch (archive.format) {
             .tar_gzip => gzip: {
                 tar.window = try a.alloc(u8, flate.max_window_len);
-                tar.decompress = .{ .tar_gzip = .init(input, .gzip, tar.window) };
-                break :gzip &tar.decompress.tar_gzip.reader;
+                tar.decompress = .{ .gzip = .init(input, .gzip, tar.window) };
+                break :gzip &tar.decompress.gzip.reader;
             },
             .tar_zstd => zstd: {
                 const window = try windowOf(io, tar.file.borrow().*);
                 tar.window = try a.alloc(u8, window + zstd.block_size_max);
-                tar.decompress = .{ .tar_zstd = .init(input, tar.window, .{ .window_len = window }) };
-                break :zstd &tar.decompress.tar_zstd.reader;
+                tar.decompress = .{ .zstd = .init(input, tar.window, .{ .window_len = window }) };
+                break :zstd &tar.decompress.zstd.reader;
             },
+            .zip => unreachable, // unpack reads a zip as a Zip
         };
         tar.iterator = .init(decompressed, .{ .file_name_buffer = &tar.file_name, .link_name_buffer = &tar.link_name, .diagnostics = &tar.diagnostics });
     }
@@ -303,7 +320,7 @@ const Tar = struct {
     }
 
     /// The next file, directory or link; an entry of another kind is refused by name.
-    fn next(tar: *Tar, a: std.mem.Allocator, diagnostic: *Diagnostic) !?std.tar.Iterator.File {
+    fn next(tar: *Tar, a: std.mem.Allocator, diagnostic: *Diagnostic) !?Entry {
         const file = tar.iterator.next() catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.ReadFailed => return tar.failure(),
@@ -316,19 +333,102 @@ const Tar = struct {
             },
             else => return error.Malformed,
         };
-        return file;
+        tar.current = file orelse return null;
+        return .{ .name = tar.current.name, .kind = tar.current.kind, .size = tar.current.size, .link = tar.current.link_name };
+    }
+
+    /// The file `next` found, written to `w`.
+    fn contents(tar: *Tar, w: *Io.Writer) !void {
+        tar.iterator.streamRemaining(tar.current, w) catch |err| switch (err) {
+            error.WriteFailed => |e| return e,
+            error.ReadFailed, error.EndOfStream => return tar.failure(),
+        };
     }
 
     /// Why reading stopped: the file's error, or the stream's being no archive.
     fn failure(tar: *Tar) anyerror {
         if (tar.reader.err) |err| return err;
         return switch (tar.decompress) {
-            .tar_zstd => |d| if (d.err) |err| switch (err) {
+            .zstd => |d| if (d.err) |err| switch (err) {
                 error.WindowOversize, error.WindowSizeUnknown => error.WindowTooLarge,
                 else => error.Malformed,
             } else error.Malformed,
-            .tar_gzip => error.Malformed,
+            .gzip => error.Malformed,
         };
+    }
+};
+
+/// A zip's entries, in its central directory's order, read by std's zip reader: stored or
+/// deflated, never encrypted, each written by `Entry.extractTo` exactly as long as the
+/// directory says it is, and no CRC checked.
+const Zip = struct {
+    file: aegis.own.OwnedIo(Io.File, closeFile),
+    reader: Io.File.Reader,
+    buffer: [64 * 1024]u8,
+    iterator: std.zip.Iterator,
+    /// The entry `next` found last.
+    current: std.zip.Iterator.Entry,
+    name: [Io.Dir.max_path_bytes]u8,
+
+    /// Opens the archive in place: the reader points into `zip`.
+    fn open(zip: *Zip, io: Io, a: std.mem.Allocator, archive: Authenticated) !void {
+        _ = a;
+        zip.file = .init(try Io.Dir.cwd().openFile(io, archive.path, .{}));
+        errdefer zip.file.deinit(io);
+        zip.reader = zip.file.borrow().reader(io, &zip.buffer);
+        zip.iterator = std.zip.Iterator.init(&zip.reader) catch return zip.failure();
+    }
+
+    fn close(zip: *Zip, io: Io) void {
+        zip.file.deinit(io);
+    }
+
+    /// The next file or directory; an entry encrypted or compressed otherwise is refused,
+    /// by name where the directory gives one.
+    fn next(zip: *Zip, a: std.mem.Allocator, diagnostic: *Diagnostic) !?Entry {
+        const entry = (zip.iterator.next() catch |err| switch (err) {
+            error.ZipEncryptionUnsupported => return error.Encrypted,
+            else => return zip.failure(),
+        }) orelse return null;
+        // The name as std reads it, whatever the method: std reads no name of an entry
+        // compressed otherwise, and such an entry is refused naming it.
+        var named = entry;
+        named.compression_method = .store;
+        const name = named.getFilename(&zip.reader, &zip.name, .{}) catch |err| switch (err) {
+            // Read before std refuses it: a backslash, absolute, or `..`.
+            error.ZipFilenameHasBackslash, error.ZipBadFilename => {
+                diagnostic.entry = try a.dupe(u8, zip.name[0..entry.filename_len]);
+                return error.UnsafeName;
+            },
+            else => return zip.failure(),
+        };
+        switch (entry.compression_method) {
+            .store, .deflate => {},
+            else => {
+                diagnostic.entry = try a.dupe(u8, name);
+                return error.UnsupportedMethod;
+            },
+        }
+        // A directory's name ends in a slash, and it holds no bytes.
+        const directory = name[name.len - 1] == '/';
+        if (directory and entry.uncompressed_size != 0) return error.Malformed;
+        zip.current = entry;
+        return .{ .name = name, .kind = if (directory) .directory else .file, .size = entry.uncompressed_size, .link = "" };
+    }
+
+    /// The file `next` found, written to `w`.
+    fn contents(zip: *Zip, w: *Io.Writer) !void {
+        zip.current.extractTo(&zip.reader, w) catch |err| switch (err) {
+            error.WriteFailed => |e| return e,
+            else => return zip.failure(),
+        };
+    }
+
+    /// Why reading stopped: the file's error, or the zip's being none std reads.
+    fn failure(zip: *Zip) anyerror {
+        if (zip.reader.err) |err| return err;
+        if (zip.reader.seek_err) |err| return err;
+        return error.Malformed;
     }
 };
 
@@ -461,6 +561,82 @@ fn zstdOf(a: std.mem.Allocator, data: []const u8, exponent: u5) ![]u8 {
     }
 }
 
+/// What a test zip holds: an entry stored or deflated, or one encrypted, or compressed by
+/// a method std does not read; a directory's name ends in a slash.
+const ZipMember = struct {
+    name: []const u8,
+    data: []const u8 = "",
+    method: std.zip.CompressionMethod = .deflate,
+    encrypted: bool = false,
+};
+
+/// A zip of `members`, written by hand, as std writes none: each entry's header and bytes,
+/// then the central directory and its end record. Deflated bytes are deflate's stored blocks.
+fn zipOf(a: std.mem.Allocator, members: []const ZipMember) ![]u8 {
+    var out: Io.Writer.Allocating = .init(a);
+    var directory: Io.Writer.Allocating = .init(a);
+    for (members) |member| {
+        const data = if (member.method == .deflate) deflated: {
+            var raw: Io.Writer.Allocating = .init(a);
+            var compress: flate.Compress.Raw = try .init(&raw.writer, try a.alloc(u8, flate.max_window_len), .raw);
+            try compress.writer.writeAll(member.data);
+            try compress.finish();
+            break :deflated raw.written();
+        } else member.data;
+        const offset: u32 = @intCast(out.written().len);
+        const flags: u16 = @intFromBool(member.encrypted);
+        const crc = std.hash.Crc32.hash(member.data);
+        try out.writer.writeStruct(std.zip.LocalFileHeader{
+            .signature = std.zip.local_file_header_sig,
+            .version_needed_to_extract = 20,
+            .flags = @bitCast(flags),
+            .compression_method = member.method,
+            .last_modification_time = 0,
+            .last_modification_date = 0,
+            .crc32 = crc,
+            .compressed_size = @intCast(data.len),
+            .uncompressed_size = @intCast(member.data.len),
+            .filename_len = @intCast(member.name.len),
+            .extra_len = 0,
+        }, .little);
+        try out.writer.writeAll(member.name);
+        try out.writer.writeAll(data);
+        try directory.writer.writeStruct(std.zip.CentralDirectoryFileHeader{
+            .signature = std.zip.central_file_header_sig,
+            .version_made_by = 20,
+            .version_needed_to_extract = 20,
+            .flags = @bitCast(flags),
+            .compression_method = member.method,
+            .last_modification_time = 0,
+            .last_modification_date = 0,
+            .crc32 = crc,
+            .compressed_size = @intCast(data.len),
+            .uncompressed_size = @intCast(member.data.len),
+            .filename_len = @intCast(member.name.len),
+            .extra_len = 0,
+            .comment_len = 0,
+            .disk_number = 0,
+            .internal_file_attributes = 0,
+            .external_file_attributes = 0,
+            .local_file_header_offset = offset,
+        }, .little);
+        try directory.writer.writeAll(member.name);
+    }
+    const at: u32 = @intCast(out.written().len);
+    try out.writer.writeAll(directory.written());
+    try out.writer.writeStruct(std.zip.EndRecord{
+        .signature = std.zip.end_record_sig,
+        .disk_number = 0,
+        .central_directory_disk_number = 0,
+        .record_count_disk = @intCast(members.len),
+        .record_count_total = @intCast(members.len),
+        .central_directory_size = @intCast(directory.written().len),
+        .central_directory_offset = at,
+        .comment_len = 0,
+    }, .little);
+    return out.written();
+}
+
 /// A scratch directory with `bytes` written as `archive`, and the pin of those bytes.
 const Fixture = struct {
     tmp: testing.TmpDir,
@@ -495,12 +671,12 @@ fn expectFile(a: std.mem.Allocator, directory: []const u8, name: []const u8, dat
     try testing.expectEqualStrings(data, text);
 }
 
-test "an archive's format is its first bytes: gzip and zstd are read, xz, zip and bzip2 refused by name" {
+test "an archive's format is its first bytes: gzip, zstd and zip are read, xz and bzip2 refused by name" {
     try testing.expectEqual(Format.tar_gzip, try formatOf("\x1f\x8b\x08\x00"));
     try testing.expectEqual(Format.tar_zstd, try formatOf("\x28\xb5\x2f\xfd\x00"));
     try testing.expectError(error.Xz, formatOf("\xfd7zXZ\x00\x00"));
-    try testing.expectError(error.Zip, formatOf("PK\x03\x04"));
-    try testing.expectError(error.Zip, formatOf("PK\x05\x06"));
+    try testing.expectEqual(Format.zip, try formatOf("PK\x03\x04"));
+    try testing.expectEqual(Format.zip, try formatOf("PK\x05\x06"));
     try testing.expectError(error.Bzip2, formatOf("BZh91AY"));
     try testing.expectError(error.UnknownFormat, formatOf("ustar"));
     try testing.expectError(error.UnknownFormat, formatOf(""));
@@ -573,15 +749,10 @@ test "an archive that is not the pin's, or not its publisher's, is refused befor
     // The pin follows the changed bytes; the publisher's signature does not.
     try testing.expectError(error.SignatureMismatch, authenticate(testing.io, a, forged.path, forged.expected, by_key));
     try testing.expectError(error.SignatureMismatch, authenticate(testing.io, a, forged.path, forged.expected, .{ .openpgp = .{ .keys = "not a key", .signature = openpgp.sample.signature } }));
-    // An xz or a zip that is the pin's is refused by name once authenticated.
-    for ([_]struct { bytes: []const u8, err: anyerror }{
-        .{ .bytes = "\xfd7zXZ\x00\x00\x04", .err = error.Xz },
-        .{ .bytes = "PK\x03\x04\x14\x00", .err = error.Zip },
-    }) |case| {
-        var fixture: Fixture = try .init(a, case.bytes);
-        defer fixture.deinit();
-        try testing.expectError(case.err, authenticate(testing.io, a, fixture.path, fixture.expected, .none));
-    }
+    // An xz that is the pin's is refused by name once authenticated.
+    var xz: Fixture = try .init(a, "\xfd7zXZ\x00\x00\x04");
+    defer xz.deinit();
+    try testing.expectError(error.Xz, authenticate(testing.io, a, xz.path, xz.expected, .none));
 }
 
 test "an entry that climbs out, a link that leaves the tree, a hard link and a name some system cannot hold are refused, naming it, with nothing written" {
@@ -641,4 +812,70 @@ test "a stream cut short or damaged is refused as malformed" {
     defer cut.deinit();
     var diagnostic: Diagnostic = .{};
     try testing.expectError(error.Malformed, cut.unpacked(a, &diagnostic));
+}
+
+test "a zip of stored and deflated entries unpacks as Zig's fetch unpacks it: its one top directory taken away" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture: Fixture = try .init(a, try zipOf(a, &.{
+        .{ .name = "pkg/", .method = .store },
+        .{ .name = "pkg/bin/tool", .data = "#!/bin/sh\n" },
+        .{ .name = "pkg/lib/native.dll", .data = "library", .method = .store },
+        .{ .name = "pkg/empty/", .method = .store },
+    }));
+    defer fixture.deinit();
+    var diagnostic: Diagnostic = .{};
+    const into = try fixture.unpacked(a, &diagnostic);
+    try expectFile(a, into, "bin/tool", "#!/bin/sh\n");
+    try expectFile(a, into, "lib/native.dll", "library");
+    try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(testing.io, try std.fs.path.join(a, &.{ into, "empty" }), .{}));
+    if (Io.File.Permissions.has_executable_bit) {
+        const stat = try Io.Dir.cwd().statFile(testing.io, try std.fs.path.join(a, &.{ into, "bin/tool" }), .{});
+        try testing.expect(stat.permissions.toMode() & 0o100 != 0);
+    }
+}
+
+test "a zip entry encrypted, compressed by another method, climbing out, or larger than the pin allows is refused, naming it, with nothing written" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { members: []const ZipMember, err: anyerror, entry: []const u8 }{
+        // std's reader refuses an encrypted entry before it reads its name.
+        .{ .members = &.{ .{ .name = "pkg/a", .data = "a" }, .{ .name = "pkg/secret", .data = "x", .encrypted = true } }, .err = error.Encrypted, .entry = "" },
+        // LZMA, method 14.
+        .{ .members = &.{.{ .name = "pkg/a", .data = "a", .method = @fromBackingInt(14) }}, .err = error.UnsupportedMethod, .entry = "pkg/a" },
+        .{ .members = &.{ .{ .name = "pkg/a", .data = "a" }, .{ .name = "pkg/../escape", .data = "x" } }, .err = error.UnsafeName, .entry = "pkg/../escape" },
+        .{ .members = &.{.{ .name = "/etc/passwd", .data = "x" }}, .err = error.UnsafeName, .entry = "/etc/passwd" },
+        .{ .members = &.{.{ .name = "pkg\\..\\escape", .data = "x" }}, .err = error.UnsafeName, .entry = "pkg\\..\\escape" },
+        .{ .members = &.{.{ .name = "pkg/C:x", .data = "x" }}, .err = error.UnsafeName, .entry = "pkg/C:x" },
+        .{ .members = &.{ .{ .name = "pkg/Readme", .data = "a" }, .{ .name = "pkg/README", .data = "b" } }, .err = error.NameClash, .entry = "pkg/README" },
+        .{ .members = &.{.{ .name = "pkg/big", .data = &@as([2048]u8, @splat('x')) }}, .err = error.TooLarge, .entry = "pkg/big" },
+    }) |case| {
+        var fixture: Fixture = try .init(a, try zipOf(a, case.members));
+        defer fixture.deinit();
+        const archive = try authenticate(testing.io, a, fixture.path, fixture.expected, .none);
+        const into = try std.fs.path.join(a, &.{ std.fs.path.dirname(fixture.path).?, "tree" });
+        var diagnostic: Diagnostic = .{};
+        try testing.expectError(case.err, unpack(testing.io, a, archive, into, 1024, &diagnostic));
+        try testing.expectEqualStrings(case.entry, diagnostic.entry);
+        try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(testing.io, into, .{}));
+    }
+}
+
+test "a zip cut short, or whose entry's header disagrees with its directory, is refused as malformed" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const zip = try zipOf(a, &.{.{ .name = "pkg/a", .data = &@as([600]u8, @splat('a')) }});
+    var cut: Fixture = try .init(a, zip[0 .. zip.len / 2]);
+    defer cut.deinit();
+    var diagnostic: Diagnostic = .{};
+    try testing.expectError(error.Malformed, cut.unpacked(a, &diagnostic));
+    // The entry's own header names another length than the directory does.
+    const changed = try a.dupe(u8, zip);
+    changed[@offsetOf(std.zip.LocalFileHeader, "uncompressed_size")] ^= 1;
+    var disagreeing: Fixture = try .init(a, changed);
+    defer disagreeing.deinit();
+    try testing.expectError(error.Malformed, disagreeing.unpacked(a, &diagnostic));
 }
