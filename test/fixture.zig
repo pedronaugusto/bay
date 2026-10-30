@@ -128,7 +128,7 @@ pub const Fixture = struct {
 pub fn fingerprint(name: []const u8) u64 {
     var id = std.hash.XxHash32.hash(0, name);
     if (id == 0 or id == std.math.maxInt(u32)) id = 1;
-    return @as(u64, std.hash.Crc32.hash(name)) << 32 | id;
+    return (@as(u64, std.hash.Crc32.hash(name)) << 32) | id;
 }
 
 /// A command expected to fail: its output is the point, not a finding.
