@@ -168,6 +168,10 @@ test "a prebuilt pin is brought by bay fetch, checked by its digest and its publ
     const fetched = try f.bay("app", &.{"fetch"});
     if (!succeeded(fetched)) std.debug.print("{s}\n", .{fetched.stderr});
     try std.testing.expect(succeeded(fetched));
+    // Once bay has put it in Zig's cache, Zig's own build takes it, as the README says.
+    const plain = try f.run("app", &.{ options.zig, "build", "run" });
+    if (!succeeded(plain)) std.debug.print("{s}\n", .{plain.stderr});
+    try std.testing.expect(std.mem.find(u8, plain.stderr, "from the prebuilt") != null);
     const ran = try f.bay("app", &.{ "build", "run" });
     if (!succeeded(ran)) std.debug.print("{s}\n", .{ran.stderr});
     try std.testing.expect(succeeded(ran));

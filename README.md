@@ -201,6 +201,37 @@ hash Zig gives the same commit over https, and Zig's cache keeps the package, wh
 every build finds it. `git+file://` works the same for a repository on disk. Tags,
 `update` and `outdated` read such a remote through git too.
 
+## Prebuilt archives
+
+Some libraries and tools ship only built, in archives Zig's fetch does not take: a
+NuGet package, an MSYS2 package, a release's zip. bay pins one behind a `bay+https://`
+URL, once its publisher vouches for it:
+
+```sh
+bay add --name layers --openpgp keys/msys2.asc --license clang64/share/licenses/vulkan-validation-layers/LICENSE \
+  bay+https://repo.msys2.org/mingw/clang64/mingw-w64-clang-x86_64-vulkan-validation-layers-1.4.363.0-1-any.pkg.tar.zst
+```
+
+The publisher is a minisign key (`--minisign <key>`, the signature at the URL plus
+`.minisig`), an OpenPGP key file in the package (`--openpgp <file>`, at the URL plus
+`.sig`), nuget.org's catalog for a package on api.nuget.org (`--nuget`), or none
+(`--no-publisher`, the digest alone). The pin records the archive's SHA-256 and size,
+its publisher, the file in it that states its licence, and the hash Zig gives the tree
+it unpacks to. Wherever bay downloads it, the archive is held to its size, checked
+against its digest and its publisher before a byte is unpacked, unpacked as Zig unpacks
+(tar.gz, tar.zst, or a zip's stored and deflated entries), and handed to Zig's cache, which
+must give it the pinned hash. bay keeps the archive by its digest, so a cleared cache
+fills again offline. A build brings what it takes, a lazy one only when its
+configuration asks for it; `bay fetch` and `bay vendor` bring every one.
+
+A `bay+` pin needs bay: Zig fetches no `bay+` URL, so a package that pins one builds
+with `bay build`, or with `zig build` once `bay fetch` has put it in Zig's cache.
+
+`bay update <name> <bay+https://…>` moves a prebuilt to another URL, checked by the
+publisher its pin names. `bay outdated` does not list prebuilts, as no version protocol
+is common to their sources, and says so; `bay licenses` lists what each one's licence
+file states.
+
 ## Releasing
 
 `bay release` releases the package from its `CHANGELOG.md`, written as
@@ -301,9 +332,9 @@ every package below the graph, lazy ones included, for a bundle any host builds 
 | `bay build [args]` | `zig build` of the package, the arguments passed on as given |
 | `bay <step> [args]` | The step from the package's build, or else its development build |
 | `bay dev [args]` | `zig build` in the development build, as given |
-| `bay add [--dev] [--lazy] [--name <name>] <url or dir>...` | Pin dependencies through `zig fetch`, then tidy once; a repository's URL (`https://github.com/owner/repo`) is pinned at its newest release; a name already pinned stays in its list, `--dev` picks the list of a new one |
+| `bay add [--dev] [--lazy] [--name <name>] <url or dir>...` | Pin dependencies through `zig fetch`, then tidy once; a repository's URL (`https://github.com/owner/repo`) is pinned at its newest release; a name already pinned stays in its list, `--dev` picks the list of a new one; a `bay+https://` URL is a prebuilt, given its `--name`, its publisher (`--minisign`, `--openpgp`, `--nuget` or `--no-publisher`) and, when it holds several licence files, `--license` |
 | `bay remove [--dev] <name>` | Drop a dependency from the list that holds it; `--dev` where it is in both |
-| `bay update [name...]` | Pin what each recorded ref names now: a branch at its head, a release tag at the newest release on its line |
+| `bay update [name [bay+url]...]` | Pin what each recorded ref names now: a branch at its head, a release tag at the newest release on its line; a prebuilt's name followed by a `bay+` URL moves it there |
 | `bay upgrade [name...]` | Pin each at the newest release tag of its repository, across lines, whether it was pinned at a tag or a commit; a repository with no release tag stays |
 | `bay tidy` | Pin each package at the version selection picks, and in a workspace each member at its release; nested manifests take the package's pins |
 | `bay list` | Both lists, with their pins |
@@ -337,6 +368,7 @@ All are ignored by Zig.
 | `.coexist = .{ .name }` | Packages whose incompatible lines may be selected side by side |
 | `.retracted = .{ "0.4.0" }` | Versions of this package a newer release withdraws: `outdated` names them in use, `update` skips them |
 | `.zig_version` | The exact Zig to build with; `.minimum_zig_version` when absent |
+| `.sha256`, `.size`, `.publisher`, `.license` | A prebuilt pin's (a `bay+` URL's): the archive's digest and size, who vouches for it, and the file in it that states its licence |
 
 ## Global installs
 
