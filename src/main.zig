@@ -1205,5 +1205,6 @@ test {
     _ = store;
     _ = toolchain;
     _ = @import("tree.zig");
+    _ = @import("upstream.zig");
     _ = workspace;
 }

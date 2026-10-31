@@ -12,6 +12,7 @@ const remotes = @import("remote.zig");
 const say = @import("say.zig");
 const root = @import("root.zig");
 const published = @import("published.zig");
+const upstream = @import("upstream.zig");
 
 pub const TreeOptions = struct {
     /// Only the paths from the package to this one: `--why <name>`.
@@ -38,7 +39,11 @@ pub fn tree(r: resolve.Resolution, options: TreeOptions) !void {
 fn branch(r: resolve.Resolution, pin: select.Pin, depth: usize, shown: *std.array_hash_map.String(void), path: *std.ArrayList([]const u8), why: ?[]const u8) !void {
     const a = r.input.a;
     const revision = r.graph.resolve(pin.place) orelse return;
-    const line = try a.print("{s} {f} {s}", .{ revision.identity.name, revision.version, describe(revision) });
+    // A package with no manifest is known by the key pinning it and the tag its URL names.
+    const line = switch (revision.place) {
+        .remote => |remote| if (store.unnamed(remote.hash)) try a.print("{s} {s}", .{ try upstream.label(a, pin.key, remote.url), remote.hash }) else null,
+        .directory => null,
+    } orelse try a.print("{s} {f} {s}", .{ revision.identity.name, revision.version, describe(revision) });
     try path.append(a, line);
     defer _ = path.pop();
     if (why) |name| {
@@ -115,15 +120,20 @@ fn duplicates(r: resolve.Resolution) !void {
 }
 
 /// `bay outdated`: each package the builds use whose remote has a newer
-/// release, and each built at a version its newest release retracts. A prebuilt is
-/// not listed, as no version protocol is common to its sources, and bay says so.
+/// release, and each built at a version its newest release retracts. A package with
+/// no manifest is compared by the tag its URL names against its repository's tags
+/// (`upstream.zig`). A prebuilt is not listed, as no version protocol is common to
+/// its sources, and bay says so; any other package bay cannot check is named.
 pub fn outdated(r: resolve.Resolution) !void {
     const a = r.input.a;
+    const io = r.input.io;
     const scratch = try std.fs.path.join(a, &.{ r.input.package, ".zig-cache", "bay", "add" });
     var prebuilts: std.array_hash_map.String(void) = .empty;
     for ([_][]const select.Revision{ r.graph.mains.values(), r.graph.selected.values() }) |revisions| for (revisions) |revision| for (revision.pins) |pin| {
         if (pin.place == .remote and pin.place.remote.prebuilt != null) try prebuilts.put(a, pin.key, {});
     };
+    const named = try upstream.keys(a, r.graph);
+    var unchecked: std.ArrayList([]const u8) = .empty;
     var any = false;
     for (r.graph.selected.values()) |selected| {
         const remote = switch (selected.place) {
@@ -131,18 +141,51 @@ pub fn outdated(r: resolve.Resolution) !void {
             .directory => continue,
         };
         if (remote.prebuilt != null) continue;
-        const latest = try published.newest(r.input.io, a, r.input.zig, r.store, scratch, remote.url) orelse continue;
+        if (store.unnamed(remote.hash)) {
+            if (try upstreamOutdated(r, named.get(remote.hash) orelse remote.hash, remote.url, &unchecked)) any = true;
+            continue;
+        }
+        // A package pinned by a GitHub archive has its releases in the repository the archive comes from.
+        const url = if (std.mem.startsWith(u8, remote.url, "git+")) remote.url else (try upstream.of(a, remote.url)).tags orelse {
+            try unchecked.append(a, try a.print("{s} (pinned by a URL that names no repository bay lists)", .{selected.identity.name}));
+            continue;
+        };
+        const latest = try published.newest(io, a, r.input.zig, r.store, scratch, url) orelse continue;
         if (remotes.isRetracted(latest.retracted, selected.version)) {
             any = true;
-            try say.out(r.input.io, "{s} {f} is retracted by its release {f}\n", .{ selected.identity.name, selected.version, latest.version });
+            try say.out(io, "{s} {f} is retracted by its release {f}\n", .{ selected.identity.name, selected.version, latest.version });
         }
         if (latest.version.order(selected.version) != .gt) continue;
         any = true;
         const line: []const u8 = if (select.sameLine(latest.version, selected.version)) "" else ", a new line";
-        try say.out(r.input.io, "{s} {f} -> {f} (tag {s}{s})\n", .{ selected.identity.name, selected.version, latest.version, latest.tag, line });
+        try say.out(io, "{s} {f} -> {f} (tag {s}{s})\n", .{ selected.identity.name, selected.version, latest.version, latest.tag, line });
     }
-    if (!any) try say.note(r.input.io, "every package is at its newest release, and none is retracted", .{});
-    if (prebuilts.count() != 0) try say.note(r.input.io, "not listed, as prebuilts follow no version bay can read: {s}; bay update <name> <bay+https://…> moves one", .{try std.mem.join(a, ", ", prebuilts.keys())});
+    const all = unchecked.items.len == 0 and prebuilts.count() == 0;
+    if (!any) try say.note(io, "every package {s}is at its newest release, and none is retracted", .{if (all) "" else "checked "});
+    if (unchecked.items.len != 0) try say.note(io, "not checked: {s}", .{try std.mem.join(a, "; ", unchecked.items)});
+    if (prebuilts.count() != 0) try say.note(io, "not listed, as prebuilts follow no version bay can read: {s}; bay update <name> <bay+https://…> moves one", .{try std.mem.join(a, ", ", prebuilts.keys())});
+}
+
+/// Whether the upstream pinned as `key` at `url` has a newer tag, which is printed;
+/// what keeps bay from knowing goes in `unchecked`.
+fn upstreamOutdated(r: resolve.Resolution, key: []const u8, url: []const u8, unchecked: *std.ArrayList([]const u8)) !bool {
+    const a = r.input.a;
+    const from = try upstream.of(a, url);
+    const reason: []const u8 = reason: {
+        const tag = from.tag orelse break :reason "its URL names no tag";
+        const tags = from.tags orelse break :reason "its URL names no repository bay lists";
+        if (upstream.numbered(tag) == null) break :reason try a.print("its tag {s} is not a version", .{tag});
+        // A remote that cannot be read has said why.
+        const listed = remotes.tags(r.input.io, a, tags) catch |err| switch (err) {
+            error.Reported => break :reason "its repository's tags could not be read",
+            else => |e| return e,
+        };
+        const newest = upstream.newer(tag, listed) orelse return false;
+        try say.out(r.input.io, "{s} {s} -> {s} (an upstream with no manifest)\n", .{ key, tag, newest });
+        return true;
+    };
+    try unchecked.append(a, try a.print("{s} ({s})", .{ key, reason }));
+    return false;
 }
 
 /// The hosts a vendored `zig-pkg` builds on.

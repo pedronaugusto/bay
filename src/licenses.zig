@@ -10,14 +10,16 @@ const select = @import("select.zig");
 const resolve = @import("resolve.zig");
 const store = @import("store.zig");
 const say = @import("say.zig");
+const upstream = @import("upstream.zig");
 
 /// Lists the packages the package's builds contain, its dependencies' dependencies
 /// included; `dev` adds what only its development uses. A prebuilt is listed by the name
-/// its pin gives, with what its pin's licence file says, or that bay does not read it.
+/// its pin gives, with what its pin's licence file says, or that bay does not read it; a
+/// package with no manifest by its pin's key and the tag its URL names.
 pub fn list(r: resolve.Resolution, dev: bool) !void {
     const a = r.input.a;
     const io = r.input.io;
-    const Listed = struct { name: []const u8, revision: select.Revision, prebuilt: ?manifest.Prebuilt };
+    const Listed = struct { name: []const u8, revision: select.Revision, prebuilt: ?manifest.Prebuilt, unnamed: bool };
     var seen: std.array_hash_map.String(Listed) = .empty;
     var pending: std.ArrayList(select.Pin) = .empty;
     try pending.appendSlice(a, try store.pins(a, r.input.package, r.input.parsed.normal));
@@ -26,8 +28,11 @@ pub fn list(r: resolve.Resolution, dev: bool) !void {
         const revision = r.graph.resolve(pin.place) orelse continue;
         const entry = try seen.getOrPut(a, revision.identity.name);
         if (entry.found_existing) continue;
-        const prebuilt = if (pin.place == .remote) pin.place.remote.prebuilt else null;
-        entry.value_ptr.* = .{ .name = if (prebuilt != null) pin.key else revision.identity.name, .revision = revision, .prebuilt = prebuilt };
+        const remote: ?select.Place.Remote = if (pin.place == .remote) pin.place.remote else null;
+        const prebuilt = if (remote) |place| place.prebuilt else null;
+        const unnamed = remote != null and store.unnamed(remote.?.hash);
+        const name = if (prebuilt != null) pin.key else if (unnamed) try upstream.label(a, pin.key, remote.?.url) else revision.identity.name;
+        entry.value_ptr.* = .{ .name = name, .revision = revision, .prebuilt = prebuilt, .unnamed = unnamed };
         try pending.appendSlice(a, revision.pins);
     }
     const Order = struct {
@@ -49,7 +54,8 @@ pub fn list(r: resolve.Resolution, dev: bool) !void {
         }
         const stated = try licenseOf(io, a, directory);
         if (stated == null) unknown += 1;
-        try say.out(io, "{s} {f}  {s}\n", .{ listed.name, listed.revision.version, stated orelse "no license found" });
+        const license = stated orelse "no license found";
+        if (listed.unnamed) try say.out(io, "{s}  {s}\n", .{ listed.name, license }) else try say.out(io, "{s} {f}  {s}\n", .{ listed.name, listed.revision.version, license });
     }
     if (seen.count() == 0) try say.note(io, "the package has no dependencies", .{});
     if (unknown != 0) try say.note(io, "{d} {s} no license bay can read: look at {s} before shipping", .{ unknown, if (unknown == 1) "package states" else "packages state", if (unknown == 1) "it" else "them" });

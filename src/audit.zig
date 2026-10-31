@@ -9,6 +9,8 @@ const remotes = @import("remote.zig");
 const published = @import("published.zig");
 const download = @import("download.zig");
 const say = @import("say.zig");
+const store = @import("store.zig");
+const upstream = @import("upstream.zig");
 
 /// One advisory as GitHub publishes it for a repository; the fields bay reads.
 const Advisory = struct {
@@ -27,33 +29,48 @@ const Vulnerability = struct {
 
 /// Whether every package the build selects is clear: no published advisory
 /// whose range holds its version, and no version its newest release retracts.
-/// `token` (GITHUB_TOKEN) lifts GitHub's unauthenticated rate limit and reaches
-/// private repositories' advisories.
+/// A package with no manifest is matched by the tag its URL names, its advisories
+/// read from the repository that URL comes from (`upstream.zig`), as a package's
+/// pinned by a GitHub archive are. `token` (GITHUB_TOKEN) lifts GitHub's
+/// unauthenticated rate limit and reaches private repositories' advisories.
 pub fn audit(r: resolve.Resolution, token: ?[]const u8) !bool {
     const a = r.input.a;
     const io = r.input.io;
     const scratch = try std.fs.path.join(a, &.{ r.input.package, ".zig-cache", "bay", "add" });
     var client: std.http.Client = .{ .allocator = a, .io = io };
     defer client.deinit();
+    const named = try upstream.keys(a, r.graph);
     var findings: usize = 0;
     var unread: std.ArrayList([]const u8) = .empty;
+    var unmatched: std.ArrayList([]const u8) = .empty;
     for (r.graph.selected.values()) |selected| {
         const remote = switch (selected.place) {
             .remote => |remote| remote,
             .directory => continue,
         };
-        const name = selected.identity.name;
-        if (try published.newest(io, a, r.input.zig, r.store, scratch, remote.url)) |latest| {
-            if (remotes.isRetracted(latest.retracted, selected.version)) {
-                findings += 1;
-                try say.out(io, "{s} {f}: retracted by its release {f}\n", .{ name, selected.version, latest.version });
-            }
-        }
-        const repository = remotes.repository(remote.url) orelse continue;
-        const api = (try githubApi(a, repository)) orelse {
-            try unread.append(a, name);
+        const from = try upstream.of(a, remote.url);
+        const unnamed = store.unnamed(remote.hash);
+        const name = if (unnamed) named.get(remote.hash) orelse remote.hash else selected.identity.name;
+        // A package with no manifest has no version but the tag its URL names, and no
+        // release that could retract it.
+        const version = if (!unnamed) selected.version else if (from.tag) |tag| upstream.version(tag) orelse {
+            try unmatched.append(a, try a.print("{s} (its tag {s} is not a version)", .{ name, tag }));
+            continue;
+        } else {
+            try unmatched.append(a, try a.print("{s} (its URL names no tag)", .{name}));
             continue;
         };
+        const shown = if (unnamed) try upstream.label(a, name, remote.url) else try a.print("{s} {f}", .{ name, version });
+        if (!unnamed) if (try published.newest(io, a, r.input.zig, r.store, scratch, remote.url)) |latest| {
+            if (remotes.isRetracted(latest.retracted, version)) {
+                findings += 1;
+                try say.out(io, "{s}: retracted by its release {f}\n", .{ shown, latest.version });
+            }
+        };
+        const api = try githubApi(a, from.github orelse {
+            try unread.append(a, name);
+            continue;
+        });
         var body: Io.Writer.Allocating = .init(a);
         var headers: std.ArrayList(std.http.Header) = .empty;
         try headers.append(a, .{ .name = "accept", .value = "application/vnd.github+json" });
@@ -64,9 +81,9 @@ pub fn audit(r: resolve.Resolution, token: ?[]const u8) !bool {
         for (advisories) |advisory| {
             if (!std.mem.eql(u8, advisory.state, "published")) continue;
             for (advisory.vulnerabilities) |vulnerability| {
-                if (!try affected(vulnerability.vulnerable_version_range, selected.version)) continue;
+                if (!try affected(vulnerability.vulnerable_version_range, version)) continue;
                 findings += 1;
-                try say.out(io, "{s} {f}: {s} ({s}) {s}\n", .{ name, selected.version, advisory.ghsa_id, advisory.severity orelse "unrated", advisory.summary });
+                try say.out(io, "{s}: {s} ({s}) {s}\n", .{ shown, advisory.ghsa_id, advisory.severity orelse "unrated", advisory.summary });
                 if (vulnerability.patched_versions) |patched| try say.out(io, "    patched: {s}\n", .{patched});
                 if (advisory.html_url.len != 0) try say.out(io, "    {s}\n", .{advisory.html_url});
                 break;
@@ -74,18 +91,14 @@ pub fn audit(r: resolve.Resolution, token: ?[]const u8) !bool {
         }
     }
     if (unread.items.len != 0) try say.note(io, "advisories are read from GitHub; not read for {s}", .{try std.mem.join(a, ", ", unread.items)});
+    if (unmatched.items.len != 0) try say.note(io, "no version to match advisories against: {s}", .{try std.mem.join(a, "; ", unmatched.items)});
     if (findings == 0) try say.note(io, "no advisory or retraction holds a selected version", .{});
     return findings == 0;
 }
 
-/// GitHub's advisories URL for a repository on github.com; null on another host.
-fn githubApi(a: std.mem.Allocator, repository: []const u8) !?[]const u8 {
-    const prefix = "https://github.com/";
-    if (!std.mem.startsWith(u8, repository, prefix)) return null;
-    var path = repository[prefix.len..];
-    if (std.mem.endsWith(u8, path, ".git")) path = path[0 .. path.len - ".git".len];
-    if (std.mem.countScalar(u8, path, '/') != 1) return null;
-    return try a.print("https://api.github.com/repos/{s}/security-advisories?per_page=100", .{path});
+/// GitHub's advisories URL for the repository `owner/repo` on github.com.
+fn githubApi(a: std.mem.Allocator, slug: []const u8) ![]const u8 {
+    return a.print("https://api.github.com/repos/{s}/security-advisories?per_page=100", .{slug});
 }
 
 /// Whether `version` lies in a GitHub version range: constraints joined by
@@ -122,13 +135,19 @@ test "a version is affected when every constraint of the range holds" {
     try std.testing.expectError(error.InvalidRange, affected("~> 1.2", v));
 }
 
-test "advisories are read for github.com repositories only" {
+test "advisories are read for github.com repositories only, an archive's from the repository it comes from" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("https://api.github.com/repos/o/r/security-advisories?per_page=100", (try githubApi(a, "https://github.com/o/r.git")).?);
-    try std.testing.expectEqual(null, try githubApi(a, "https://codeberg.org/o/r"));
-    try std.testing.expectEqual(null, try githubApi(a, "https://github.com/o/r/tree/main"));
+    const api = struct {
+        fn of(arena_: std.mem.Allocator, url: []const u8) !?[]const u8 {
+            return try githubApi(arena_, (try upstream.of(arena_, url)).github orelse return null);
+        }
+    }.of;
+    try std.testing.expectEqualStrings("https://api.github.com/repos/o/r/security-advisories?per_page=100", (try api(a, "git+https://github.com/o/r.git#abc")).?);
+    try std.testing.expectEqualStrings("https://api.github.com/repos/microsoft/DirectX-Headers/security-advisories?per_page=100", (try api(a, "https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.619.5.tar.gz")).?);
+    try std.testing.expectEqual(null, try api(a, "git+https://codeberg.org/o/r#abc"));
+    try std.testing.expectEqual(null, try api(a, "git+https://github.com/o/r/tree/main#abc"));
 }
 
 test "GitHub's advisory listing is read, unknown fields left" {

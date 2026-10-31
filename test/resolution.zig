@@ -336,6 +336,51 @@ fn developedWithImage(f: *Fixture, image_hash: []const u8) ![]const u8 {
     return t_hash;
 }
 
+test "an upstream with no manifest is known by its key and tag: outdated compares its tags, licenses and tree name it, audit says what it cannot read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // Headers in a repository with no build.zig.zon, released by tag, as a C library is.
+    // Before, Zig's hash alone named it (`N-V-…`), and outdated said every package was at
+    // its newest release.
+    try f.tmp.dir.createDirPath(f.io, "headers/include");
+    try f.write("headers", "include/h.h", "#define H 1\n");
+    try f.write("headers", "LICENSE", "MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software\n");
+    for ([_][]const []const u8{ &.{ "git", "init", "--quiet", "--initial-branch=main" }, &.{ "git", "add", "." }, &.{ "git", "commit", "--quiet", "-m", "1.0.0" }, &.{ "git", "tag", "v1.0.0" } }) |argv|
+        try std.testing.expect(succeeded(try f.run("headers", argv)));
+    // Files whose URL names no tag: what bay cannot compare it names.
+    try f.tmp.dir.createDirPath(f.io, "blob");
+    try f.write("blob", "data.txt", "blob\n");
+    try f.application("app", try f.pin("blob", "blob"), &.{}, "pub fn main() void {}");
+    const url = try f.a.print("git+file://{s}{s}", .{ if (f.root[0] == '/') "" else "/", try std.mem.replaceOwned(u8, f.a, try std.fs.path.join(f.a, &.{ f.root, "headers" }), "\\", "/") });
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", "--name", "headers", try f.a.print("{s}#v1.0.0", .{url}) })));
+    // A release after it, and a pre-release, which is none.
+    for ([_][]const u8{ "v1.1.0", "v1.2.0-rc1" }) |tag| {
+        try f.write("headers", "include/h.h", try f.a.print("#define H \"{s}\"\n", .{tag}));
+        for ([_][]const []const u8{ &.{ "git", "commit", "--quiet", "-am", tag }, &.{ "git", "tag", tag } }) |argv|
+            try std.testing.expect(succeeded(try f.run("headers", argv)));
+    }
+    const outdated = try f.bay("app", &.{"outdated"});
+    try std.testing.expect(succeeded(outdated));
+    try std.testing.expect(std.mem.find(u8, outdated.stdout, "headers v1.0.0 -> v1.1.0 (an upstream with no manifest)") != null);
+    try std.testing.expect(std.mem.find(u8, outdated.stderr, "not checked: blob (its URL names no tag)") != null);
+    try std.testing.expect(std.mem.find(u8, outdated.stderr, "every package is at its newest release") == null);
+    const licenses = try f.bay("app", &.{"licenses"});
+    try std.testing.expect(succeeded(licenses));
+    try std.testing.expect(std.mem.find(u8, licenses.stdout, "headers v1.0.0  MIT\n") != null);
+    try std.testing.expect(std.mem.find(u8, licenses.stdout, "blob  no license found\n") != null);
+    try std.testing.expect(std.mem.find(u8, licenses.stdout, "N-V-") == null);
+    const tree = try f.bay("app", &.{"tree"});
+    try std.testing.expect(succeeded(tree));
+    try std.testing.expect(std.mem.find(u8, tree.stdout, "  headers v1.0.0 N-V-") != null);
+    // Neither is on GitHub, whose advisories bay reads, and one has no version to match.
+    const audit = try f.bay("app", &.{"audit"});
+    try std.testing.expect(succeeded(audit));
+    try std.testing.expect(std.mem.find(u8, audit.stderr, "not read for headers") != null);
+    try std.testing.expect(std.mem.find(u8, audit.stderr, "no version to match advisories against: blob (its URL names no tag)") != null);
+}
+
 test "a dependency's lazy pin with no manifest is never fetched: the development build configures, fetches and vendors without it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
