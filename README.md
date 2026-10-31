@@ -201,6 +201,26 @@ hash Zig gives the same commit over https, and Zig's cache keeps the package, wh
 every build finds it. `git+file://` works the same for a repository on disk. Tags,
 `update` and `outdated` read such a remote through git too.
 
+## Upstreams with no manifest
+
+A C library's repository or a set of headers has no `build.zig.zon`, so Zig names it by
+its hash alone (`N-V-…`). bay knows it by the key that pins it and by its URL: the
+repository, and the tag the URL names (a git URL's `?ref=`, or a GitHub
+`archive/refs/tags/<tag>` archive or `releases/download/<tag>/` asset):
+
+```zig
+.directx_headers = .{
+    .url = "https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.619.5.tar.gz",
+    .hash = "N-V-__8AA…",
+},
+```
+
+`bay outdated` compares the tag with the repository's tags named the same way (`v1.15`,
+`VER-2-13-3`), never a pre-release, and prints `directx_headers v1.619.5 -> v1.620.1`.
+`bay audit` matches the tag against the repository's advisories. `bay licenses` and
+`bay tree` print the key and the tag. When `outdated` cannot check a package (its URL
+names no tag, or no repository bay can list), it names it and says why.
+
 ## Prebuilt archives
 
 Some libraries and tools ship only built, in archives Zig's fetch does not take: a
