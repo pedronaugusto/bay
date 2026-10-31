@@ -364,6 +364,10 @@ test "an upstream with no manifest is known by its key and tag: outdated compare
     const outdated = try f.bay("app", &.{"outdated"});
     try std.testing.expect(succeeded(outdated));
     try std.testing.expect(std.mem.find(u8, outdated.stdout, "headers v1.0.0 -> v1.1.0 (an upstream with no manifest)") != null);
+    // A series retrofit applies over it, kept in patches/<key>: outdated counts it.
+    try f.tmp.dir.createDirPath(f.io, "app/patches/headers");
+    for ([_][]const u8{ "0001-a.patch", "0002-b.patch" }) |name| try f.write("app/patches/headers", name, "--- a/include/h.h\n+++ b/include/h.h\n");
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "headers v1.0.0 + 2 patches -> v1.1.0 (an upstream with no manifest; retrofit applies its patches to the new tag only if each still applies exactly)") != null);
     try std.testing.expect(std.mem.find(u8, outdated.stderr, "not checked: blob (its URL names no tag)") != null);
     try std.testing.expect(std.mem.find(u8, outdated.stderr, "every package is at its newest release") == null);
     const licenses = try f.bay("app", &.{"licenses"});

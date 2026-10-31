@@ -181,11 +181,32 @@ fn upstreamOutdated(r: resolve.Resolution, key: []const u8, url: []const u8, unc
             else => |e| return e,
         };
         const newest = upstream.newer(tag, listed) orelse return false;
-        try say.out(r.input.io, "{s} {s} -> {s} (an upstream with no manifest)\n", .{ key, tag, newest });
+        const patches = try patchesOf(r, key);
+        if (patches == 0)
+            try say.out(r.input.io, "{s} {s} -> {s} (an upstream with no manifest)\n", .{ key, tag, newest })
+        else
+            try say.out(r.input.io, "{s} {s} + {d} patch{s} -> {s} (an upstream with no manifest; retrofit applies its patches to the new tag only if each still applies exactly)\n", .{ key, tag, patches, if (patches == 1) "" else "es", newest });
         return true;
     };
     try unchecked.append(a, try a.print("{s} ({s})", .{ key, reason }));
     return false;
+}
+
+/// How many patches the package keeps over the upstream it pins as `key`: the `.patch` files
+/// in `patches/<key>`, where a package keeps the series retrofit applies in its build.
+fn patchesOf(r: resolve.Resolution, key: []const u8) !usize {
+    const io = r.input.io;
+    var dir = Io.Dir.cwd().openDir(io, try std.fs.path.join(r.input.a, &.{ r.input.package, "patches", key }), .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return 0,
+        else => |e| return e,
+    };
+    defer dir.close(io);
+    var count: usize = 0;
+    var entries = dir.iterate();
+    while (try entries.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".patch")) count += 1;
+    }
+    return count;
 }
 
 /// The hosts a vendored `zig-pkg` builds on.

@@ -221,6 +221,11 @@ repository, and the tag the URL names (a git URL's `?ref=`, or a GitHub
 `bay tree` print the key and the tag. When `outdated` cannot check a package (its URL
 names no tag, or no repository bay can list), it names it and says why.
 
+A package's own patches over such an upstream are applied by its build with
+[retrofit](https://github.com/pedronaugusto/retrofit), kept as a `git format-patch` series
+in `patches/<key>`. `bay outdated` counts them (`directx_headers v1.619.5 + 2 patches ->
+v1.620.1`): the patches move with the pin only if each still applies exactly.
+
 ## Prebuilt archives
 
 Some libraries and tools ship only built, in archives Zig's fetch does not take: a
