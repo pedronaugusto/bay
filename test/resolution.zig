@@ -1220,3 +1220,118 @@ test "a development build that fetches lazy packages while it configures builds 
     try std.testing.expect(succeeded(checked));
     try std.testing.expect(std.mem.find(u8, checked.stderr, "the tool sees 0.2.0 working") != null);
 }
+
+/// Runs git in `dir`, which must succeed; its output trimmed.
+fn git(f: *Fixture, dir: []const u8, args: []const []const u8) ![]const u8 {
+    const result = try f.run(dir, try std.mem.concat(f.a, []const u8, &.{ &.{"git"}, args }));
+    try std.testing.expect(succeeded(result));
+    return std.mem.trim(u8, result.stdout, "\r\n");
+}
+
+/// Commits what `dir` holds now, tagged `tag` when given; its commit.
+fn commitAll(f: *Fixture, dir: []const u8, message: []const u8, tag: ?[]const u8) ![]const u8 {
+    _ = try git(f, dir, &.{ "add", "." });
+    _ = try git(f, dir, &.{ "commit", "--quiet", "-m", message });
+    if (tag) |name| _ = try git(f, dir, &.{ "tag", name });
+    return git(f, dir, &.{ "rev-parse", "HEAD" });
+}
+
+/// The pin `bay add <url>` writes for `key`, made in a package of its own and given as one
+/// dependency entry: `.key = .{ .url = ..., .hash = ... },`.
+fn gitPin(f: *Fixture, key: []const u8, url: []const u8) ![]const u8 {
+    const probe = try f.a.print("probe-{x}", .{std.hash.Wyhash.hash(0, url)});
+    try f.application(probe, "", &.{}, "pub fn main() void {}");
+    try std.testing.expect(succeeded(try f.bay(probe, &.{ "add", url })));
+    const text = try manifestOf(f, probe);
+    const entry = text[std.mem.find(u8, text, try f.a.print(".{s} = .{{", .{key})).?..];
+    const field = struct {
+        fn of(in: []const u8, name: []const u8) []const u8 {
+            const start = std.mem.find(u8, in, name).? + name.len;
+            return in[start..std.mem.findScalarPos(u8, in, start, '"').?];
+        }
+    }.of;
+    return f.a.print(".{s} = .{{ .url = \"{s}\", .hash = \"{s}\" }},", .{ key, field(entry, ".url = \""), field(entry, ".hash = \"") });
+}
+
+/// cloak's history as the family had it: v0.22.2; a fix on a branch of it whose manifest
+/// still says 0.22.2; v0.23.0 on main; and strict, v0.23.0 with the fix merged, whose
+/// manifest says 0.23.0 as the tag's does. Its source says which version and whether the fix is in.
+const Cloak = struct { url: []const u8, fix: []const u8, strict: []const u8 };
+
+fn cloak(f: *Fixture) !Cloak {
+    try f.package("cloak", "cloak", "0.22.2", "", &.{}, "pub const version = @import(\"version.zig\").text; pub const fix = @import(\"fix.zig\").text;");
+    try f.write("cloak", "src/version.zig", "pub const text = \"0.22.2\";");
+    try f.write("cloak", "src/fix.zig", "pub const text = \"without the fix\";");
+    _ = try git(f, "cloak", &.{ "init", "--quiet", "--initial-branch=main" });
+    _ = try commitAll(f, "cloak", "0.22.2", "v0.22.2");
+    _ = try git(f, "cloak", &.{ "checkout", "--quiet", "-b", "fix" });
+    try f.write("cloak", "src/fix.zig", "pub const text = \"with the fix\";");
+    const fix = try commitAll(f, "cloak", "The fix", null);
+    _ = try git(f, "cloak", &.{ "checkout", "--quiet", "main" });
+    try f.write("cloak", "build.zig.zon", try std.mem.replaceOwned(u8, f.a, try manifestOf(f, "cloak"), "\"0.22.2\"", "\"0.23.0\""));
+    try f.write("cloak", "src/version.zig", "pub const text = \"0.23.0\";");
+    _ = try commitAll(f, "cloak", "0.23.0", "v0.23.0");
+    _ = try git(f, "cloak", &.{ "checkout", "--quiet", "-b", "strict" });
+    _ = try git(f, "cloak", &.{ "merge", "--quiet", "--no-edit", "fix" });
+    const strict = try git(f, "cloak", &.{ "rev-parse", "HEAD" });
+    return .{ .url = try gitUrl(f, "cloak"), .fix = fix, .strict = strict };
+}
+
+test "commit pins of one package are ordered by its history: a fix's commit and a release diverge, a commit containing both is selected" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const repository = try cloak(&f);
+    const seen = "const cloak = @import(\"cloak\"); pub const seen = cloak.version ++ \" \" ++ cloak.fix;";
+    // clearance takes the fix's commit, whose manifest says 0.22.2; uplink the release v0.23.0.
+    try f.package("clearance", "clearance", "0.1.0", try gitPin(&f, "cloak", try f.a.print("{s}#{s}", .{ repository.url, repository.fix })), &.{"cloak"}, seen);
+    try f.package("uplink", "uplink", "0.1.0", try gitPin(&f, "cloak", try f.a.print("{s}#v0.23.0", .{repository.url})), &.{"cloak"}, seen);
+    const main = "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"clearance sees {s}, uplink sees {s}\\n\", .{ @import(\"clearance\").seen, @import(\"uplink\").seen }); }";
+    const consumers = try std.mem.concat(f.a, u8, &.{ try f.pin("clearance", "clearance"), try f.pin("uplink", "uplink") });
+    try f.application("app", consumers, &.{ "clearance", "uplink" }, main);
+    // Neither contains the other: refused, each named with who pins it, none picked.
+    const diverged = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(refused(diverged));
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, "cloak is pinned at commits that diverge") != null);
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, "Pin a commit that contains both") != null);
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, try f.a.print("cloak at {s} (", .{repository.fix[0..12]})) != null);
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, "pinned by clearance 0.1.0") != null);
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, " (a release) (") != null);
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, "pinned by uplink 0.1.0") != null);
+    // strict contains both: it is selected, though its manifest says 0.23.0 as the tag's does and
+    // a line above the fix's 0.22.2.
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ consumers, try gitPin(&f, "cloak", try f.a.print("{s}#strict", .{repository.url})) }), &.{ "clearance", "uplink" }, main);
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "clearance sees 0.23.0 with the fix, uplink sees 0.23.0 with the fix") != null);
+}
+
+test "two commits that say one version are no longer two contents: the newer one is selected" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // glint's integration head and an older commit both say 0.7.5.
+    try f.package("glint", "glint", "0.7.5", "", &.{}, "pub const text = \"older\";");
+    _ = try git(&f, "glint", &.{ "init", "--quiet", "--initial-branch=main" });
+    const older = try commitAll(&f, "glint", "Older", null);
+    try f.write("glint", "src/root.zig", "pub const text = \"between\";");
+    _ = try commitAll(&f, "glint", "Between", null);
+    try f.write("glint", "src/root.zig", "pub const text = \"the integration head\";");
+    _ = try commitAll(&f, "glint", "The integration head", null);
+    const url = try gitUrl(&f, "glint");
+    const seen = "pub const seen = @import(\"glint\").text;";
+    // preflight pins the older commit, gantry the head by its branch.
+    try f.package("preflight", "preflight", "0.1.0", try gitPin(&f, "glint", try f.a.print("{s}#{s}", .{ url, older })), &.{"glint"}, seen);
+    try f.package("gantry", "gantry", "0.1.0", try gitPin(&f, "glint", try f.a.print("{s}#main", .{url})), &.{"glint"}, seen);
+    const main = "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"preflight sees {s}, gantry sees {s}\\n\", .{ @import(\"preflight\").seen, @import(\"gantry\").seen }); }";
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("preflight", "preflight"), try f.pin("gantry", "gantry") }), &.{ "preflight", "gantry" }, main);
+    const built = try f.bay("app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    try std.testing.expect(std.mem.find(u8, built.stderr, "preflight sees the integration head, gantry sees the integration head") != null);
+    // The history fetched is kept: commit objects alone, under bay's data directory.
+    const data: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ f.root, "local", "bay", "data" } else &.{ f.root, "data", "bay" };
+    const history = try std.fs.path.join(f.a, try std.mem.concat(f.a, []const u8, &.{ data, &.{ "history", try f.a.print("glint-{x}.git", .{fingerprint("glint")}) } }));
+    try std.testing.expect(succeeded(try f.run(".", &.{ "git", "-C", history, "cat-file", "-e", try f.a.print("{s}^{{commit}}", .{older}) })));
+}

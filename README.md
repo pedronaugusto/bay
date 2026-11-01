@@ -107,6 +107,26 @@ the graph reaches is read, and each package builds at the highest `.version` any
 them pins. The answer is the same whatever order or depth packages are found in, and
 it only rises as pins do.
 
+A version names one content only at a release. Between releases, many commits carry
+the version their manifest last took, so bay reads a pin's version only when the pin is
+a release: a git pin whose `?ref=` is the tag of the version its manifest says, or a pin
+of no commit, as an archive is. When any pin of a package is a commit pin (a branch, a
+bare commit, a tag of another version), bay orders the package's pinned commits by its
+history, as Go orders pseudo-versions by their commits: it selects the commit that every
+other pinned commit is an ancestor of, a release counting as the commit its tag names.
+So a release and a commit that descends from its tag select the commit, and commits on
+one line select the newest, whatever versions their manifests say. Commits that diverge,
+none containing the others, are refused, each named with who pins it: pin a commit that
+contains them all. To order them bay keeps each such package's history in its data
+directory (`history/<name>-<fingerprint>.git`): commit objects alone, no trees or files,
+each commit fetched once from its own pin's repository the first time it is asked about.
+A graph of releases alone fetches nothing for this.
+
+`bay release` still refuses a pin at no release, and that is why: a consumer building
+with plain `zig build` never runs bay's selection and takes each manifest's pins as
+written, so a released package pins what a version fixes, never commits only bay's
+ordering by history reconciles. Commit pins are for development between releases.
+
 Zig then gets a graph in which each package appears once. A dependency whose own pins
 name other revisions is built from a copy with only those pins rewritten, which
 `zig build --fork` substitutes for it; no package's files are edited. The package's
@@ -119,7 +139,10 @@ nested manifest pins, or takes by path, stays as it is.
 | Case | What bay does |
 | --- | --- |
 | The package is also a dependency of its own tools | The working tree wins over every revision of it: one copy, the one under test |
-| Two contents claim one version | Refused, naming who pins each, unless the package pins one itself |
+| Two contents claim one version | Between releases, ordered by their commits (below); two releases are refused, naming who pins each, unless the package pins one itself |
+| Commit pins of one package on one line | The newest commit, the one every other pinned commit (or release tag) is an ancestor of |
+| Commit pins that diverge | Refused, naming each commit and who pins it: pin a commit that contains them all |
+| A commit pin beside an archive pin of one package | Refused: an archive names no commit history can place |
 | Two lines of one package: a new major, or below 1.0 a new minor | Refused, naming who asks for each, unless the package lists it in `.coexist` |
 | A package that is a directory in one place and pinned in another | Refused, naming both: Zig would build two; `.overrides` makes one |
 | A coexisting line whose own pins must be rewritten | Refused: Zig would rewrite every line |

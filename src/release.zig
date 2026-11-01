@@ -375,7 +375,7 @@ fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
                 }
                 continue;
             }
-            const pin = releasePin(at.url) orelse {
+            const pin = git_source.releasePin(at.url) orelse {
                 const p = git_source.parts(at.url);
                 try wrong.append(c.a, try c.a.print("{s} (at {s})", .{ dependency.name, p.ref orelse p.fragment orelse "its default branch" }));
                 continue;
@@ -411,16 +411,6 @@ fn pinsHoldTheirHashes(c: Context, parsed: manifest.Manifest) !void {
         },
     };
     if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned by a hash its URL does not hold: pin each again (bay update) and release again", .{try listed(c.a, wrong.items)});
-}
-
-/// A git pin as a release names one: `?ref=` a version (`v1.2.3`, or without the `v`) and
-/// the commit after `#`. Null for a branch, a bare commit or no ref.
-fn releasePin(url: []const u8) ?struct { ref: []const u8, commit: []const u8 } {
-    const p = git_source.parts(url);
-    const ref = p.ref orelse return null;
-    const commit = p.fragment orelse return null;
-    _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, ref, "v")) ref[1..] else ref) catch return null;
-    return .{ .ref = ref, .commit = commit };
 }
 
 /// Whether `revision` is a release of the repository whose tags are `tags`: a version tag by
@@ -582,21 +572,6 @@ test "a revision is a release at a version tag, by name or by the commit it name
     const tags = [_]advertised.Tag{ .{ .name = "v1.2.0", .commit = at }, .{ .name = "nightly", .commit = mid } };
     for ([_][]const u8{ "v1.2.0", "refs/tags/v1.2.0", at }) |revision| try std.testing.expect(isRelease(&tags, revision));
     for ([_][]const u8{ mid, "nightly", "main", "refs/heads/main", "v1.3.0" }) |revision| try std.testing.expect(!isRelease(&tags, revision));
-}
-
-test "a release pin names a version tag and its commit; a branch, a bare commit or no ref does not" {
-    const commit = "5d2a92141f0298d76dc5fd602526d55a62b4e11a";
-    const pin = releasePin("git+https://github.com/o/r?ref=v1.2.0#" ++ commit).?;
-    try std.testing.expectEqualStrings("v1.2.0", pin.ref);
-    try std.testing.expectEqualStrings(commit, pin.commit);
-    try std.testing.expect(releasePin("git+https://github.com/o/r?ref=0.3.0-rc.1#" ++ commit) != null);
-    for ([_][]const u8{
-        "git+https://github.com/o/r?ref=aegis-0.2#" ++ commit,
-        "git+https://github.com/o/r?ref=main#" ++ commit,
-        "git+https://github.com/o/r#" ++ commit,
-        "git+https://github.com/o/r?ref=v1.2.0",
-        "git+https://github.com/o/r",
-    }) |url| try std.testing.expect(releasePin(url) == null);
 }
 
 /// Gates the commit at HEAD here and on every machine at once, each gate's output

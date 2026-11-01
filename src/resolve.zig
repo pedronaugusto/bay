@@ -321,7 +321,9 @@ fn raisesOf(r: Resolution, list: *std.ArrayList(manifest.Repin), directory: []co
             if (target != .remote or std.mem.eql(u8, target.remote.hash, pin.place.remote.hash)) continue;
             // Selection never goes below a pin it counted: a lower one means the
             // graph read is not the one this manifest makes, so nothing is written.
-            if (r.graph.read.get(pin.place.key())) |pinned| if (r.graph.read.get(target.key())) |selected| {
+            // Among commit pins the selection contains every commit pinned, whatever the versions say.
+            const by_history = if (r.graph.keys.get(pin.place.key())) |key| r.graph.by_history.contains(key) else false;
+            if (!by_history) if (r.graph.read.get(pin.place.key())) |pinned| if (r.graph.read.get(target.key())) |selected| {
                 if (selected.version.order(pinned.version) == .lt) try say.fail(r.input.io, "{s}: {s} would go from {f} down to {f}, below what the manifest pins; the workspace holds another copy of a package, or its graph is stale", .{ directory, dependency.name, pinned.version, selected.version });
             };
             try list.append(r.input.a, .{ .directory = directory, .kind = kind, .from = dependency, .to = .{ .name = dependency.name, .lazy = dependency.lazy, .source = .{ .remote = .{ .url = target.remote.url, .hash = target.remote.hash } } } });
@@ -420,6 +422,17 @@ fn pinners(a: std.mem.Allocator, graph: select.Graph, place: select.Place) ![]co
     return if (names.items.len == 0) "the package" else std.mem.join(a, ", ", names.items);
 }
 
+/// A revision as a refusal names it: its commit and its URL, or its URL alone.
+fn described(a: std.mem.Allocator, revision: select.Revision) ![]const u8 {
+    const url = switch (revision.place) {
+        .remote => |remote| remote.url,
+        .directory => |directory| directory,
+    };
+    const commit = revision.commit orelse return url;
+    const tag = if (revision.release) " (a release)" else "";
+    return a.print("{s}{s} ({s})", .{ commit.id[0..@min(12, commit.id.len)], tag, url });
+}
+
 /// Why there is no selection, in a sentence, ending the command.
 fn refuse(a: std.mem.Allocator, io: Io, graph: select.Graph, problem: select.Problem) !noreturn {
     switch (problem) {
@@ -429,5 +442,13 @@ fn refuse(a: std.mem.Allocator, io: Io, graph: select.Graph, problem: select.Pro
         },
         .incompatible => |p| try say.fail(io, "{s} asks for {s} {f}, but {s} {f} is selected, a different line (below 1.0, a new minor is a new line): move {s} to {s} {f}, or name {s} in .coexist", .{ p.by, p.name, p.wanted, p.name, p.selected, p.by, p.name, p.selected, p.name }),
         .cycle => |p| try say.fail(io, "{s} and what it depends on depend on each other: a ring of dependencies cannot be built", .{p.name}),
+        .diverged => |p| {
+            for (p.heads) |head| try say.note(io, "{s} at {s}, pinned by {s}", .{ p.name, try described(a, head), try pinners(a, graph, head.place) });
+            try say.fail(io, "{s} is pinned at commits that diverge: none contains the others, so none is the newest. Pin a commit that contains both, or name the one meant in .overrides", .{p.name});
+        },
+        .unordered => |p| {
+            for ([_]select.Revision{ p.commit, p.other }) |revision| try say.note(io, "{s} at {s}, pinned by {s}", .{ p.name, try described(a, revision), try pinners(a, graph, revision.place) });
+            try say.fail(io, "{s} is pinned at a commit and by a URL that names no commit, which its history cannot order: pin it by git at both, or name the one meant in .overrides", .{p.name});
+        },
     }
 }

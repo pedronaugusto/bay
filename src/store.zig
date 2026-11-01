@@ -11,6 +11,7 @@ const say = @import("say.zig");
 const git = @import("git.zig");
 const prebuilt = @import("prebuilt.zig");
 const tree = @import("tree.zig");
+const dirs = @import("dirs.zig");
 const scratchManifest = @import("root.zig").scratchManifest;
 
 /// Where bay unpacks an archived package to read it, under the package.
@@ -51,6 +52,24 @@ pub const Store = struct {
             .directory => |directory| directory,
         };
         return revisionAt(store.io, store.a, directory, place);
+    }
+
+    /// The ids of `commits`, all of the package `identity`, that no other of them contains:
+    /// one when they lie on one line, its newest. Read from the package's history, which bay
+    /// keeps in its data directory (`history/<name>-<fingerprint>.git`), each commit fetched
+    /// from its own pin's repository the first time it is asked about, its commits alone.
+    pub fn heads(store: *Store, identity: select.Identity, commits: []const select.Commit) ![]const []const u8 {
+        const directory = try std.fs.path.join(store.a, &.{ try dirs.data(store.io, store.a, store.environ), "history", try store.a.print("{s}-{x}.git", .{ identity.name, identity.fingerprint }) });
+        const history = try git.History.open(store.io, store.a, directory);
+        const ids = try store.a.alloc([]const u8, commits.len);
+        for (commits, ids) |commit, *id| {
+            history.hold(commit.repository, commit.id) catch |err| switch (err) {
+                else => |e| return e,
+                error.FetchFailed => try say.fail(store.io, "could not fetch {s}'s commit {s} from {s}, which bay reads to order the commits {s} is pinned at", .{ identity.name, commit.id, commit.repository, identity.name }),
+            };
+            id.* = commit.id;
+        }
+        return history.heads(ids);
     }
 
     /// The directory of a pinned package: unpacked already, unpacked from Zig's
@@ -202,13 +221,20 @@ pub fn revisionOf(io: Io, a: std.mem.Allocator, directory: []const u8, place: se
     const shipped = try pins(a, directory, parsed.normal);
     const developing = try pins(a, directory, if (developed) parsed.dev else &.{});
     for (developing) |*pin| pin.dev = true;
-    return .{
+    var revision: select.Revision = .{
         .identity = .{ .name = parsed.name, .fingerprint = parsed.fingerprint },
         .version = version,
         .place = place,
         .pins = try std.mem.concat(a, select.Pin, &.{ shipped, developing }),
         .retracted = parsed.retracted,
     };
+    // A git pin at a commit is a release only when its ref is the tag of the version its
+    // manifest says; else its version is what the manifest last took, and its commit orders it.
+    if (place == .remote) if (git.commitOf(place.remote.url)) |commit| {
+        revision.commit = .{ .repository = commit.repository, .id = commit.id };
+        revision.release = if (git.releasePin(place.remote.url)) |tagged| tagged.version.order(version) == .eq else false;
+    };
+    return revision;
 }
 
 /// The revision of a package with no manifest: it pins nothing and is known by its place.
