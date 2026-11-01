@@ -8,9 +8,9 @@
 //!
 //! git is the record of a release under way: a red gate puts the branch back
 //! where it was; a run that stops leaves its release commit at HEAD, which the
-//! next run gates and pushes; `refs/bay/gated/vX.Y.Z` names a commit gated
-//! green whose push did not go, so the next run pushes it without gating it
-//! again. No tag is ever made on a commit no gate passed.
+//! next run gates and pushes; a commit gated green whose push did not go is
+//! recorded in bay's data directory on this machine, so the next run pushes it
+//! without gating it again. No tag is ever made on a commit no gate passed.
 const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
@@ -22,6 +22,11 @@ const workspace = @import("workspace.zig");
 const each = @import("each.zig");
 const tidying = @import("tidy.zig");
 const toolchain = @import("toolchain.zig");
+const fetch = @import("fetch.zig");
+const lock = @import("lock.zig");
+const dirs = @import("dirs.zig");
+const git_source = @import("git.zig");
+const advertised = @import("remote.zig");
 
 pub const Context = struct {
     io: Io,
@@ -100,18 +105,32 @@ const Upstream = struct {
     tracking: []const u8,
     /// The branch on the remote as people name it, `<remote>/<name>`.
     onto: []const u8,
+    /// The branch had no upstream: the push makes this its upstream, as `git push -u` does.
+    set: bool,
 };
 
 fn upstream(c: Context) !Upstream {
     const branch = (try git(c, &.{ "symbolic-ref", "--short", "-q", "HEAD" })).out;
     if (branch.len == 0) try say.fail(c.io, "HEAD is detached: check out the branch to release", .{});
-    const remote = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.remote", .{branch}) })).out;
-    const merge = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.merge", .{branch}) })).out;
-    if (remote.len == 0 or merge.len == 0 or std.mem.eql(u8, remote, ".")) try say.fail(c.io, "{s} has no upstream on a remote: push it once with git push -u <remote> {s}", .{ branch, branch });
+    var remote = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.remote", .{branch}) })).out;
+    var merge = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.merge", .{branch}) })).out;
+    // A branch with no upstream goes where `git push -u` would send it: its own name on the
+    // remote git pushes to by default, or on the one remote there is.
+    const set = remote.len == 0 or merge.len == 0 or std.mem.eql(u8, remote, ".");
+    if (set) {
+        remote = (try git(c, &.{ "config", "--get", "remote.pushDefault" })).out;
+        if (remote.len == 0) {
+            const remotes = try must(c, &.{"remote"});
+            if (remotes.len == 0 or std.mem.findScalar(u8, remotes, '\n') != null)
+                try say.fail(c.io, "{s} has no upstream, and {s}: push it once with git push -u <remote> {s}", .{ branch, if (remotes.len == 0) "there is no remote" else "more than one remote could take it", branch });
+            remote = remotes;
+        }
+        merge = try c.a.print("refs/heads/{s}", .{branch});
+    }
     const url = try must(c, &.{ "remote", "get-url", "--push", remote });
     if (!isSsh(url)) try say.fail(c.io, "{s} pushes to {s}, which is not SSH: a release goes over SSH (git remote set-url --push {s} <user>@<host>:<path>)", .{ remote, url, remote });
     const name = if (std.mem.startsWith(u8, merge, "refs/heads/")) merge["refs/heads/".len..] else merge;
-    return .{ .branch = branch, .remote = remote, .url = url, .merge = merge, .tracking = try c.a.print("refs/remotes/{s}/{s}", .{ remote, name }), .onto = try c.a.print("{s}/{s}", .{ remote, name }) };
+    return .{ .branch = branch, .remote = remote, .url = url, .merge = merge, .tracking = try c.a.print("refs/remotes/{s}/{s}", .{ remote, name }), .onto = try c.a.print("{s}/{s}", .{ remote, name }), .set = set };
 }
 
 /// The commit a tag names here, or null.
@@ -145,9 +164,40 @@ fn tagName(c: Context, version: std.SemanticVersion) ![]const u8 {
     return c.a.print("v{f}", .{version});
 }
 
-/// The commit `bay release` gated green for `tag` and has not pushed yet.
-fn gatedRef(c: Context, tag: []const u8) ![]const u8 {
-    return c.a.print("refs/bay/gated/{s}", .{tag});
+/// Where this machine records the commit `bay release` gated green for `tag` and has not
+/// pushed: `<data>/gated/<repository>/<tag>`, the repository named by the SHA-256 of its git
+/// directory's path. Only bay writes it, and nothing carries it: a ref would travel with a
+/// fetch, a bundle or a mirror clone, and a record made anywhere but in this machine's gate
+/// would push a commit no gate here passed.
+fn gatedRecord(c: Context, tag: []const u8) ![]const u8 {
+    return gatedPath(c.a, try dirs.data(c.io, c.a, c.environ), try must(c, &.{ "rev-parse", "--absolute-git-dir" }), tag);
+}
+
+fn gatedPath(a: std.mem.Allocator, data: []const u8, git_dir: []const u8, tag: []const u8) ![]const u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(git_dir, &digest, .{});
+    return std.fs.path.join(a, &.{ data, "gated", &std.fmt.bytesToHex(digest, .lower), tag });
+}
+
+/// The commit recorded at `path`, or null when there is none.
+fn recorded(io: Io, a: std.mem.Allocator, path: []const u8) !?[]const u8 {
+    const text = aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(256)) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    return std.mem.trim(u8, text, " \r\n");
+}
+
+fn record(io: Io, path: []const u8, commit: []const u8) !void {
+    try Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = commit });
+}
+
+fn forget(io: Io, path: []const u8) !void {
+    Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 }
 
 fn read(c: Context, name: []const u8) !?[:0]const u8 {
@@ -186,7 +236,22 @@ const Plan = struct {
     cut: ?struct { from: std.SemanticVersion, section: changelog.Section, text: []const u8, manifest: [:0]const u8 },
 };
 
+/// `bay release` of one package. A workspace above it would build its other members'
+/// trees in place of what the package pins, so the gate would pass on code no release
+/// holds: refused. A train's members are gated in their workspace, as it is made for.
 pub fn run(c: Context, options: Options) !Outcome {
+    const others = try workspace.members(c.io, c.a, c.package);
+    if (others.len != 0) {
+        const names = try c.a.alloc([]const u8, others.len);
+        for (names, others) |*name, member| name.* = std.fs.path.basename(member);
+        const file = (try workspace.fileOf(c.io, c.a, c.package)).?; // safe: a workspace has other members only when its file is found
+        try say.fail(c.io, "{s} holds this package with {s}: their trees would stand in for the pins, so the gate would not be the release's; release the workspace with bay --workspace release, or this package from a clone outside it", .{ file, try listed(c.a, names) });
+    }
+    return releaseOne(c, options);
+}
+
+/// The package released, its pins resolved as wherever it stands resolves them.
+fn releaseOne(c: Context, options: Options) !Outcome {
     const up = try upstream(c);
     if ((try must(c, &.{ "status", "--porcelain" })).len != 0) try say.fail(c.io, "the tree has changes: a release tags a commit as it is, so commit them or put them away first", .{});
     // The remote's tags are read from it (`ls-remote`), never fetched here: a refused release changes nothing.
@@ -243,6 +308,7 @@ pub fn run(c: Context, options: Options) !Outcome {
         if (try localTag(c, tag)) |sha| try say.fail(c.io, "{s} is tagged here already, at {s}: a tag never moves; build.zig.zon's .version is behind the releases", .{ tag, sha[0..12] });
         break :plan .{ .version = version, .tag = tag, .start = head, .cut = .{ .from = current, .section = unreleased, .text = log, .manifest = manifest_text } };
     };
+    try pinsAreReleases(c, parsed);
     const gate_machines = try machines.load(c.io, c.a, c.environ);
     if (options.dry_run) {
         try dryRun(c, up, plan, gate_machines, options);
@@ -271,22 +337,266 @@ pub fn run(c: Context, options: Options) !Outcome {
         try say.note(c.io, "{s} {f} -> {f}: committed as Release {s}", .{ parsed.name, cut.from, plan.version, plan.tag });
     }
     const commit = try must(c, &.{ "rev-parse", "HEAD" });
-    const gated = try gatedRef(c, plan.tag);
-    const recorded = (try git(c, &.{ "rev-parse", "-q", "--verify", gated })).out;
-    if (std.mem.eql(u8, recorded, commit)) {
+    const gated = try gatedRecord(c, plan.tag);
+    if (std.mem.eql(u8, try recorded(c.io, c.a, gated) orelse "", commit)) {
         try say.note(c.io, "{s} at {s} was gated green; pushing it", .{ plan.tag, commit[0..12] });
     } else if (try gateEverywhere(c, gate_machines)) |red| {
         _ = try must(c, &.{ "reset", "--quiet", "--keep", plan.start });
         try say.fail(c.io, "the gate is red {s}: nothing was tagged or pushed, and {s} is back at {s}", .{ red, up.branch, plan.start[0..12] });
-    } else _ = try must(c, &.{ "update-ref", gated, commit });
+    } else try record(c.io, gated, commit);
     if (options.no_push) {
         try say.note(c.io, "{s} at {s} is gated green and held here: bay release pushes it, with no gate again", .{ plan.tag, commit[0..12] });
         return .{ .held = plan.version };
     }
     try push(c, up, commit, plan.tag);
-    _ = try must(c, &.{ "update-ref", "-d", gated });
+    try forget(c.io, gated);
     try say.note(c.io, "released {s} {s} at {s}: {s} and the tag {s} on {s}", .{ parsed.name, plan.tag, commit[0..12], up.onto, plan.tag, up.remote });
     return .{ .released = plan.version };
+}
+
+/// Every git pin of the manifest names a release: its `?ref=` is a version tag on its
+/// repository, at the commit the pin holds. A release pinned on a branch or a bare commit
+/// builds from code no tag fixes, and its consumers would take it.
+fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
+    var wrong: std.ArrayList([]const u8) = .empty;
+    for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev, parsed.overrides }) |list| for (list) |dependency| switch (dependency.source) {
+        .path => {},
+        .remote => |at| {
+            if (!std.mem.startsWith(u8, at.url, "git+")) {
+                // A forge's archive of one revision is that revision of its repository: a
+                // release only at a version tag or the commit one names. A known forge's URL
+                // bay cannot read as one is refused; any other URL names no repository bay can
+                // read, and its hash fixes the bytes its host published.
+                switch (try forgeOf(c.a, at.url)) {
+                    .elsewhere => {},
+                    .unread => |host| try wrong.append(c.a, try c.a.print("{s} (a URL on {s} that bay cannot read as an archive of one revision; pin a version tag: bay update)", .{ dependency.name, host })),
+                    .archive => |archive| if (!isRelease(try advertised.tags(c.io, c.a, try c.a.print("git+{s}", .{archive.repository})), archive.revision))
+                        try wrong.append(c.a, try c.a.print("{s} (an archive of {s}, no version tag of its repository)", .{ dependency.name, archive.revision })),
+                }
+                continue;
+            }
+            const pin = releasePin(at.url) orelse {
+                const p = git_source.parts(at.url);
+                try wrong.append(c.a, try c.a.print("{s} (at {s})", .{ dependency.name, p.ref orelse p.fragment orelse "its default branch" }));
+                continue;
+            };
+            const tagged = for (try advertised.tags(c.io, c.a, at.url)) |tag| {
+                if (std.mem.eql(u8, tag.name, pin.ref)) break tag.commit;
+            } else null;
+            if (tagged == null or !std.mem.eql(u8, tagged.?, pin.commit))
+                try wrong.append(c.a, try c.a.print("{s} ({s} is no tag at {s} on its repository)", .{ dependency.name, pin.ref, pin.commit[0..@min(12, pin.commit.len)] }));
+        },
+    };
+    if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned at no release: a release builds from what tags fix, so pin each at one (bay update) and release again", .{try listed(c.a, wrong.items)});
+    try pinsHoldTheirHashes(c, parsed);
+}
+
+/// Every remote pin's `.hash` is what its URL holds, fetched now as Zig records it. Zig takes
+/// a package its cache holds by the hash alone, without the URL: a hash of other content
+/// builds here, and fails or builds other code for anyone who fetches the release.
+fn pinsHoldTheirHashes(c: Context, parsed: manifest.Manifest) !void {
+    const zig = try toolchain.forPackage(c.io, c.a, c.environ, c.package);
+    // In the package's cache, which each fetch clears for itself.
+    const scratch = try std.fs.path.join(c.a, &.{ c.package, ".zig-cache", "bay", "release-fetch" });
+    var wrong: std.ArrayList([]const u8) = .empty;
+    for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev, parsed.overrides }) |list| for (list) |dependency| switch (dependency.source) {
+        .path => {},
+        .remote => |at| {
+            const fetched = try fetch.fetch(c.io, c.a, zig, scratch, at.url, dependency.name) orelse {
+                try wrong.append(c.a, try c.a.print("{s} (its URL could not be fetched, so nothing shows its .hash is what the URL holds)", .{dependency.name}));
+                continue;
+            };
+            const hash = fetched.source.remote.hash;
+            if (!std.mem.eql(u8, hash, at.hash)) try wrong.append(c.a, try c.a.print("{s} (its .hash is {s}; what its URL holds is {s})", .{ dependency.name, at.hash, hash }));
+        },
+    };
+    if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned by a hash its URL does not hold: pin each again (bay update) and release again", .{try listed(c.a, wrong.items)});
+}
+
+/// A git pin as a release names one: `?ref=` a version (`v1.2.3`, or without the `v`) and
+/// the commit after `#`. Null for a branch, a bare commit or no ref.
+fn releasePin(url: []const u8) ?struct { ref: []const u8, commit: []const u8 } {
+    const p = git_source.parts(url);
+    const ref = p.ref orelse return null;
+    const commit = p.fragment orelse return null;
+    _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, ref, "v")) ref[1..] else ref) catch return null;
+    return .{ .ref = ref, .commit = commit };
+}
+
+/// Whether `revision` is a release of the repository whose tags are `tags`: a version tag by
+/// its name (`v1.2.3`, `refs/tags/v1.2.3`), or a commit a version tag names.
+fn isRelease(tags: []const advertised.Tag, revision: []const u8) bool {
+    const name = if (std.mem.startsWith(u8, revision, "refs/tags/")) revision["refs/tags/".len..] else revision;
+    for (tags) |tag| {
+        _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, tag.name, "v")) tag.name[1..] else tag.name) catch continue;
+        if (std.mem.eql(u8, tag.name, name)) return true;
+        if (git_source.isCommit(revision) and std.mem.eql(u8, tag.commit, revision)) return true;
+    }
+    return false;
+}
+
+/// What a pin's URL is as a forge's: an archive of one revision of a repository (`archive`), a
+/// URL on a known forge that bay cannot read as one (`unread`, naming the host: refused, for a
+/// release must show its pin is one), or a URL of no known forge (`elsewhere`: its hash fixes
+/// the bytes its host published).
+const Forge = union(enum) {
+    archive: struct { repository: []const u8, revision: []const u8 },
+    unread: []const u8,
+    elsewhere,
+};
+
+/// The forges whose URLs bay reads. On any of them, a URL that is no archive form bay knows
+/// is refused, never passed on its hash.
+const known_forges = [_][]const u8{ "github.com", "api.github.com", "codeload.github.com", "gitlab.com", "bitbucket.org", "codeberg.org" };
+
+/// The forms read, the repository as `https://host/owner/repo`:
+/// - `/owner/repo/archive/<revision>.<ext>` (GitHub, Codeberg and any Forgejo or Gitea; the
+///   revision may be `refs/tags/<tag>`);
+/// - GitHub's `/owner/repo/{tarball,zipball}/<revision>`, `api.github.com/repos/owner/repo/
+///   {tarball,zipball}/<revision>` and `codeload.github.com/owner/repo/<format>/<revision>`;
+/// - GitLab's `/group/.../repo/-/archive/<revision>/<file>`, subgroups included;
+/// - Bitbucket's `/owner/repo/get/<revision>.<ext>`.
+/// A host is compared without its case. On a known forge, a URL with an empty path segment, a
+/// query or a fragment, or not https, is unread.
+fn forgeOf(a: std.mem.Allocator, url: []const u8) !Forge {
+    const separator = std.mem.find(u8, url, "://") orelse return .elsewhere;
+    const host_start = separator + "://".len;
+    const host_end = std.mem.findAnyPos(u8, url, host_start, "/?#") orelse url.len;
+    const host = try std.ascii.allocLowerString(a, url[host_start..host_end]);
+    const known = for (known_forges) |forge| {
+        if (std.mem.eql(u8, host, forge)) break true;
+    } else false;
+    const archive_at = try archiveAt(a, host, url[0..separator], url[host_end..]);
+    if (archive_at) |archive| return .{ .archive = .{ .repository = archive.repository, .revision = archive.revision } };
+    return if (known) .{ .unread = host } else .elsewhere;
+}
+
+const Archive = struct { repository: []const u8, revision: []const u8 };
+
+fn archiveAt(a: std.mem.Allocator, host: []const u8, scheme: []const u8, rest: []const u8) !?Archive {
+    if (!std.mem.eql(u8, scheme, "https") or rest.len < 2 or rest[0] != '/' or std.mem.findAny(u8, rest, "?#") != null) return null;
+    const path = rest[1..];
+    var segments: [64][]const u8 = undefined;
+    var count: usize = 0;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or count == segments.len) return null;
+        segments[count] = part;
+        count += 1;
+    }
+    const s = segments[0..count];
+    // The path from segment `from` to segment `to`, inclusive, as the URL writes it.
+    const span = struct {
+        fn of(text: []const u8, all: []const []const u8, from: usize, to: usize) []const u8 {
+            const start = @intFromPtr(all[from].ptr) - @intFromPtr(text.ptr);
+            return text[start .. @intFromPtr(all[to].ptr) - @intFromPtr(text.ptr) + all[to].len];
+        }
+    }.of;
+    const github = std.mem.eql(u8, host, "github.com");
+    if (std.mem.eql(u8, host, "codeload.github.com")) {
+        if (s.len < 4) return null;
+        for ([_][]const u8{ "tar.gz", "zip", "legacy.tar.gz", "legacy.zip" }) |format| {
+            if (std.mem.eql(u8, s[2], format)) return .{ .repository = try a.print("https://github.com/{s}", .{span(path, s, 0, 1)}), .revision = span(path, s, 3, s.len - 1) };
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, host, "api.github.com")) {
+        if (s.len < 5 or !std.mem.eql(u8, s[0], "repos")) return null;
+        if (!std.mem.eql(u8, s[3], "tarball") and !std.mem.eql(u8, s[3], "zipball")) return null;
+        return .{ .repository = try a.print("https://github.com/{s}", .{span(path, s, 1, 2)}), .revision = span(path, s, 4, s.len - 1) };
+    }
+    if (github and s.len >= 4 and (std.mem.eql(u8, s[2], "tarball") or std.mem.eql(u8, s[2], "zipball"))) {
+        return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, 1) }), .revision = span(path, s, 3, s.len - 1) };
+    }
+    if (std.mem.eql(u8, host, "bitbucket.org")) {
+        if (s.len != 4 or !std.mem.eql(u8, s[2], "get")) return null;
+        const revision = withoutArchiveSuffix(s[3]) orelse return null;
+        return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, 1) }), .revision = revision };
+    }
+    // GitLab's form, its project path any depth of groups: `/-/archive/<revision>/<file>`.
+    for (s, 0..) |segment, i| if (std.mem.eql(u8, segment, "-")) {
+        if (i < 2 or s.len < i + 4 or !std.mem.eql(u8, s[i + 1], "archive")) return null;
+        return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, i - 1) }), .revision = span(path, s, i + 2, s.len - 2) };
+    };
+    if (s.len >= 4 and std.mem.eql(u8, s[2], "archive")) {
+        const revision = withoutArchiveSuffix(span(path, s, 3, s.len - 1)) orelse return null;
+        return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, 1) }), .revision = revision };
+    }
+    return null;
+}
+
+/// `name` without the archive format it ends in, or null when it ends in none or is nothing more.
+fn withoutArchiveSuffix(name: []const u8) ?[]const u8 {
+    for ([_][]const u8{ ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tar", ".zip" }) |suffix| {
+        if (std.mem.endsWith(u8, name, suffix) and name.len > suffix.len) return name[0 .. name.len - suffix.len];
+    }
+    return null;
+}
+
+test "a forge's archive names its repository and revision; a known forge's URL bay cannot read is unread; any other URL is elsewhere" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const commit = "5d2a92141f0298d76dc5fd602526d55a62b4e11a";
+    for ([_]struct { []const u8, []const u8, []const u8 }{
+        .{ "https://github.com/o/r/archive/" ++ commit ++ ".tar.gz", "https://github.com/o/r", commit },
+        .{ "https://github.com/o/r/archive/refs/tags/v1.2.0.tar.gz", "https://github.com/o/r", "refs/tags/v1.2.0" },
+        .{ "https://github.com/o/r/archive/v1.2.0.zip", "https://github.com/o/r", "v1.2.0" },
+        .{ "https://GITHUB.COM/o/r/archive/v1.2.0.zip", "https://github.com/o/r", "v1.2.0" },
+        .{ "https://github.com/o/r/tarball/" ++ commit, "https://github.com/o/r", commit },
+        .{ "https://github.com/o/r/zipball/refs/tags/v1.2.0", "https://github.com/o/r", "refs/tags/v1.2.0" },
+        .{ "https://api.github.com/repos/o/r/tarball/v1.2.0", "https://github.com/o/r", "v1.2.0" },
+        .{ "https://codeload.github.com/o/r/tar.gz/refs/tags/v1.2.0", "https://github.com/o/r", "refs/tags/v1.2.0" },
+        .{ "https://codeload.github.com/o/r/legacy.tar.gz/" ++ commit, "https://github.com/o/r", commit },
+        .{ "https://codeberg.org/o/r/archive/v1.2.0.tar.gz", "https://codeberg.org/o/r", "v1.2.0" },
+        .{ "https://gitlab.com/o/r/-/archive/v1.2.0/r-v1.2.0.tar.gz", "https://gitlab.com/o/r", "v1.2.0" },
+        .{ "https://gitlab.com/g/sub/r/-/archive/" ++ commit ++ "/r-" ++ commit ++ ".tar.gz", "https://gitlab.com/g/sub/r", commit },
+        .{ "https://bitbucket.org/o/r/get/v1.2.0.tar.gz", "https://bitbucket.org/o/r", "v1.2.0" },
+        .{ "https://git.example.org/o/r/archive/v1.2.0.tar.gz", "https://git.example.org/o/r", "v1.2.0" },
+    }) |case| {
+        const got = (try forgeOf(a, case[0])).archive;
+        try std.testing.expectEqualStrings(case[1], got.repository);
+        try std.testing.expectEqualStrings(case[2], got.revision);
+    }
+    // review-1029b N9: each passed on its hash.
+    for ([_][]const u8{
+        "https://github.com//o/r/archive/" ++ commit ++ ".tar.gz",
+        "https://github.com/o/r.git?ref=main#" ++ commit,
+        "https://github.com/o/r/archive/.tar.gz",
+        "https://github.com/o/r/releases/download/v1.2.0/r.tar.gz",
+        "http://github.com/o/r/archive/v1.2.0.tar.gz",
+        "https://api.github.com/repos/o/r/tarball",
+        "https://gitlab.com/o/-/archive/v1.2.0/r.tar.gz",
+        "https://bitbucket.org/o/r/get/v1.2.0",
+        "https://codeberg.org/o/r/archive/v1.2.0.tar.gz?x=1",
+    }) |url| try std.testing.expect(try forgeOf(a, url) == .unread);
+    for ([_][]const u8{
+        "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/riscv64/alpine-minirootfs-3.24.2-riscv64.tar.gz",
+        "https://example.org/lib-1.0.tar.gz",
+    }) |url| try std.testing.expect(try forgeOf(a, url) == .elsewhere);
+}
+
+test "a revision is a release at a version tag, by name or by the commit it names" {
+    const at = "5d2a92141f0298d76dc5fd602526d55a62b4e11a";
+    const mid = "cfcf9dceb3ab6d5e5a198a0ac0784e2108251b9f";
+    const tags = [_]advertised.Tag{ .{ .name = "v1.2.0", .commit = at }, .{ .name = "nightly", .commit = mid } };
+    for ([_][]const u8{ "v1.2.0", "refs/tags/v1.2.0", at }) |revision| try std.testing.expect(isRelease(&tags, revision));
+    for ([_][]const u8{ mid, "nightly", "main", "refs/heads/main", "v1.3.0" }) |revision| try std.testing.expect(!isRelease(&tags, revision));
+}
+
+test "a release pin names a version tag and its commit; a branch, a bare commit or no ref does not" {
+    const commit = "5d2a92141f0298d76dc5fd602526d55a62b4e11a";
+    const pin = releasePin("git+https://github.com/o/r?ref=v1.2.0#" ++ commit).?;
+    try std.testing.expectEqualStrings("v1.2.0", pin.ref);
+    try std.testing.expectEqualStrings(commit, pin.commit);
+    try std.testing.expect(releasePin("git+https://github.com/o/r?ref=0.3.0-rc.1#" ++ commit) != null);
+    for ([_][]const u8{
+        "git+https://github.com/o/r?ref=aegis-0.2#" ++ commit,
+        "git+https://github.com/o/r?ref=main#" ++ commit,
+        "git+https://github.com/o/r#" ++ commit,
+        "git+https://github.com/o/r?ref=v1.2.0",
+        "git+https://github.com/o/r",
+    }) |url| try std.testing.expect(releasePin(url) == null);
 }
 
 /// Gates the commit at HEAD here and on every machine at once, each gate's output
@@ -337,7 +647,7 @@ fn gateEverywhere(c: Context, gate_machines: []const machines.Machine) !?[]const
 const Gate = struct { where: []const u8, log: []const u8, output: machines.Output, green: bool = false, failed: ?anyerror = null };
 
 fn gateHere(c: Context, one: *Gate) void {
-    one.green = machines.local(c.io, c.environ, c.package, &one.output) catch |err| {
+    one.green = machines.local(c.io, c.a, c.environ, c.package, &one.output) catch |err| {
         one.failed = err;
         return;
     };
@@ -376,6 +686,11 @@ fn push(c: Context, up: Upstream, commit: []const u8, tag: ?[]const u8) !void {
     if (!branch_ok or !tag_ok) try say.fail(c.io, "{s} took the push, but reading it back shows {s}{s} elsewhere than {s}", .{ up.remote, if (branch_ok) "" else up.merge, if (tag_ok) "" else " and the tag", commit[0..12] });
     if (tag) |t| _ = try must(c, &.{ "tag", t, commit });
     _ = try must(c, &.{ "update-ref", up.tracking, commit });
+    if (up.set) {
+        _ = try must(c, &.{ "config", try c.a.print("branch.{s}.remote", .{up.branch}), up.remote });
+        _ = try must(c, &.{ "config", try c.a.print("branch.{s}.merge", .{up.branch}), up.merge });
+        try say.note(c.io, "{s} has {s} as its upstream now", .{ up.branch, up.onto });
+    }
 }
 
 /// A train's member whose new commits are development pins alone: gated, then
@@ -403,7 +718,7 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
     for (gate_machines) |machine| try say.out(c.io, ", on {s}", .{machine.name});
     if (options.no_push) {
         try say.out(c.io, "\nhold it here, gated, for a later bay release to push\n", .{});
-    } else try say.out(c.io, "\npush it to {s} and the tag {s} on {s} at once ({s})\n", .{ up.onto, plan.tag, up.remote, up.url });
+    } else try say.out(c.io, "\npush it to {s} and the tag {s} on {s} at once ({s}){s}\n", .{ up.onto, plan.tag, up.remote, up.url, if (up.set) ", which becomes the branch's upstream" else "" });
 }
 
 /// `bay --workspace release`: the train. Members one at a time, each after the
@@ -416,6 +731,9 @@ pub fn train(c: Context, options: Options) !u8 {
     const directories = try workspace.all(c.io, c.a, c.package) orelse try say.fail(c.io, "no {s} here or in any directory above", .{workspace.file_name});
     const cars = try each.train(c.io, c.a, directories);
     if (options.dry_run) return trainPlan(c, cars);
+    // One train in a workspace at a time: a second would gate the same members at once.
+    var held = try lock.hold(c.io, c.a, c.environ, .train, (try workspace.fileOf(c.io, c.a, c.package)).?); // safe: `all` found it above
+    defer held.release(c.io);
     const done = try c.a.alloc(Done, cars.len);
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
     @memset(versions, null);
@@ -456,7 +774,7 @@ fn ride(c: Context, car: each.Car, when: enum { always, when_repinned }, version
     };
     if (when == .when_repinned and !pins_moved) return .nothing;
     try say.note(c.io, "{s}: {s}", .{ car.name, car.directory });
-    return switch (run(member, .{ .push_unreleased = true }) catch |err| switch (err) {
+    return switch (releaseOne(member, .{ .push_unreleased = true }) catch |err| switch (err) {
         error.Reported => return .failed,
         else => return err,
     }) {
@@ -518,6 +836,10 @@ fn bayIn(c: Context, args: []const []const u8) !void {
 fn trainPlan(c: Context, cars: []const each.Car) !u8 {
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
     @memset(versions, null);
+    // Where each car is gated, as `ride` gates it.
+    var gated: std.Io.Writer.Allocating = .init(c.a);
+    try gated.writer.writeAll("here");
+    for (try machines.load(c.io, c.a, c.environ)) |machine| try gated.writer.print(", on {s}", .{machine.name});
     const developed_with = try c.a.alloc([]const manifest.Dependency, cars.len);
     for (cars, versions, developed_with, 1..) |car, *version, *dev, number| {
         var member = c;
@@ -525,7 +847,7 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         const before_text = try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory});
         // Tidied as the train tidies it, in memory: the dry run writes nothing.
         const zig = try toolchain.forPackage(c.io, c.a, c.environ, car.directory);
-        const tidied = tidying.tidied(.{ .io = c.io, .a = c.a, .zig = zig, .package = car.directory }, before_text) catch |err| switch (err) {
+        const tidied = tidying.tidied(.{ .io = c.io, .a = c.a, .environ = c.environ, .zig = zig, .package = car.directory }, before_text) catch |err| switch (err) {
             error.Reported => try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name}),
             else => return err,
         };
@@ -554,6 +876,17 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         } else try say.out(c.io, ": nothing to release", .{});
         if (developed.items.len != 0) try say.out(c.io, "; develops with {s}{s}", .{ try listed(c.a, developed.items), if (change == .none) ", gated and pushed with no tag" else "" });
         try say.out(c.io, "\n", .{});
+        // What the train runs in it, run as a dry run (its tidy, and the `generate` step after),
+        // then the steps it takes, so a clash shows before the first car moves.
+        bayIn(member, &.{ "tidy", "--dry-run" }) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name}),
+            else => return err,
+        };
+        if (version.*) |v| {
+            try say.out(c.io, "   then: the re-pin committed, if a pin moves; v{f} written from its section and committed; gated {s}; the branch and the tag pushed\n", .{ v, gated.written() });
+        } else if (developed.items.len != 0) {
+            try say.out(c.io, "   then: the re-pin committed; gated {s}; the branch pushed, with no tag\n", .{gated.written()});
+        } else try say.out(c.io, "   then: nothing\n", .{});
     }
     // The closing pass: a development pin left out of the order, on a member after it.
     for (cars, developed_with) |car, dev| for (cars, versions) |later, version| {
@@ -627,4 +960,25 @@ test "re-pins are listed as a sentence" {
     const a = arena.allocator();
     try std.testing.expectEqualStrings("x 1.0.0", try listed(a, &.{"x 1.0.0"}));
     try std.testing.expectEqualStrings("x 1.0.0, y 0.2.0 and z 0.3.1", try listed(a, &.{ "x 1.0.0", "y 0.2.0", "z 0.3.1" }));
+}
+
+test "a gated commit is recorded per repository and tag in bay's data directory, and forgotten once pushed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    const here = try gatedPath(a, data, "/work/one/.git", "v0.2.0");
+    const there = try gatedPath(a, data, "/work/two/.git", "v0.2.0");
+    try std.testing.expect(!std.mem.eql(u8, here, there));
+    try std.testing.expect(std.mem.startsWith(u8, here, data));
+    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, here));
+    try record(std.testing.io, here, "0123456789abcdef0123456789abcdef01234567");
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", (try recorded(std.testing.io, a, here)).?);
+    // Another repository's gate says nothing of this one.
+    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, there));
+    try forget(std.testing.io, here);
+    try forget(std.testing.io, here);
+    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, here));
 }

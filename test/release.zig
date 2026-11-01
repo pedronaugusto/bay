@@ -5,7 +5,8 @@
 //! two branches adding lines under one group rebased with no conflict; a
 //! release interrupted after its commit and after its push, finished or
 //! refused, never a tag on a commit no gate passed; a machine gating beside
-//! this one; and a workspace's train of three members in order.
+//! this one; and a workspace's train of three members in order, none of which
+//! releases alone.
 const std = @import("std");
 const Io = std.Io;
 const fixture = @import("fixture.zig");
@@ -53,6 +54,8 @@ const World = struct {
 
     fn init(a: std.mem.Allocator) !World {
         var w: World = .{ .f = try .init(a) };
+        // A release's gate builds with the Zig the manifest names, never `ZIG`.
+        try w.f.installZig();
         try w.f.tmp.dir.createDirPath(w.f.io, "gates");
         try w.f.env.put("GATE_LOG", try std.fs.path.join(a, &.{ w.f.root, "gates" }));
         return w;
@@ -120,6 +123,18 @@ const World = struct {
         try w.f.write(dir, "lib.zig", try w.f.a.print("// {d}\n", .{std.Io.Clock.real.now(w.f.io).toNanoseconds()}));
         try w.git(dir, &.{ "add", "." });
         try w.git(dir, &.{ "commit", "--quiet", "-m", "A change" });
+    }
+
+    /// The commit bay recorded as gated green for `tag` in `dir`'s repository and has not
+    /// pushed, as bay keeps it in its data directory; empty when there is none.
+    fn gateRecord(w: *World, dir: []const u8, tag: []const u8) ![]const u8 {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(try w.out(dir, &.{ "rev-parse", "--absolute-git-dir" }), &digest, .{});
+        const record = try std.fs.path.join(w.f.a, &.{ "data", "bay", "gated", &std.fmt.bytesToHex(digest, .lower), tag });
+        return w.f.tmp.dir.readFileAlloc(w.f.io, record, w.f.a, .limited(256)) catch |err| switch (err) {
+            error.FileNotFound => "",
+            else => return err,
+        };
     }
 
     /// How many times a gate ran on `commit`.
@@ -208,6 +223,37 @@ test "a release cuts the section, gates that commit, and pushes the branch and i
     try std.testing.expectEqualStrings(commit, try w.head("lib"));
 }
 
+test "a branch with no upstream is released to its own name on the remote, which becomes its upstream" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    try w.package("lib", "0.1.0", "");
+    try w.git("lib", &.{ "checkout", "--quiet", "-b", "line-0.1" });
+    try w.change("lib", "### Fixed\n\n- A fix.\n");
+    const remote_main = try w.remoteAt("lib", "refs/heads/main");
+    const dry = try w.releaseIn("lib", &.{"--dry-run"});
+    try std.testing.expect(succeeded(dry));
+    try std.testing.expect(contains(dry.stdout, "push it to origin/line-0.1 and the tag v0.1.1 on origin"));
+    try std.testing.expect(contains(dry.stdout, "which becomes the branch's upstream"));
+    // The dry run set nothing.
+    try std.testing.expect(!succeeded(try w.f.run("lib", &.{ "git", "config", "--get", "branch.line-0.1.remote" })));
+    const released = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(released));
+    const commit = try w.head("lib");
+    try std.testing.expect(contains(released.stderr, "line-0.1 has origin/line-0.1 as its upstream now"));
+    try std.testing.expectEqualStrings(commit, try w.remoteAt("lib", "refs/heads/line-0.1"));
+    try std.testing.expectEqualStrings(commit, try w.remoteAt("lib", "refs/tags/v0.1.1"));
+    try std.testing.expectEqualStrings(remote_main, try w.remoteAt("lib", "refs/heads/main"));
+    try std.testing.expectEqualStrings("origin/line-0.1", try w.out("lib", &.{ "rev-parse", "--abbrev-ref", "line-0.1@{upstream}" }));
+    // From then on it releases as any branch with an upstream does.
+    try w.change("lib", "### Fixed\n\n- Another.\n");
+    const again = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(again));
+    try std.testing.expect(std.mem.find(u8, again.stderr, "as its upstream now") == null);
+    try std.testing.expectEqualStrings(try w.head("lib"), try w.remoteAt("lib", "refs/tags/v0.1.2"));
+}
+
 test "the version is the section's largest change, and a dry run changes nothing" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -266,11 +312,14 @@ test "each refusal names its cause and leaves the branch, the tags and the remot
     try w.git("lib", &.{ "remote", "set-url", "--push", "origin", try w.path("remotes/lib.git") });
     try Expect.refusal(&w, "which is not SSH", start, remote_main);
     try w.git("lib", &.{ "remote", "set-url", "--push", "origin", try w.sshUrl("lib") });
-    // HEAD detached, and a branch with no upstream.
+    // HEAD detached, and a branch with no upstream that more than one remote could take.
     try w.git("lib", &.{ "checkout", "--quiet", "--detach" });
     try Expect.refusal(&w, "HEAD is detached", start, remote_main);
     try w.git("lib", &.{ "checkout", "--quiet", "-b", "loose" });
-    try Expect.refusal(&w, "loose has no upstream", start, remote_main);
+    try w.git("lib", &.{ "remote", "add", "mirror", try w.sshUrl("lib") });
+    try Expect.refusal(&w, "loose has no upstream, and more than one remote could take it", start, remote_main);
+    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/heads/loose"));
+    try w.git("lib", &.{ "remote", "remove", "mirror" });
     try w.git("lib", &.{ "checkout", "--quiet", "main" });
     // The manifest and the CHANGELOG at different releases.
     try w.f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, w.f.a, try w.read("lib", "build.zig.zon"), "\"0.1.0\"", "\"0.1.5\""));
@@ -281,6 +330,24 @@ test "each refusal names its cause and leaves the branch, the tags and the remot
     try w.change("lib", "- Loose.\n");
     try Expect.refusal(&w, "CHANGELOG.md:5: an entry under no group", try w.head("lib"), remote_main);
     try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
+    // A pin at no release: on a branch, and on a version tag that does not name the pinned
+    // commit; and one at a release whose hash its URL does not hold.
+    try w.package("dep", "0.1.0", "");
+    const pins = [_]struct { []const u8, []const u8, []const u8 }{
+        .{ "main", try w.head("dep"), "dep (at main) pinned at no release" },
+        .{ "v0.1.0", start, "dep (v0.1.0 is no tag at " },
+        // At the tag, by a hash of other content: Zig would take what its cache held under it
+        // (review-1029b m-d).
+        .{ "v0.1.0", try w.head("dep"), "dep (its .hash is dep-0.1.0-AAAA" },
+    };
+    for (pins) |pin| {
+        const ref, const commit, const said = pin;
+        const dev = try w.f.a.print("    .dependencies = .{{}},\n    .dev_dependencies = .{{ .dep = .{{ .url = \"{s}?ref={s}#{s}\", .hash = \"dep-0.1.0-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\" }} }},\n", .{ try w.pinUrl("dep"), ref, commit });
+        try w.f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, w.f.a, try w.read("lib", "build.zig.zon"), "    .dependencies = .{},\n", dev));
+        try w.git("lib", &.{ "commit", "--quiet", "-am", "Pin dep" });
+        try Expect.refusal(&w, said, try w.head("lib"), remote_main);
+        try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
+    }
     // The version to come tagged already, on the remote.
     try w.git(".", &.{ "clone", "--quiet", try w.path("remotes/lib.git"), "other" });
     try w.git("other", &.{ "tag", "v0.1.1" });
@@ -383,16 +450,20 @@ test "a release stopped after its commit or its push is finished, and never tags
     try std.testing.expect(contains(stopped.stderr, "the push to origin failed, and nothing moved there"));
     const commit = try w.head("lib");
     try std.testing.expectEqualStrings("Release v0.1.1", try w.out("lib", &.{ "log", "-1", "--format=%s" }));
-    try std.testing.expectEqualStrings(commit, try w.out("lib", &.{ "rev-parse", "refs/bay/gated/v0.1.1" }));
+    try std.testing.expectEqualStrings(commit, try w.gateRecord("lib", "v0.1.1"));
+    try std.testing.expectEqualStrings("", try w.out("lib", &.{ "for-each-ref", "refs/bay" }));
     try std.testing.expectEqualStrings("v0.1.0", try w.out("lib", &.{ "tag", "--list" }));
     try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.1"));
-    // A run stopped before its gate ended has no record: the next run gates the commit again.
-    try w.git("lib", &.{ "update-ref", "-d", "refs/bay/gated/v0.1.1" });
+    // A run stopped before its gate ended has no record: the next run gates the commit again,
+    // and a ref made by hand where bay once kept the record is no gate passed.
+    try w.f.tmp.dir.deleteTree(w.f.io, "data/bay/gated");
+    try w.git("lib", &.{ "update-ref", "refs/bay/gated/v0.1.1", commit });
     try w.f.tmp.dir.deleteFile(w.f.io, hook);
     const resumed = try w.releaseIn("lib", &.{});
     try std.testing.expect(succeeded(resumed));
     try std.testing.expect(contains(resumed.stderr, "v0.1.1 is under way"));
     try std.testing.expectEqual(2, try w.gated(commit));
+    try std.testing.expectEqualStrings("", try w.gateRecord("lib", "v0.1.1"));
     try std.testing.expectEqualStrings(commit, try w.remoteAt("lib", "refs/tags/v0.1.1"));
     // With the record, the next run pushes the gated commit without gating it again.
     try w.change("lib", "### Fixed\n\n- Another fix.\n");
@@ -411,7 +482,7 @@ test "a release stopped after its commit or its push is finished, and never tags
     try std.testing.expect(succeeded(held));
     try std.testing.expect(contains(held.stderr, "v0.1.3 at"));
     const third = try w.head("lib");
-    try std.testing.expectEqualStrings(third, try w.out("lib", &.{ "rev-parse", "refs/bay/gated/v0.1.3" }));
+    try std.testing.expectEqualStrings(third, try w.gateRecord("lib", "v0.1.3"));
     try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.3"));
     try std.testing.expect(succeeded(try w.releaseIn("lib", &.{})));
     try std.testing.expectEqual(1, try w.gated(third));
@@ -449,6 +520,38 @@ fn refusePushes(w: *World, hook: []const u8) !void {
     const file = try w.f.tmp.dir.openFile(w.f.io, hook, .{ .mode = .read_write });
     defer file.close(w.f.io);
     try file.setPermissions(w.f.io, .executable_file);
+}
+
+test "the machine that releases runs the jobs any machine runs, whatever its environment says" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    try w.package("lib", "0.1.0", "");
+    try w.change("lib", "### Fixed\n\n- A fix.\n");
+    // Inherited, it would have left the source checks to a machine that is not there
+    // (review-1029 M4).
+    try w.f.env.put("PREFLIGHT_PORTABLE", "elsewhere");
+    const result = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(result));
+    const commit = try w.head("lib");
+    try std.testing.expect(try w.gatedWith(commit, "unset"));
+    try std.testing.expect(!try w.gatedWith(commit, "elsewhere"));
+}
+
+test "a release's gate builds with the Zig the manifest names, never the shell's ZIG" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    try w.package("lib", "0.1.0", "");
+    try w.change("lib", "### Fixed\n\n- A fix.\n");
+    // A stand-in that passed every build called the gate green (review-1029b N6); this one
+    // is no program at all, so a gate that took it could not run.
+    try w.f.env.put("ZIG", try w.path("no-zig-here"));
+    const result = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(result));
+    try std.testing.expect(try w.gatedWith(try w.head("lib"), "unset"));
 }
 
 test "a machine gates the release beside this one, and its red stops it" {
@@ -520,14 +623,24 @@ test "a workspace's train releases its members in order, each pinned at the rele
         "2. b 0.1.0 -> 0.1.1 (fix): pins a 0.1.1\n",
         "3. c 0.1.0 -> 0.1.1 (fix): pins b 0.1.1\n",
         "then a develops with c 0.1.1, gated and pushed with no tag\n",
+        // Each car's steps, after its tidy run as a dry run.
+        "   then: the re-pin committed, if a pin moves; v0.1.1 written from its section and committed; gated here; the branch and the tag pushed\n",
     }) |line| if (!contains(plan.stdout, line)) {
         std.debug.print("expected the line:\n{s}in the plan:\n{s}\n", .{ line, plan.stdout });
         return error.TestUnexpectedResult;
     };
+    // Each member's tidy, run as the train runs it, says the generate step that would follow.
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, plan.stderr, "then the package build's `generate` step would run"));
     for ([_][]const u8{ "a", "b", "c" }, heads) |dir, head| {
         try std.testing.expectEqualStrings(head, try w.head(dir));
         try std.testing.expectEqualStrings("", try w.out(dir, &.{ "status", "--porcelain" }));
     }
+    // One member released alone would gate with the others' trees in place of its pins.
+    const alone = try w.releaseIn("a", &.{});
+    try std.testing.expect(refused(alone));
+    try std.testing.expect(contains(alone.stderr, "bay.work holds this package with c and b: their trees would stand in for the pins"));
+    try std.testing.expectEqualStrings(heads[0], try w.head("a"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("a", "refs/tags/v0.1.1"));
     const train = try w.f.bay(".", &.{ "--workspace", "release" });
     try std.testing.expect(succeeded(train));
     // In order: a, then b pinning it, then c pinning b; each released and pushed with its tag.

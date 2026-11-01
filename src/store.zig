@@ -9,6 +9,8 @@ const manifest = @import("manifest.zig");
 const select = @import("select.zig");
 const say = @import("say.zig");
 const git = @import("git.zig");
+const prebuilt = @import("prebuilt.zig");
+const tree = @import("tree.zig");
 const scratchManifest = @import("root.zig").scratchManifest;
 
 /// Where bay unpacks an archived package to read it, under the package.
@@ -18,6 +20,8 @@ pub const Store = struct {
     io: Io,
     a: std.mem.Allocator,
     zig: []const u8,
+    /// Where bay keeps a prebuilt's archive: its data directory, read from it.
+    environ: *const std.process.Environ.Map,
     /// Directories holding unpacked packages by hash, searched in order.
     directories: []const []const u8,
     /// Zig's global cache, whose `p` holds packages as archives.
@@ -28,10 +32,10 @@ pub const Store = struct {
     found: std.array_hash_map.String([]const u8) = .empty,
 
     /// The store for a package: its `zig-pkg`, which both its builds use, and bay's unpacked copies.
-    pub fn init(io: Io, a: std.mem.Allocator, zig: []const u8, package: []const u8) !*Store {
+    pub fn init(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, zig: []const u8, package: []const u8) !*Store {
         const store = try a.create(Store);
         const unpacked = try std.fs.path.join(a, &.{ package, unpacked_directory });
-        store.* = .{ .io = io, .a = a, .zig = zig, .global = try globalCache(io, a, zig), .unpacked = unpacked, .directories = try a.dupe([]const u8, &.{
+        store.* = .{ .io = io, .a = a, .environ = environ, .zig = zig, .global = try globalCache(io, a, zig), .unpacked = unpacked, .directories = try a.dupe([]const u8, &.{
             try std.fs.path.join(a, &.{ package, "zig-pkg" }),
             unpacked,
         }) };
@@ -52,6 +56,8 @@ pub const Store = struct {
     /// The directory of a pinned package: unpacked already, unpacked from Zig's
     /// archive, or fetched by Zig first.
     pub fn directoryOf(store: *Store, remote: select.Place.Remote) ![]const u8 {
+        // Zig fetches no prebuilt: bay brings it into Zig's cache, checked, and reads it there.
+        if (remote.prebuilt) |pin| if (!try store.withZig(remote.hash)) try prebuilt.bring(.{ .io = store.io, .a = store.a, .environ = store.environ, .zig = store.zig }, remote.url, remote.hash, pin);
         // Zig never fetches what only git reaches: such a package must be where Zig
         // looks, the project's zig-pkg or Zig's cache, not only in bay's copy.
         if (git.handles(remote.url) and !try store.withZig(remote.hash)) try store.fetch(remote);
@@ -103,7 +109,7 @@ pub const Store = struct {
 
     /// Whether Zig finds the package `hash` without fetching it: unpacked in the
     /// project's zig-pkg, or kept in Zig's cache.
-    fn withZig(store: *Store, hash: []const u8) !bool {
+    pub fn withZig(store: *Store, hash: []const u8) !bool {
         const places = [_][]const u8{
             try std.fs.path.join(store.a, &.{ store.directories[0], hash }),
             try std.fs.path.join(store.a, &.{ store.global, "p", hash }),
@@ -155,7 +161,7 @@ pub const Store = struct {
         if (diagnostics.errors.items.len != 0) try say.fail(io, "{s} did not unpack: {d} entries failed", .{ archive_path, diagnostics.errors.items.len });
         // An archive holding one directory holds the package in it.
         const root = if (diagnostics.root_dir.len != 0) try std.fs.path.join(store.a, &.{ partial, diagnostics.root_dir }) else partial;
-        try markExecutables(io, store.a, root);
+        try tree.markExecutables(io, store.a, root);
         try Io.Dir.cwd().rename(root, Io.Dir.cwd(), destination, io);
         if (root.len != partial.len) try Io.Dir.cwd().deleteTree(io, partial);
         return destination;
@@ -231,11 +237,22 @@ pub fn pins(a: std.mem.Allocator, directory: []const u8, dependencies: []const m
         .key = dependency.name,
         .lazy = dependency.lazy,
         .place = switch (dependency.source) {
-            .remote => |remote| .{ .remote = .{ .url = remote.url, .hash = remote.hash } },
+            .remote => |remote| .{ .remote = .{ .url = remote.url, .hash = remote.hash, .prebuilt = if (dependency.prebuilt) |fields| try placedPrebuilt(a, directory, fields) else null } },
             .path => |relative| .{ .directory = try std.fs.path.resolveAlloc(a, &.{ directory, relative }) },
         },
     };
     return list;
+}
+
+/// A prebuilt's `fields` as the manifest in `directory` holds them, its OpenPGP key file's path made
+/// whole: a dependency's pin is checked with the key its package ships.
+fn placedPrebuilt(a: std.mem.Allocator, directory: []const u8, fields: manifest.Prebuilt) !manifest.Prebuilt {
+    var placed_pin = fields;
+    switch (fields.publisher) {
+        .openpgp => |key_file| placed_pin.publisher = .{ .openpgp = try std.fs.path.resolveAlloc(a, &.{ directory, key_file }) },
+        .minisign, .nuget, .none => {},
+    }
+    return placed_pin;
 }
 
 /// Zig's global cache, as `zig env` reports it.
@@ -247,41 +264,4 @@ pub fn globalCache(io: Io, a: std.mem.Allocator, zig: []const u8) ![]const u8 {
     const env = std.zon.parse.fromSlice(Env, .{ .gpa = a, .arena = a, .source = try a.dupeSentinel(u8, result.stdout, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
         try say.fail(io, "could not read {s} env", .{zig});
     return env.global_cache_dir;
-}
-
-/// Gives each file in `path` that starts as a program does (`#!`, ELF, Mach-O)
-/// the executable bit, as Zig 0.17 does when it unpacks a package: an archive's
-/// own modes are ignored by both, so what bay copies from here is what Zig unpacks.
-fn markExecutables(io: Io, a: std.mem.Allocator, path: []const u8) !void {
-    if (!Io.File.Permissions.has_executable_bit) return;
-    var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
-    defer dir.close(io);
-    var walker = try dir.walk(a);
-    defer walker.deinit();
-    while (try walker.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        const file = try dir.openFile(io, entry.path, .{});
-        defer file.close(io);
-        var header: [4]u8 = undefined;
-        const length = try file.readPositional(io, &.{&header}, 0);
-        if (startsAsProgram(header[0..length])) try file.setPermissions(io, .executable_file);
-    }
-}
-
-fn startsAsProgram(header: []const u8) bool {
-    if (std.mem.startsWith(u8, header, "#!")) return true;
-    if (std.mem.startsWith(u8, header, std.elf.MAGIC)) return true;
-    if (header.len < 4) return false;
-    const magic = std.mem.readInt(u32, header[0..4], @import("builtin").cpu.arch.endian());
-    return switch (magic) {
-        std.macho.MH_MAGIC, std.macho.MH_MAGIC_64, std.macho.FAT_MAGIC, std.macho.FAT_MAGIC_64, std.macho.MH_CIGAM, std.macho.MH_CIGAM_64, std.macho.FAT_CIGAM, std.macho.FAT_CIGAM_64 => true,
-        else => false,
-    };
-}
-
-test "a file is a program by its first bytes, as Zig takes it" {
-    try std.testing.expect(startsAsProgram("#!/bin/sh"));
-    try std.testing.expect(startsAsProgram("\x7fELF"));
-    try std.testing.expect(!startsAsProgram("pub "));
-    try std.testing.expect(!startsAsProgram("#"));
 }

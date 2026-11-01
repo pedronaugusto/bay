@@ -3,13 +3,16 @@
 //! workspace's selection back into each module. A member is built from its
 //! directory inside the workspace whatever it is pinned at; the pin is what
 //! everyone outside sees, so it names the newest release there is. A member
-//! whose version has no tag yet has unreleased work, and its pins stay.
+//! whose version has no tag yet has unreleased work, and its pins stay. A
+//! repository's newest release is also what `bay add` pins and `bay install`
+//! builds when given the repository's URL.
 const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const remotes = @import("remote.zig");
 const fetch = @import("fetch.zig");
+const git = @import("git.zig");
 const say = @import("say.zig");
 const select = @import("select.zig");
 const store = @import("store.zig");
@@ -180,4 +183,43 @@ test "a member pinned below its release moves up to it, in either list, never do
     // Each member's release is looked up once.
     try std.testing.expectEqual(2, releases.asked);
     try std.testing.expectEqual(1, releases.foreigners);
+}
+
+/// What `bay add` and `bay install` fetch for `where`: a repository's page URL
+/// (`https://host/owner/repo`, as a browser shows it) is the git repository there,
+/// and a git URL that names no ref is taken at its newest release, as `go get`
+/// takes `@latest`, whether Zig or git fetches it; with no release it is the
+/// default branch, as Zig fetches it. An archive URL and a URL with a ref or
+/// commit stay as given.
+pub fn fetchable(io: Io, a: std.mem.Allocator, zig: []const u8, packages: *store.Store, scratch: []const u8, where: []const u8) ![]const u8 {
+    const url = try repositoryUrl(a, where);
+    if (!std.mem.startsWith(u8, url, "git+")) return url;
+    const p = git.parts(url);
+    if (p.ref != null or p.fragment != null) return url;
+    const latest = try newest(io, a, zig, packages, scratch, url) orelse return url;
+    return a.print("{s}#{s}", .{ url, latest.tag });
+}
+
+/// `where` as a git URL when it is an http(s) URL of a repository rather than
+/// of an archive: Zig fetches a plain https URL as a file, and a repository's
+/// page is HTML, which it refuses by its Content-Type.
+fn repositoryUrl(a: std.mem.Allocator, where: []const u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, where, "https://") and !std.mem.startsWith(u8, where, "http://")) return where;
+    const path = where[0 .. std.mem.findAny(u8, where, "?#") orelse where.len];
+    for ([_][]const u8{ ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar", ".zip" }) |suffix| {
+        if (std.mem.endsWith(u8, path, suffix)) return where;
+    }
+    return a.print("git+{s}", .{std.mem.trimEnd(u8, where, "/")});
+}
+
+test "a repository's page URL is fetched as its git repository, an archive as a file" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("git+https://github.com/o/r", try repositoryUrl(a, "https://github.com/o/r"));
+    try std.testing.expectEqualStrings("git+https://github.com/o/r", try repositoryUrl(a, "https://github.com/o/r/"));
+    try std.testing.expectEqualStrings("git+https://codeberg.org/o/r.git", try repositoryUrl(a, "https://codeberg.org/o/r.git"));
+    try std.testing.expectEqualStrings("https://example.org/r-1.0.tar.gz", try repositoryUrl(a, "https://example.org/r-1.0.tar.gz"));
+    try std.testing.expectEqualStrings("https://example.org/r.zip?x=1", try repositoryUrl(a, "https://example.org/r.zip?x=1"));
+    try std.testing.expectEqualStrings("git+https://github.com/o/r#v1.0.0", try repositoryUrl(a, "git+https://github.com/o/r#v1.0.0"));
 }

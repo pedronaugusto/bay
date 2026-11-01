@@ -15,6 +15,8 @@ const git = @import("git.zig");
 const published = @import("published.zig");
 const each = @import("each.zig");
 const store = @import("store.zig");
+const prebuilt = @import("prebuilt.zig");
+const select = @import("select.zig");
 const licenses = @import("licenses.zig");
 const audit = @import("audit.zig");
 const say = @import("say.zig");
@@ -37,9 +39,9 @@ pub const Cli = struct {
         dev: Pass,
         add: Add,
         remove: Remove,
-        update: Names,
+        update: Update,
         upgrade: Names,
-        tidy,
+        tidy: Tidy,
         tree: Tree,
         outdated,
         licenses: Developed,
@@ -105,6 +107,11 @@ const Add = struct {
     lazy: bool = false,
     tidy: bool = true,
     name: ?[]const u8 = null,
+    minisign: ?[]const u8 = null,
+    openpgp: ?[]const u8 = null,
+    nuget: bool = false,
+    no_publisher: bool = false,
+    license: ?[]const u8 = null,
     sources: []const []const u8,
     pub const spec: ensign.Spec(@This()) = .{
         .about = "Fetch and pin dependencies, then tidy once",
@@ -113,7 +120,22 @@ const Add = struct {
             .lazy = .{ .help = "Fetched only when a build uses it" },
             .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
             .name = .{ .help = "The name to pin the one source given under" },
+            .minisign = .{ .value_name = "KEY", .help = "A prebuilt (bay+https://): its publisher's minisign key; the signature is at the URL plus .minisig" },
+            .openpgp = .{ .value_name = "FILE", .hint = .file, .help = "A prebuilt: its publisher's OpenPGP key, a file in the package; the signature is at the URL plus .sig" },
+            .nuget = .{ .help = "A prebuilt: a NuGet package, its SHA-512 read from nuget.org's catalog" },
+            .no_publisher = .{ .help = "A prebuilt whose publisher signs nothing: its digest alone holds it" },
+            .license = .{ .value_name = "PATH", .help = "A prebuilt: the file in its tree that states its licence, when it holds no one licence file" },
             .sources = .{ .positional = true, .value_name = "URL-OR-DIRECTORY", .hint = .directory, .help = "A repository's URL (pinned at its newest release), a git URL with a ref, an archive URL, or a directory" },
+        },
+    };
+};
+
+/// `bay tidy`'s options.
+const Tidy = struct {
+    dry_run: bool = false,
+    pub const spec: ensign.Spec(@This()) = .{
+        .options = .{
+            .dry_run = .{ .help = "Print what tidy would pin and which build's generate step it would run; change and run nothing" },
         },
     };
 };
@@ -154,6 +176,16 @@ const Names = struct {
     pub const spec: ensign.Spec(@This()) = .{ .options = .{
         .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
         .names = .{ .positional = true, .value_name = "NAME", .help = "The dependencies to move; every one when none is named" },
+    } };
+};
+
+/// `bay update`'s: `Names`, a prebuilt's name followed by the URL it moves to.
+const Update = struct {
+    tidy: bool = true,
+    names: []const []const u8 = &.{},
+    pub const spec: ensign.Spec(@This()) = .{ .options = .{
+        .tidy = .{ .help = "Tidy after writing; --no-tidy leaves it to a later bay tidy, as --workspace does until every member is written" },
+        .names = .{ .positional = true, .value_name = "NAME", .help = "The dependencies to move, every one when none is named; a prebuilt's name followed by the bay+https:// URL it moves to" },
     } };
 };
 
@@ -233,7 +265,8 @@ fn deferTidy(cli: *Cli) bool {
     switch (cli.command.?) { // safe: dispatch runs only with a command
         .add => |*args| args.tidy = false,
         .remove => |*args| args.tidy = false,
-        .update, .upgrade => |*args| args.tidy = false,
+        .update => |*args| args.tidy = false,
+        .upgrade => |*args| args.tidy = false,
         else => return false,
     }
     return true;
@@ -254,7 +287,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         const writes = deferTidy(&member);
         const code = try each.run(io, a, environ, jobs, try ensign.render(Cli, a, member));
         if (!writes or code != 0) return code;
-        member.command = .tidy;
+        member.command = .{ .tidy = .{} };
         return each.run(io, a, environ, jobs, try ensign.render(Cli, a, member));
     }
     switch (command) {
@@ -282,7 +315,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         .update => |args| afterEdit(env, args.tidy, try update(env, args.names)),
         .upgrade => |args| afterEdit(env, args.tidy, try upgrade(env, args.names)),
         .list => list(env),
-        .tidy => tidy(env),
+        .tidy => |args| if (args.dry_run) planTidy(env) else tidy(env),
         .locate => |args| locate(env, args.dev),
         .tree => |args| treeCommand(env, args),
         .outdated => graphCommand(env, .outdated),
@@ -299,6 +332,10 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
 
 /// `bay release`, its train with `--workspace`, and a machine's side of either.
 fn releaseCommand(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli: Cli, args: Release) !u8 {
+    // A release builds with the Zig each package's manifest names, as its CI does, on every
+    // machine that gates it: never one the shell set (a stand-in that passes every build would
+    // call the gate green).
+    _ = environ.swapRemove("ZIG");
     if (args.gate_bundle) |directory| return machines.receive(io, a, environ, directory, args.package);
     if (cli.workspace) {
         if (cli.jobs != null) try say.fail(io, "a train releases one member at a time: --jobs is for other commands", .{});
@@ -333,7 +370,7 @@ const Env = struct {
     }
 
     fn input(env: Env) tidying.Input {
-        return .{ .io = env.io, .a = env.a, .zig = env.zig, .package = env.package };
+        return .{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig, .package = env.package };
     }
 
     fn readManifest(env: Env) ![:0]const u8 {
@@ -353,7 +390,11 @@ fn packageHere(io: Io, a: std.mem.Allocator) !?[]const u8 {
     var path: []const u8 = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
     while (true) {
         const candidate = try std.fs.path.join(a, &.{ path, "build.zig.zon" });
-        if (Io.Dir.cwd().access(io, candidate, .{})) |_| return path else |_| {}
+        // Absent or unreadable, the search goes on up; a cancel ends it.
+        if (Io.Dir.cwd().access(io, candidate, .{})) |_| return path else |err| switch (err) {
+            error.Canceled => return err,
+            else => {},
+        }
         path = std.fs.path.dirname(path) orelse return null;
     }
 }
@@ -380,6 +421,7 @@ fn buildable(env: Env, parsed: manifest.Manifest) !resolve.Resolution {
 
 /// Runs zig build over a resolved graph.
 fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where, before: []const []const u8, after: []const []const u8) !u8 {
+    try bringPrebuilts(env, parsed, resolution, where, before, after);
     const argv = try buildArgv(env, parsed, resolution, where, before, after);
     var child = std.process.spawn(env.io, .{ .argv = argv, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
@@ -387,6 +429,42 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
         .exited => |code| code,
         else => 1,
     };
+}
+
+/// What Zig logs, configuring a build, for each lazy package the configuration asks for,
+/// before it fetches any (Zig 0.17, `Maker.zig`). Zig's text, not an interface: should a
+/// Zig change it, the probe finds nothing and the build stops at the pin's own line,
+/// never running without it.
+const asks_lazy = "info: fetching lazy dependency ";
+
+/// The prebuilts a build of `where` takes, brought into Zig's cache, as Zig fetches none:
+/// every one that is not lazy, before the build; a lazy one only when the build, run with
+/// the same arguments to list its steps, asks for it as it configures. A lazy prebuilt
+/// nothing asks for is never fetched: another host's, or another option's.
+fn bringPrebuilts(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where, before: []const []const u8, after: []const []const u8) !void {
+    var lazy: std.array_hash_map.String(select.Place.Remote) = .empty;
+    for ([_][]const select.Revision{ resolution.graph.mains.values(), resolution.graph.selected.values() }) |revisions| for (revisions) |revision| for (revision.pins) |pin| {
+        const remote = switch (pin.place) {
+            .remote => |remote| remote,
+            .directory => continue,
+        };
+        // The package's build takes none of what only its development pins.
+        if (remote.prebuilt == null or (where == .package and pin.dev)) continue;
+        if (!pin.lazy) {
+            _ = try resolution.store.directoryOf(remote);
+        } else if (!try resolution.store.withZig(remote.hash)) try lazy.put(env.a, remote.hash, remote);
+    };
+    if (lazy.count() == 0) return;
+    // Zig names what the configuration asks for, then stops at a prebuilt's URL, which it cannot fetch.
+    const probe = try buildArgv(env, parsed, resolution, where, try std.mem.concat(env.a, []const u8, &.{ before, &.{"-l"} }), after);
+    const listed = std.process.run(env.a, env.io, .{ .argv = probe, .cwd = .{ .path = env.package }, .environ_map = env.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+        try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
+    var lines = std.mem.splitScalar(u8, listed.stderr, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.find(u8, line, asks_lazy) orelse continue;
+        const hash = std.mem.trim(u8, line[at + asks_lazy.len ..], " \r");
+        if (lazy.get(hash)) |remote| _ = try resolution.store.directoryOf(remote);
+    }
 }
 
 /// Zig's listing of the steps of the package's build (`.package`) or its development
@@ -497,20 +575,27 @@ fn vendorCommand(env: Env, all_hosts: bool) !u8 {
 
 /// Writes the package's manifest; `--locked` refuses, since it would change.
 fn writeManifest(env: Env, text: []const u8) !void {
-    if (env.locked) try say.fail(env.io, "--locked: build.zig.zon would change", .{});
+    try writeManifestAt(env, "build.zig.zon", text);
+}
+
+/// Writes the manifest at `path` under the package; `--locked` refuses, since it would change.
+fn writeManifestAt(env: Env, path: []const u8, text: []const u8) !void {
+    if (env.locked) try say.fail(env.io, "--locked: {f} would change", .{manifest.portable(path)});
     var dir = try env.dir();
     defer dir.deinit(env.io);
     const package = dir.lend().get();
     // Written beside and renamed over: a member resolving at the same moment reads
     // the old manifest or the new one, never half of one.
-    try package.writeFile(env.io, .{ .sub_path = "build.zig.zon.bay-partial", .data = text });
-    try package.rename("build.zig.zon.bay-partial", package, "build.zig.zon", env.io);
+    const partial = try env.a.print("{s}.bay-partial", .{path});
+    try package.writeFile(env.io, .{ .sub_path = partial, .data = text });
+    try package.rename(partial, package, path, env.io);
 }
 
 /// `bay tidy`: the package's manifest pins each workspace member at its release
-/// and each package at its one hash, as Go writes go.mod; what moves is named,
-/// and nothing to write says nothing. Only this manifest is written: every
-/// member's is its own (`bay --workspace tidy` tidies them all). What the build
+/// and each package at its one hash, as Go writes go.mod, and each other manifest
+/// under the package pins what the package pins as it does; what moves is named,
+/// and nothing to write says nothing. Only this package's manifests are written:
+/// every member's are its own (`bay --workspace tidy` tidies them all). What the build
 /// makes from the pins is made again even when nothing moves here: the pins may
 /// have been written by a command told not to tidy, or by hand.
 fn tidy(env: Env) !u8 {
@@ -526,8 +611,11 @@ fn writeTidied(env: Env, text: [:0]const u8, generate: enum { always, when_writt
         .released => "pinned at its release",
         .raised => "raised to",
     }, move.to });
+    for (tidied.nested) |file| for (file.moves) |move|
+        try say.note(env.io, "{f}: {s} {s}pinned as build.zig.zon pins it, {s}", .{ manifest.portable(file.path), move.name, if (env.locked) "would be " else "", move.to });
     const written = try writeChanged(env, tidied.text);
-    if (written or generate == .always) try regenerate(env);
+    for (tidied.nested) |file| try writeManifestAt(env, file.path, file.text);
+    if (written or tidied.nested.len != 0 or generate == .always) try regenerate(env);
     return 0;
 }
 
@@ -549,17 +637,49 @@ fn regenerate(env: Env) !void {
     if (env.locked) return;
     const parsed = try manifest.parse(env.a, try env.readManifest());
     const resolution = try buildable(env, parsed);
+    switch (try generator(env, parsed, resolution)) {
+        .none => {},
+        .unconfigured => |build| try say.note(env.io, "the {t} build does not configure with these pins, so what it makes from them (its `generate` step) is not made again: bay tidy makes it once it configures", .{build}),
+        .step => |where| if (try built(env, parsed, resolution, where, &.{"generate"}, &.{}) != 0)
+            try say.fail(env.io, "the pins are written, but `generate` failed: what the build makes from them is not", .{}),
+    }
+}
+
+/// The build whose `generate` step makes what follows from the pins: the package's own, else
+/// its development build's; none when neither has one, and the first that does not configure
+/// when one does not.
+const Generator = union(enum) { none, unconfigured: Where, step: Where };
+
+fn generator(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution) !Generator {
     const builds: []const Where = if (parsed.dev.len == 0) &.{.package} else &.{ .package, .development };
-    const where = for (builds) |build| {
+    for (builds) |build| {
         const listed = try stepsOf(env, parsed, resolution, build);
-        if (!listed.configured) {
-            try say.note(env.io, "the {s} build does not configure with these pins, so what it makes from them (its `generate` step) is not made again: bay tidy makes it once it configures", .{if (build == .development) "development" else "package"});
-            return;
-        }
-        if (steps.listed(listed.stdout, "generate")) break build;
-    } else return;
-    if (try built(env, parsed, resolution, where, &.{"generate"}, &.{}) != 0)
-        try say.fail(env.io, "the pins are written, but `generate` failed: what the build makes from them is not", .{});
+        if (!listed.configured) return .{ .unconfigured = build };
+        if (steps.listed(listed.stdout, "generate")) return .{ .step = build };
+    }
+    return .none;
+}
+
+/// `bay tidy --dry-run`: what tidy would pin, and the `generate` step it would then run, read
+/// from the builds with the pins it would write; nothing is written or run. A train's dry run
+/// runs it in each member, so what each car does shows before the first one moves.
+fn planTidy(env: Env) !u8 {
+    const tidied = try tidying.tidied(env.input(), try env.readManifest());
+    for (tidied.moves) |move| try say.note(env.io, "{s} would be {s} {s}", .{ move.name, switch (move.how) {
+        .released => "pinned at its release",
+        .raised => "raised to",
+    }, move.to });
+    for (tidied.nested) |file| for (file.moves) |move|
+        try say.note(env.io, "{f}: {s} would be pinned as build.zig.zon pins it, {s}", .{ manifest.portable(file.path), move.name, move.to });
+    if (tidied.moves.len == 0 and tidied.nested.len == 0) try say.note(env.io, "no pin would move", .{});
+    // The builds as they would configure with the pins tidy would write.
+    const parsed = try manifest.parse(env.a, tidied.text);
+    switch (try generator(env, parsed, try buildable(env, parsed))) {
+        .none => try say.note(env.io, "no build has a `generate` step: nothing would be made again", .{}),
+        .unconfigured => |build| try say.note(env.io, "the {t} build does not configure, so its `generate` step would not run", .{build}),
+        .step => |where| try say.note(env.io, "then the {t} build's `generate` step would run", .{where}),
+    }
+    return 0;
 }
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.
@@ -584,10 +704,19 @@ fn step(env: Env, name: []const u8, args: []const []const u8) !u8 {
     return built(env, parsed, resolution, .development, &.{name}, args);
 }
 
-/// `bay fetch`: both builds configured, so Zig fetches what each takes on this host.
+/// `bay fetch`: every prebuilt of the graph brought into Zig's cache, lazy or not, as
+/// Zig fetches none, then both builds configured, so Zig fetches what each takes on
+/// this host.
 fn fetchAll(env: Env) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
-    return configured(env, parsed, try buildable(env, parsed));
+    const resolution = try buildable(env, parsed);
+    for (resolution.graph.read.values()) |revision| switch (revision.place) {
+        .remote => |remote| if (remote.prebuilt != null) {
+            _ = try resolution.store.directoryOf(remote);
+        },
+        .directory => {},
+    };
+    return configured(env, parsed, resolution);
 }
 
 /// Configures the package's build and its development build, so Zig fetches into
@@ -617,39 +746,65 @@ fn add(env: Env, args: Add) !?[:0]const u8 {
     const pinned = try manifest.parse(env.a, try env.readManifest());
     var text = try env.readManifest();
     const kind: manifest.Kind = if (args.dev) .dev else .normal;
+    const publisher = try publisherOf(env, args);
     for (args.sources) |where| {
-        const dependency = if (isDirectory(env, where)) try local(env, where, args.name) else try fetched(env, try addable(env, where), args.name) orelse return null;
+        if (prebuilt.handles(where)) {
+            text = try pinInto(env, pinned, text, try prebuiltPin(env, where, args, publisher orelse
+                try say.fail(env.io, "{s} is a prebuilt: name its publisher, --minisign <key>, --openpgp <file>, --nuget, or --no-publisher", .{where})), kind, args.lazy);
+            continue;
+        }
+        if (publisher != null or args.license != null) try say.fail(env.io, "{s} is not a prebuilt (bay+https://): a publisher and --license are a prebuilt's", .{where});
+        const dependency = if (try isDirectory(env, where)) try local(env, where, args.name) else try fetched(env, try addable(env, where), args.name) orelse return null;
         text = try pinInto(env, pinned, text, dependency, kind, args.lazy);
     }
     return text;
 }
 
-/// What `bay add` fetches for `where`: a repository's page URL (`https://host/
-/// owner/repo`, as a browser shows it) is the git repository there, and a git
-/// URL that names no ref is pinned at its newest release, as `go get` takes
-/// `@latest`; with no release it is the default branch, as Zig fetches it.
-/// An archive URL, a URL with a ref or commit, and what git fetches stay as given.
-fn addable(env: Env, where: []const u8) ![]const u8 {
-    const url = try repositoryUrl(env.a, where);
-    if (!std.mem.startsWith(u8, url, "git+") or git.handles(url)) return url;
-    const p = git.parts(url);
-    if (p.ref != null or p.fragment != null) return url;
-    const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
-    const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
-    const latest = try published.newest(env.io, env.a, env.zig, packages, scratch, url) orelse return url;
-    return env.a.print("{s}#{s}", .{ url, latest.tag });
+/// The publisher `bay add` names: at most one of its four, or none.
+fn publisherOf(env: Env, args: Add) !?manifest.Publisher {
+    var named: ?manifest.Publisher = null;
+    var count: usize = 0;
+    if (args.minisign) |key| {
+        named = .{ .minisign = key };
+        count += 1;
+    }
+    if (args.openpgp) |file| {
+        named = .{ .openpgp = file };
+        count += 1;
+    }
+    if (args.nuget) {
+        named = .nuget;
+        count += 1;
+    }
+    if (args.no_publisher) {
+        named = .none;
+        count += 1;
+    }
+    if (count > 1) try say.fail(env.io, "a prebuilt has one publisher: name one of --minisign, --openpgp, --nuget and --no-publisher", .{});
+    return named;
 }
 
-/// `where` as a git URL when it is an http(s) URL of a repository rather than
-/// of an archive: Zig fetches a plain https URL as a file, and a repository's
-/// page is HTML, which it refuses by its Content-Type.
-fn repositoryUrl(a: std.mem.Allocator, where: []const u8) ![]const u8 {
-    if (!std.mem.startsWith(u8, where, "https://") and !std.mem.startsWith(u8, where, "http://")) return where;
-    const path = where[0 .. std.mem.findAny(u8, where, "?#") orelse where.len];
-    for ([_][]const u8{ ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar", ".zip" }) |suffix| {
-        if (std.mem.endsWith(u8, path, suffix)) return where;
-    }
-    return a.print("git+{s}", .{std.mem.trimEnd(u8, where, "/")});
+/// The pin of the prebuilt at `url`: downloaded, checked against `publisher`, unpacked and
+/// hashed by Zig; written only once every check holds. Its name is given, as it has no manifest.
+fn prebuiltPin(env: Env, url: []const u8, args: Add, publisher: manifest.Publisher) !manifest.Dependency {
+    const name = args.name orelse try say.fail(env.io, "{s} is a prebuilt, with no manifest to name it: give --name", .{url});
+    if (args.sources.len > 1) try say.fail(env.io, "a prebuilt is added alone, with its --name and publisher", .{});
+    // An OpenPGP key file is the package's, by its path from the package's directory.
+    const key_publisher: manifest.Publisher = switch (publisher) {
+        .openpgp => |file| .{ .openpgp = blk: {
+            const here = try Io.Dir.cwd().realPathFileAlloc(env.io, ".", env.a);
+            break :blk try std.fs.path.relativeAlloc(env.a, here, env.environ, env.package, try std.fs.path.resolveAlloc(env.a, &.{ here, file }));
+        } },
+        .minisign, .nuget, .none => publisher,
+    };
+    const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig }, url, key_publisher, env.package, if (args.license) |path| .{ .given = path } else .found);
+    return .{ .name = name, .source = .{ .remote = .{ .url = url, .hash = pinned.hash } }, .prebuilt = pinned.prebuilt };
+}
+
+/// What `bay add` fetches for `where` (`published.fetchable`), its scratch beside the package.
+fn addable(env: Env, where: []const u8) ![]const u8 {
+    const packages = try store.Store.init(env.io, env.a, env.environ, env.zig, env.package);
+    return published.fetchable(env.io, env.a, env.zig, packages, try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" }), where);
 }
 
 /// `dependency` put into each list that pins its name already, keeping whether it
@@ -678,9 +833,13 @@ fn putNoted(env: Env, text: [:0]const u8, kind: manifest.Kind, entry: manifest.D
     return manifest.put(env.a, text, kind, entry);
 }
 
-fn isDirectory(env: Env, path: []const u8) bool {
+fn isDirectory(env: Env, path: []const u8) !bool {
     if (std.mem.find(u8, path, "://") != null) return false;
-    var dir = Io.Dir.cwd().openDir(env.io, path, .{}) catch return false;
+    var dir = Io.Dir.cwd().openDir(env.io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return err,
+        // Not a directory here: a URL or a name to fetch.
+        else => return false,
+    };
     dir.close(env.io);
     return true;
 }
@@ -731,10 +890,16 @@ fn removedFrom(parsed: manifest.Manifest, name: []const u8, dev: bool) ?manifest
 /// at its head, a release tag at the newest release on its line, as `cargo update`
 /// and `go get -u` move within what is compatible. A pin to an exact commit, or a
 /// directory, has nothing to follow and stays; a new line is `bay add` at its tag.
+/// A prebuilt follows no ref either: its name followed by a `bay+` URL moves it there,
+/// downloaded and checked as `bay add` checks it, by the publisher its pin names.
 fn update(env: Env, names: []const []const u8) !?[:0]const u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
-    // Each name given must be a dependency, in either list.
-    for (names) |name| {
+    // Each name given must be a dependency, in either list; a URL, the prebuilt named before it.
+    for (names, 0..) |name, i| {
+        if (prebuilt.handles(name)) {
+            if (i == 0 or prebuilt.handles(names[i - 1])) try say.fail(env.io, "{s}: a URL follows the name of the prebuilt it moves", .{name});
+            continue;
+        }
         if (!among(parsed.normal, name) and !among(parsed.dev, name)) try say.fail(env.io, "{s} is not a dependency", .{name});
     }
     var text = try env.readManifest();
@@ -746,18 +911,39 @@ fn update(env: Env, names: []const []const u8) !?[:0]const u8 {
                 .remote => |remote| remote,
                 .path => continue,
             };
-            const url = manifest.following(env.a, remote.url) orelse {
-                try say.note(env.io, "{s} is pinned to an exact commit; bay add it with a branch or tag to follow one", .{dependency.name});
+            const to = movedTo(names, dependency.name);
+            const fields = dependency.prebuilt orelse {
+                if (to) |url| try say.fail(env.io, "{s} is not a prebuilt, so it moves by its ref, not to {s}: bay add a source to pin another", .{ dependency.name, url });
+                const url = try manifest.following(env.a, remote.url) orelse {
+                    try say.note(env.io, "{s} is pinned to an exact commit; bay add it with a branch or tag to follow one", .{dependency.name});
+                    continue;
+                };
+                var next = try fetched(env, try releaseOnLine(env, url), dependency.name) orelse return null;
+                next.lazy = dependency.lazy;
+                if (std.mem.eql(u8, next.source.remote.hash, remote.hash)) continue;
+                text = try manifest.put(env.a, text, kind, next);
+                try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
                 continue;
             };
-            var next = try fetched(env, try releaseOnLine(env, url), dependency.name) orelse return null;
-            next.lazy = dependency.lazy;
-            if (std.mem.eql(u8, next.source.remote.hash, remote.hash)) continue;
-            text = try manifest.put(env.a, text, kind, next);
-            try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, next.source.remote.hash });
+            const url = to orelse {
+                try say.note(env.io, "{s} is a prebuilt, which follows no ref; bay update {s} <bay+https://…> moves it", .{ dependency.name, dependency.name });
+                continue;
+            };
+            const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig }, url, fields.publisher, env.package, .{ .before = fields.license });
+            if (std.mem.eql(u8, pinned.hash, remote.hash) and std.mem.eql(u8, url, remote.url)) continue;
+            text = try manifest.put(env.a, text, kind, .{ .name = dependency.name, .source = .{ .remote = .{ .url = url, .hash = pinned.hash } }, .lazy = dependency.lazy, .prebuilt = pinned.prebuilt });
+            try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, pinned.hash });
         }
     }
     return text;
+}
+
+/// The URL `names` moves the prebuilt `name` to: the `bay+` URL right after it.
+fn movedTo(names: []const []const u8, name: []const u8) ?[]const u8 {
+    for (names, 1..) |given, next| {
+        if (next < names.len and std.mem.eql(u8, given, name) and prebuilt.handles(names[next])) return names[next];
+    }
+    return null;
 }
 
 /// `bay upgrade`: each dependency named, or every one with a git URL when none
@@ -772,7 +958,7 @@ fn upgrade(env: Env, names: []const []const u8) !?[:0]const u8 {
         if (!among(parsed.normal, name) and !among(parsed.dev, name)) try say.fail(env.io, "{s} is not a dependency", .{name});
     }
     var text = try env.readManifest();
-    const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
+    const packages = try store.Store.init(env.io, env.a, env.environ, env.zig, env.package);
     const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
     for ([_]manifest.Kind{ .normal, .dev }) |kind| {
         for (if (kind == .normal) parsed.normal else parsed.dev) |dependency| {
@@ -813,7 +999,7 @@ fn releaseOnLine(env: Env, url: []const u8) ![]const u8 {
     const hash = std.mem.findScalarLast(u8, url, '#') orelse return url;
     const pinned = remotes.versionOf(.{ .name = url[hash + 1 ..], .commit = "" }) orelse return url;
     const repository = remotes.repository(url) orelse return url;
-    const packages = try store.Store.init(env.io, env.a, env.zig, env.package);
+    const packages = try store.Store.init(env.io, env.a, env.environ, env.zig, env.package);
     const scratch = try std.fs.path.join(env.a, &.{ env.package, root.directory, "add" });
     const latest = try published.newest(env.io, env.a, env.zig, packages, scratch, url) orelse return url;
     const newest = remotes.newestOnLine(try remotes.tags(env.io, env.a, url), pinned, latest.retracted) orelse return url;
@@ -856,8 +1042,9 @@ const dev_function =
 /// each only when it is missing. Inside a package but not at its root, nothing.
 fn initCommand(io: Io, a: std.mem.Allocator, zig: []const u8) !u8 {
     const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
-    if (Io.Dir.cwd().access(io, "build.zig.zon", .{})) |_| {} else |_| {
-        if (enclosing(io, a, here)) |package| try say.fail(io, "this is inside the package at {s}: run bay init there, or bay new <name> for a package of its own", .{package});
+    if (Io.Dir.cwd().access(io, "build.zig.zon", .{})) |_| {} else |err| switch (err) {
+        error.FileNotFound => if (try enclosing(io, a, here)) |package| try say.fail(io, "this is inside the package at {s}: run bay init there, or bay new <name> for a package of its own", .{package}),
+        else => return err,
     }
     return prepare(io, a, zig, here);
 }
@@ -872,11 +1059,15 @@ fn newCommand(io: Io, a: std.mem.Allocator, zig: []const u8, name: []const u8) !
 }
 
 /// The nearest directory above `path` with a build.zig.zon.
-fn enclosing(io: Io, a: std.mem.Allocator, path: []const u8) ?[]const u8 {
+fn enclosing(io: Io, a: std.mem.Allocator, path: []const u8) !?[]const u8 {
     var dir = std.fs.path.dirname(path);
     while (dir) |candidate| : (dir = std.fs.path.dirname(candidate)) {
-        const zon = std.fs.path.join(a, &.{ candidate, "build.zig.zon" }) catch return null;
-        if (Io.Dir.cwd().access(io, zon, .{})) |_| return candidate else |_| {}
+        const zon = try std.fs.path.join(a, &.{ candidate, "build.zig.zon" });
+        // Absent or unreadable, the search goes on up; a cancel ends it.
+        if (Io.Dir.cwd().access(io, zon, .{})) |_| return candidate else |err| switch (err) {
+            error.Canceled => return err,
+            else => {},
+        }
     }
     return null;
 }
@@ -884,7 +1075,8 @@ fn enclosing(io: Io, a: std.mem.Allocator, path: []const u8) ?[]const u8 {
 fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 {
     var dir = try Io.Dir.cwd().openDir(io, path, .{});
     defer dir.close(io);
-    if (dir.access(io, "build.zig.zon", .{})) |_| {} else |_| {
+    if (dir.access(io, "build.zig.zon", .{})) |_| {} else |missing| {
+        if (missing != error.FileNotFound) return missing;
         var child = std.process.spawn(io, .{ .argv = &.{ zig, "init" }, .cwd = .{ .path = path } }) catch |err| try say.fail(io, "could not run {s}: {t}", .{ zig, err });
         switch (try child.wait(io)) {
             .exited => |code| if (code != 0) return code,
@@ -904,13 +1096,22 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
     return 0;
 }
 
+test "a cancel ends the search for the package, never taken for a directory without one" {
+    const shakedown = @import("shakedown");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const fault = try shakedown.FaultIo.init(std.testing.allocator, std.testing.io, .{ .plan = &.{.{ .at = .{ .nth = .{ .call = .dirAccess, .n = 1 } }, .fault = .{ .fail = error.Canceled } }} });
+    defer fault.deinit();
+    try std.testing.expectError(error.Canceled, packageHere(fault.io(), arena.allocator()));
+}
+
 test "update follows a recorded ref and leaves a commit pin" {
     const a = std.testing.allocator;
-    const branch = manifest.following(a, "git+https://example.org/x?ref=main#5d2a92141f0298d76dc5fd602526d55a62b4e11a").?;
+    const branch = (try manifest.following(a, "git+https://example.org/x?ref=main#5d2a92141f0298d76dc5fd602526d55a62b4e11a")).?;
     defer a.free(branch);
     try std.testing.expectEqualStrings("git+https://example.org/x#main", branch);
-    try std.testing.expectEqual(null, manifest.following(a, "git+https://example.org/x#5d2a92141f0298d76dc5fd602526d55a62b4e11a"));
-    try std.testing.expectEqualStrings("https://example.org/x.tar.gz", manifest.following(a, "https://example.org/x.tar.gz").?);
+    try std.testing.expectEqual(null, try manifest.following(a, "git+https://example.org/x#5d2a92141f0298d76dc5fd602526d55a62b4e11a"));
+    try std.testing.expectEqualStrings("https://example.org/x.tar.gz", (try manifest.following(a, "https://example.org/x.tar.gz")).?);
 }
 
 test "bay's command lines read as they did by hand, and --workspace hands each member the same command" {
@@ -974,23 +1175,13 @@ test "remove finds a name in the list that holds it" {
     try std.testing.expectEqual(null, removedFrom(parsed, "absent", false));
 }
 
-test "a repository's page URL is added as its git repository, an archive as a file" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    try std.testing.expectEqualStrings("git+https://github.com/o/r", try repositoryUrl(a, "https://github.com/o/r"));
-    try std.testing.expectEqualStrings("git+https://github.com/o/r", try repositoryUrl(a, "https://github.com/o/r/"));
-    try std.testing.expectEqualStrings("git+https://codeberg.org/o/r.git", try repositoryUrl(a, "https://codeberg.org/o/r.git"));
-    try std.testing.expectEqualStrings("https://example.org/r-1.0.tar.gz", try repositoryUrl(a, "https://example.org/r-1.0.tar.gz"));
-    try std.testing.expectEqualStrings("https://example.org/r.zip?x=1", try repositoryUrl(a, "https://example.org/r.zip?x=1"));
-    try std.testing.expectEqualStrings("git+https://github.com/o/r#v1.0.0", try repositoryUrl(a, "git+https://github.com/o/r#v1.0.0"));
-}
-
 // Every file's tests, each named: one left out would never run.
 test {
+    _ = @import("archive.zig");
     _ = @import("changelog.zig");
     _ = @import("dirs.zig");
     _ = @import("download.zig");
+    _ = @import("lock.zig");
     _ = each;
     _ = fetch;
     _ = git;
@@ -1001,6 +1192,8 @@ test {
     _ = machines;
     _ = manifest;
     _ = @import("minisign.zig");
+    _ = @import("openpgp.zig");
+    _ = @import("prebuilt.zig");
     _ = published;
     _ = release;
     _ = remotes;
@@ -1011,5 +1204,7 @@ test {
     _ = @import("steps.zig");
     _ = store;
     _ = toolchain;
+    _ = @import("tree.zig");
+    _ = @import("upstream.zig");
     _ = workspace;
 }

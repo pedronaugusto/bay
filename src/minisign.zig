@@ -117,6 +117,15 @@ pub const Verifier = struct {
     }
 };
 
+/// Whether a trusted comment, tab-separated `key:value` fields as minisign writes it
+/// (`timestamp:…\tfile:…\thashed`), names `file` as the file signed: a signature over
+/// another of a publisher's files is still the publisher's.
+pub fn signs(comment: []const u8, file: []const u8) bool {
+    var fields = std.mem.splitScalar(u8, comment, '\t');
+    while (fields.next()) |field| if (std.mem.startsWith(u8, field, "file:")) return std.mem.eql(u8, field["file:".len..], file);
+    return false;
+}
+
 /// Verifies `file`, whole in memory, against `signature` by `key`.
 pub fn verify(file: []const u8, signature: Signature, key: PublicKey) Error!void {
     var verifier: Verifier = try .init(signature, key);
@@ -138,24 +147,25 @@ fn decode(out: []u8, text: []const u8) !void {
 const testing = std.testing;
 const encoder = std.base64.standard.Encoder;
 
-/// A minisign key and the text of a signature it makes, as minisign writes them.
-const Signer = struct {
+/// A minisign key and the text of a signature it makes, as minisign writes them: for the
+/// tests of what verifies through this file.
+pub const Signer = struct {
     pair: aegis.Secret(Ed25519.KeyPair),
     id: [8]u8,
 
-    fn init(seed: u8, id: [8]u8) !Signer {
+    pub fn init(seed: u8, id: [8]u8) !Signer {
         return .{ .pair = .init(try .generateDeterministic(@splat(seed))), .id = id };
     }
 
-    fn deinit(signer: *Signer) void {
+    pub fn deinit(signer: *Signer) void {
         signer.pair.deinit();
     }
 
-    fn publicKey(signer: *const Signer, buffer: []u8) []const u8 {
+    pub fn publicKey(signer: *const Signer, buffer: []u8) []const u8 {
         return encoder.encode(buffer, &("Ed".* ++ signer.id ++ signer.pair.expose().public_key.toBytes()));
     }
 
-    fn sign(signer: *const Signer, a: std.mem.Allocator, file: []const u8, algorithm: Algorithm, comment: []const u8) ![]u8 {
+    pub fn sign(signer: *const Signer, a: std.mem.Allocator, file: []const u8, algorithm: Algorithm, comment: []const u8) ![]u8 {
         var digest: [Blake2b512.digest_length]u8 = undefined;
         Blake2b512.hash(file, &digest, .{});
         const signed = switch (algorithm) {
@@ -246,4 +256,10 @@ test "Zig's published signature of its 0.17.0 aarch64-macos build carries a trus
     const forged = try std.mem.replaceOwned(u8, testing.allocator, text, "0.17.0.tar.xz", "0.16.0.tar.xz");
     defer testing.allocator.free(forged);
     try testing.expectError(error.TrustedCommentMismatch, Verifier.init(try Signature.parse(forged), key));
+}
+
+test "a trusted comment names the file signed, or none" {
+    try testing.expect(signs("timestamp:1790965659\tfile:zig-aarch64-macos-0.17.0.tar.xz\thashed", "zig-aarch64-macos-0.17.0.tar.xz"));
+    try testing.expect(!signs("timestamp:1790965659\tfile:zig-aarch64-macos-0.16.0.tar.xz\thashed", "zig-aarch64-macos-0.17.0.tar.xz"));
+    try testing.expect(!signs("timestamp:1790965659", "zig-aarch64-macos-0.17.0.tar.xz"));
 }

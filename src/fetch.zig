@@ -45,7 +45,7 @@ fn asZigReads(a: std.mem.Allocator, url: []const u8) ![]const u8 {
     if (!std.mem.startsWith(u8, url, "git+")) return url;
     const p = git.parts(url);
     if (p.fragment) |fragment| if (git.isCommit(fragment) or p.ref == null) return url;
-    return manifest.following(a, url) orelse url;
+    return try manifest.following(a, url) orelse url;
 }
 
 test "a ref given as ?ref= is fetched as the fragment Zig reads, and a commit as it is" {

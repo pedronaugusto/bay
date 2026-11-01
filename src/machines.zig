@@ -14,6 +14,7 @@ const Io = std.Io;
 const aegis = @import("aegis");
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
+const lock = @import("lock.zig");
 
 pub const Machine = struct {
     name: []const u8,
@@ -95,9 +96,16 @@ pub const Request = struct {
 
 /// Gates the commit at HEAD of the package at `package` on this machine, with its
 /// `gate` step; whether it is green. Its lines go to `output`.
-pub fn local(io: Io, environ: *const std.process.Environ.Map, package: []const u8, output: *Output) !bool {
+pub fn local(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8, output: *Output) !bool {
+    // One gate in a directory at a time: a second would build over the first's files.
+    var held = try lock.hold(io, a, environ, .gate, package);
+    defer held.release(io);
     const bay = environ.get("BAY").?; // safe: main sets BAY before any command
-    var child = try std.process.spawn(io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = package }, .environ_map = environ, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe });
+    // This machine releases, so it runs the jobs that say the same on any machine; a
+    // `PREFLIGHT_PORTABLE=elsewhere` it inherited would leave them to no one.
+    var gate_environ = try environ.clone(a);
+    _ = gate_environ.swapRemove("PREFLIGHT_PORTABLE");
+    var child = try std.process.spawn(io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = package }, .environ_map = &gate_environ, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe });
     const streams = [_]Io.File{ child.stdout.?, child.stderr.? }; // safe: spawned with pipes
     child.stdout = null;
     child.stderr = null;
@@ -179,7 +187,7 @@ fn relay(io: Io, file: Io.File, output: *Output) void {
     var buffer: [16 << 10]u8 = undefined;
     var reader = file.readerStreaming(io, &buffer);
     while (true) {
-        const text = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+        const text = (reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             // A line longer than the buffer goes in parts.
             error.StreamTooLong => {
                 const part = reader.interface.buffered();
@@ -188,7 +196,7 @@ fn relay(io: Io, file: Io.File, output: *Output) void {
                 continue;
             },
             error.ReadFailed => return,
-        } orelse return;
+        }) orelse return;
         line(io, output, std.mem.trimEnd(u8, text, "\r")) catch return;
     }
 }
@@ -225,12 +233,19 @@ pub fn receive(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ
         error.OutOfMemory => return error.OutOfMemory,
         else => try say.fail(io, "no release commit came on stdin: {t}", .{err}),
     };
+    // One gate in this copy at a time: a second release's checkout would change the files the
+    // first's build reads (two trains once gated one copy at once).
+    var held = try lock.hold(io, a, environ, .gate, directory);
+    defer held.release(io);
     // Beside the copy, and replaced by the next release's.
     const bundle = try a.print("{s}.bundle", .{std.mem.trimEnd(u8, directory, "/\\")});
     if (std.fs.path.dirname(bundle)) |parent| try Io.Dir.cwd().createDirPath(io, parent);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = bundle, .data = bytes });
     const git_dir = try std.fs.path.join(a, &.{ directory, ".git" });
-    if (Io.Dir.cwd().access(io, git_dir, .{})) |_| {} else |_| try git(io, a, environ, null, &.{ "init", "--quiet", directory });
+    if (Io.Dir.cwd().access(io, git_dir, .{})) |_| {} else |err| switch (err) {
+        error.FileNotFound => try git(io, a, environ, null, &.{ "init", "--quiet", directory }),
+        else => return err,
+    }
     try git(io, a, environ, directory, &.{ "fetch", "--quiet", "--force", "--tags", bundle, "+HEAD:refs/bay/gate" });
     try git(io, a, environ, directory, &.{ "checkout", "--quiet", "--force", "--detach", "refs/bay/gate" });
     // What an earlier gate left that git tracks not, but ignored files: its caches.

@@ -79,6 +79,17 @@ pub const Fixture = struct {
 
     /// A link at `link`, under the fixture, to the folder `target`, absolute, which any
     /// account makes (`link.folder`).
+    /// The tests' Zig installed where bay keeps toolchains, as the version bay was built with,
+    /// so that what builds with the Zig a manifest names downloads nothing: its folder linked
+    /// there whole, Zig's lib beside it.
+    pub fn installZig(f: *Fixture) !void {
+        const data: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ "local", "bay", "data" } else &.{ "data", "bay" };
+        const toolchains = try std.fs.path.join(f.a, try std.mem.concat(f.a, []const u8, &.{ data, &.{"zig"} }));
+        try f.tmp.dir.createDirPath(f.io, toolchains);
+        const installed = std.fs.path.dirname(try Io.Dir.cwd().realPathFileAlloc(f.io, options.zig, f.a)).?; // safe: a file's real path has a folder
+        try f.folderLink(installed, try std.fs.path.join(f.a, &.{ toolchains, @import("builtin").zig_version_string }));
+    }
+
     pub fn folderLink(f: *Fixture, target: []const u8, link: []const u8) !void {
         try @import("link").folder(f.io, target, try std.fs.path.join(f.a, &.{ f.root, link }));
     }
@@ -117,7 +128,7 @@ pub const Fixture = struct {
 pub fn fingerprint(name: []const u8) u64 {
     var id = std.hash.XxHash32.hash(0, name);
     if (id == 0 or id == std.math.maxInt(u32)) id = 1;
-    return @as(u64, std.hash.Crc32.hash(name)) << 32 | id;
+    return (@as(u64, std.hash.Crc32.hash(name)) << 32) | id;
 }
 
 /// A command expected to fail: its output is the point, not a finding.

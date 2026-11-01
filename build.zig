@@ -87,7 +87,7 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
     check.dependOn(&ssh.step);
     options.addOptionPath("ssh", ssh.getEmittedBin());
     const host = b.graph.host.result;
-    for ([_][]const u8{ "test/resolution.zig", "test/release.zig" }) |root| {
+    for ([_][]const u8{ "test/resolution.zig", "test/release.zig", "test/prebuilt.zig" }) |root| {
         const end_to_end = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = package.path(root),
             .target = target,

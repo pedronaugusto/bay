@@ -1,9 +1,9 @@
 //! bay end to end over real packages: the diamond Zig alone cannot build, a
-//! tie the root decides, tidy, the package under development linked by its own
-//! tools, a vendored project built with no cache and no network, overrides, and
-//! a command run across a workspace in order. Each test works in a directory of
-//! its own, with a Zig cache, HOME and data directory of its own, and the Zig
-//! that builds bay, so nothing is downloaded.
+//! tie the root decides, tidy (a nested sample's pins too), the package under
+//! development linked by its own tools, a vendored project built with no cache
+//! and no network, overrides, and a command run across a workspace in order.
+//! Each test works in a directory of its own, with a Zig cache, HOME and data
+//! directory of its own, and the Zig that builds bay, so nothing is downloaded.
 const std = @import("std");
 const Io = std.Io;
 const options = @import("options");
@@ -76,12 +76,61 @@ test "a root pinned below the selection is refused until tidy raises it, and --l
     try std.testing.expect(std.mem.find(u8, below.stderr, "bay tidy writes it") != null);
     const locked = try f.bay("app", &.{ "--locked", "tidy" });
     try std.testing.expect(refused(locked));
+    // A dry run says the move and the generate step, and writes nothing.
+    const planned = try f.bay("app", &.{ "tidy", "--dry-run" });
+    try std.testing.expect(succeeded(planned));
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "c would be raised to") != null);
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "no build has a `generate` step") != null);
+    try std.testing.expect(std.mem.find(u8, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20)), "c-0.1.1-") == null);
     const tidied = try f.bay("app", &.{"tidy"});
     try std.testing.expect(succeeded(tidied));
     const text = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
     try std.testing.expect(std.mem.find(u8, text, "c-0.1.1-") != null);
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{ "tidy", "--dry-run" })).stderr, "no pin would move") != null);
     try std.testing.expect(succeeded(try f.bay("app", &.{ "build", "run" })));
     try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
+}
+
+test "a tidy gives a nested manifest the package's pins of what both pin, and leaves the rest as it is" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    const c1 = try f.pin("c", "c1");
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b"), c1 }), &.{ "a", "b", "c" }, main_ab);
+    // A sample built on app: c, which app pins (below the selection, as app does); a package
+    // app does not pin, under a name of the sample's own; and app by its directory.
+    const other = try f.pin("other", "c1");
+    const sample = try f.a.print(".{{ .name = .sample, .version = \"0.0.0\", .fingerprint = 0x{x}, .paths = .{{\"\"}}, .dependencies = .{{ .app = .{{ .path = \"..\" }}, {s} {s} }} }}\n", .{ fingerprint("sample"), c1, other });
+    try f.tmp.dir.createDirPath(f.io, "app/sample");
+    try f.write("app", "sample/build.zig.zon", sample);
+    // A build's output is no source of the package.
+    try f.tmp.dir.createDirPath(f.io, "app/zig-out/old");
+    try f.write("app", "zig-out/old/build.zig.zon", sample);
+    const tidied = try f.bay("app", &.{"tidy"});
+    try std.testing.expect(succeeded(tidied));
+    try std.testing.expect(std.mem.find(u8, tidied.stderr, "sample/build.zig.zon: c pinned as build.zig.zon pins it, c-0.1.1-") != null);
+    const own = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const moved = try f.tmp.dir.readFileAlloc(f.io, "app/sample/build.zig.zon", f.a, .limited(1 << 20));
+    const c2 = try f.pin("c", "c2");
+    const at = std.mem.find(u8, c2, ".hash = \"").? + ".hash = \"".len;
+    const hash = c2[at..][0..std.mem.findScalar(u8, c2[at..], '"').?];
+    try std.testing.expect(std.mem.find(u8, own, hash) != null);
+    try std.testing.expect(std.mem.find(u8, moved, hash) != null);
+    try std.testing.expect(std.mem.find(u8, moved, other) != null);
+    try std.testing.expect(std.mem.find(u8, moved, ".app = .{ .path = \"..\" }") != null);
+    try std.testing.expectEqualStrings(sample, try f.tmp.dir.readFileAlloc(f.io, "app/zig-out/old/build.zig.zon", f.a, .limited(1 << 20)));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
+    // A sample behind on its own is moved on its own, and --locked refuses to.
+    try f.write("app", "sample/build.zig.zon", sample);
+    const locked = try f.bay("app", &.{ "--locked", "tidy" });
+    try std.testing.expect(refused(locked));
+    try std.testing.expect(std.mem.find(u8, locked.stderr, "--locked: sample/build.zig.zon would change") != null);
+    try std.testing.expectEqualStrings(sample, try f.tmp.dir.readFileAlloc(f.io, "app/sample/build.zig.zon", f.a, .limited(1 << 20)));
+    try std.testing.expect(succeeded(try f.bay("app", &.{"tidy"})));
+    try std.testing.expectEqualStrings(moved, try f.tmp.dir.readFileAlloc(f.io, "app/sample/build.zig.zon", f.a, .limited(1 << 20)));
+    try std.testing.expectEqualStrings(own, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20)));
 }
 
 test "a dev tool built on the package links the package under development" {
@@ -285,6 +334,55 @@ fn developedWithImage(f: *Fixture, image_hash: []const u8) ![]const u8 {
     const build = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig", f.a, .limited(1 << 20));
     try f.write("app", "build.zig", try f.a.print("{s}pub fn dev(b: *std.Build, tools: type) void {{\n    _ = tools;\n    _ = b.dependency(\"t\", .{{}});\n    _ = b.step(\"tool\", \"\");\n}}\n", .{build}));
     return t_hash;
+}
+
+test "an upstream with no manifest is known by its key and tag: outdated compares its tags, licenses and tree name it, audit says what it cannot read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // Headers in a repository with no build.zig.zon, released by tag, as a C library is.
+    // Before, Zig's hash alone named it (`N-V-…`), and outdated said every package was at
+    // its newest release.
+    try f.tmp.dir.createDirPath(f.io, "headers/include");
+    try f.write("headers", "include/h.h", "#define H 1\n");
+    try f.write("headers", "LICENSE", "MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software\n");
+    for ([_][]const []const u8{ &.{ "git", "init", "--quiet", "--initial-branch=main" }, &.{ "git", "add", "." }, &.{ "git", "commit", "--quiet", "-m", "1.0.0" }, &.{ "git", "tag", "v1.0.0" } }) |argv|
+        try std.testing.expect(succeeded(try f.run("headers", argv)));
+    // Files whose URL names no tag: what bay cannot compare it names.
+    try f.tmp.dir.createDirPath(f.io, "blob");
+    try f.write("blob", "data.txt", "blob\n");
+    try f.application("app", try f.pin("blob", "blob"), &.{}, "pub fn main() void {}");
+    const url = try f.a.print("git+file://{s}{s}", .{ if (f.root[0] == '/') "" else "/", try std.mem.replaceOwned(u8, f.a, try std.fs.path.join(f.a, &.{ f.root, "headers" }), "\\", "/") });
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "add", "--name", "headers", try f.a.print("{s}#v1.0.0", .{url}) })));
+    // A release after it, and a pre-release, which is none.
+    for ([_][]const u8{ "v1.1.0", "v1.2.0-rc1" }) |tag| {
+        try f.write("headers", "include/h.h", try f.a.print("#define H \"{s}\"\n", .{tag}));
+        for ([_][]const []const u8{ &.{ "git", "commit", "--quiet", "-am", tag }, &.{ "git", "tag", tag } }) |argv|
+            try std.testing.expect(succeeded(try f.run("headers", argv)));
+    }
+    const outdated = try f.bay("app", &.{"outdated"});
+    try std.testing.expect(succeeded(outdated));
+    try std.testing.expect(std.mem.find(u8, outdated.stdout, "headers v1.0.0 -> v1.1.0 (an upstream with no manifest)") != null);
+    // A series retrofit applies over it, kept in patches/<key>: outdated counts it.
+    try f.tmp.dir.createDirPath(f.io, "app/patches/headers");
+    for ([_][]const u8{ "0001-a.patch", "0002-b.patch" }) |name| try f.write("app/patches/headers", name, "--- a/include/h.h\n+++ b/include/h.h\n");
+    try std.testing.expect(std.mem.find(u8, (try f.bay("app", &.{"outdated"})).stdout, "headers v1.0.0 + 2 patches -> v1.1.0 (an upstream with no manifest; retrofit applies its patches to the new tag only if each still applies exactly)") != null);
+    try std.testing.expect(std.mem.find(u8, outdated.stderr, "not checked: blob (its URL names no tag)") != null);
+    try std.testing.expect(std.mem.find(u8, outdated.stderr, "every package is at its newest release") == null);
+    const licenses = try f.bay("app", &.{"licenses"});
+    try std.testing.expect(succeeded(licenses));
+    try std.testing.expect(std.mem.find(u8, licenses.stdout, "headers v1.0.0  MIT\n") != null);
+    try std.testing.expect(std.mem.find(u8, licenses.stdout, "blob  no license found\n") != null);
+    try std.testing.expect(std.mem.find(u8, licenses.stdout, "N-V-") == null);
+    const tree = try f.bay("app", &.{"tree"});
+    try std.testing.expect(succeeded(tree));
+    try std.testing.expect(std.mem.find(u8, tree.stdout, "  headers v1.0.0 N-V-") != null);
+    // Neither is on GitHub, whose advisories bay reads, and one has no version to match.
+    const audit = try f.bay("app", &.{"audit"});
+    try std.testing.expect(succeeded(audit));
+    try std.testing.expect(std.mem.find(u8, audit.stderr, "not read for headers") != null);
+    try std.testing.expect(std.mem.find(u8, audit.stderr, "no version to match advisories against: blob (its URL names no tag)") != null);
 }
 
 test "a dependency's lazy pin with no manifest is never fetched: the development build configures, fetches and vendors without it" {
@@ -660,13 +758,7 @@ test "with no Zig named and none on the PATH, a new package is made by the Zig b
     defer arena.deinit();
     var f: Fixture = try .init(arena.allocator());
     defer f.deinit();
-    // That Zig installed where bay keeps toolchains, so nothing is downloaded: its
-    // folder linked there whole, Zig's lib beside it.
-    const data: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ "local", "bay", "data" } else &.{ "data", "bay" };
-    const toolchains = try std.fs.path.join(f.a, try std.mem.concat(f.a, []const u8, &.{ data, &.{"zig"} }));
-    try f.tmp.dir.createDirPath(f.io, toolchains);
-    const installed = std.fs.path.dirname(try Io.Dir.cwd().realPathFileAlloc(f.io, options.zig, f.a)).?; // safe: a file's real path has a folder
-    try f.folderLink(installed, try std.fs.path.join(f.a, &.{ toolchains, @import("builtin").zig_version_string }));
+    try f.installZig();
     _ = f.env.swapRemove("ZIG");
     try f.env.put("PATH", "");
     try std.testing.expect(succeeded(try f.bay(".", &.{ "new", "fresh" })));
@@ -965,6 +1057,28 @@ test "an install builds what the package ships, whatever its development pins" {
     const installed = try f.bay("app", &.{ "install", "--prefix", try std.fs.path.join(f.a, &.{ f.root, "prefix" }) });
     try std.testing.expect(succeeded(installed));
     try f.tmp.dir.access(f.io, if (@import("builtin").os.tag == .windows) "prefix/bin/app.exe" else "prefix/bin/app", .{});
+}
+
+test "an install from a repository's URL builds its newest release, as add pins it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    // app released as v0.1.0, and a commit after it on main that no release holds.
+    try f.application("app", "", &.{}, "pub fn main() void {}");
+    for ([_][]const []const u8{ &.{ "git", "init", "--quiet", "--initial-branch=main" }, &.{ "git", "add", "." }, &.{ "git", "commit", "--quiet", "-m", "0.1.0" }, &.{ "git", "tag", "v0.1.0" } }) |argv|
+        try std.testing.expect(succeeded(try f.run("app", argv)));
+    try f.write("app", "src/main.zig", "pub fn main() void {} // unreleased");
+    try std.testing.expect(succeeded(try f.run("app", &.{ "git", "commit", "--quiet", "-am", "After the release" })));
+    const installed = try f.bay(".", &.{ "install", "--prefix", try std.fs.path.join(f.a, &.{ f.root, "prefix" }), try gitUrl(&f, "app") });
+    try std.testing.expect(succeeded(installed));
+    const listed = try f.bay(".", &.{ "install", "--list" });
+    try std.testing.expect(succeeded(listed));
+    try std.testing.expect(std.mem.find(u8, listed.stdout, "?ref=v0.1.0#") != null);
+    // bay add pins the same URL at the same release.
+    try f.package("user", "user", "0.1.0", "", &.{}, "");
+    try std.testing.expect(succeeded(try f.bay("user", &.{ "add", try gitUrl(&f, "app") })));
+    try std.testing.expect(std.mem.find(u8, try manifestOf(&f, "user"), "?ref=v0.1.0#") != null);
 }
 
 test "an install replaces a program that is running, and names what still runs from the install before" {

@@ -15,6 +15,8 @@ const fetch = @import("fetch.zig");
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
 const store = @import("store.zig");
+const published = @import("published.zig");
+const root = @import("root.zig");
 const resolve = @import("resolve.zig");
 const toolchain = @import("toolchain.zig");
 
@@ -95,7 +97,7 @@ pub fn command(c: Context, args: Args) !u8 {
                     if (try one(c, &records, record.source, record.prefix, record.name, true) != 0) return 1;
                     continue;
                 }
-                const url = manifest.following(c.a, record.source) orelse {
+                const url = try manifest.following(c.a, record.source) orelse {
                     try say.note(c.io, "{s} was installed from an exact commit; bay install it with a branch or tag to follow one", .{record.name});
                     continue;
                 };
@@ -135,7 +137,7 @@ fn buildCommand(c: Context, work: []const u8, stage: []const u8, cache: []const 
     const zig = try toolchain.forPackage(c.io, c.a, c.environ, work);
     const manifest_path = try std.fs.path.join(c.a, &.{ work, "build.zig.zon" });
     var text = try c.a.dupeSentinel(u8, try aegis.own.readFile(c.io, Io.Dir.cwd(), manifest_path, c.a, .fromRaw(1 << 20)), 0);
-    const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text), .development = false });
+    const resolution = try resolve.resolve(.{ .io = c.io, .a = c.a, .environ = c.environ, .zig = zig, .package = work, .parsed = try manifest.parse(c.a, text), .development = false });
     for (resolution.raises) |raise| text = try manifest.put(c.a, text, raise.kind, raise.to);
     try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = manifest_path, .data = text });
     var argv: std.ArrayList([]const u8) = .empty;
@@ -155,9 +157,15 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
         recorded = try Io.Dir.cwd().realPathFileAlloc(c.io, source, c.a);
         break :recorded recorded;
     } else directory: {
-        const dependency = try fetch.fetch(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }), source, given_name) orelse return 1;
+        // As `bay add` keeps them: packages unpacked under the store's place, fetches in a
+        // scratch beside them, which each fetch empties.
+        const place = try std.fs.path.join(c.a, &.{ data, "fetch" });
+        const packages = try store.Store.init(c.io, c.a, c.environ, c.zig, place);
+        const scratch = try std.fs.path.join(c.a, &.{ place, root.directory, "add" });
+        // A repository's URL is installed at its newest release, as `bay add` pins it.
+        const url = try published.fetchable(c.io, c.a, c.zig, packages, scratch, source);
+        const dependency = try fetch.fetch(c.io, c.a, c.zig, scratch, url, given_name) orelse return 1;
         recorded = dependency.source.remote.url;
-        const packages = try store.Store.init(c.io, c.a, c.zig, try std.fs.path.join(c.a, &.{ data, "fetch" }));
         break :directory try packages.directoryOf(.{ .url = dependency.source.remote.url, .hash = dependency.source.remote.hash });
     };
     const package_text = aegis.own.readFile(c.io, Io.Dir.cwd(), try std.fs.path.join(c.a, &.{ package_dir, "build.zig.zon" }), c.a, .fromRaw(1 << 20)) catch

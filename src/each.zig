@@ -57,7 +57,7 @@ pub fn run(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map
     const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
     const directories = try workspace.all(io, a, here) orelse try say.fail(io, "no {s} here or in any directory above", .{workspace.file_name});
     const members = try order(io, a, directories);
-    const width = jobs orelse std.Thread.getCpuCount() catch 1;
+    const width = (jobs orelse std.Thread.getCpuCount()) catch 1;
     const ended = try a.alloc(?Ended, members.len);
     @memset(ended, null);
     var state: Run = .{
