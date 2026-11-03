@@ -376,7 +376,7 @@ const Env = struct {
     fn readManifest(env: Env) ![:0]const u8 {
         var package_dir = try env.dir();
         defer package_dir.deinit(env.io);
-        const text = try aegis.own.readFile(env.io, package_dir.lend().get(), "build.zig.zon", env.a, .fromRaw(1 << 20));
+        const text = try aegis.own.readFile(env.io, package_dir.borrow().*, "build.zig.zon", env.a, .fromRaw(1 << 20));
         return env.a.dupeSentinel(u8, text, 0);
     }
 };
@@ -493,7 +493,7 @@ fn buildArgv(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution
     if (where == .development) {
         var dir = try env.dir();
         defer dir.deinit(env.io);
-        root.write(env.io, env.a, dir.lend().get(), parsed, resolution.packagePin()) catch |err| switch (err) {
+        root.write(env.io, env.a, dir.borrow().*, parsed, resolution.packagePin()) catch |err| switch (err) {
             error.DevDependencyNamedAsPackage => try say.fail(env.io, "a dev dependency is named {s}, the package's own name", .{parsed.name}),
             error.PinnedTwiceDifferently => try say.fail(env.io, "a name is pinned differently in .dependencies and .dev_dependencies: one name is one dependency", .{}),
             else => |e| return e,
@@ -583,7 +583,7 @@ fn writeManifestAt(env: Env, path: []const u8, text: []const u8) !void {
     if (env.locked) try say.fail(env.io, "--locked: {f} would change", .{manifest.portable(path)});
     var dir = try env.dir();
     defer dir.deinit(env.io);
-    const package = dir.lend().get();
+    const package = dir.borrow().*;
     // Written beside and renamed over: a member resolving at the same moment reads
     // the old manifest or the new one, never half of one.
     const partial = try env.a.print("{s}.bay-partial", .{path});

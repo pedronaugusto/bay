@@ -257,7 +257,7 @@ fn endOf(state: *Run, index: usize) error{WaiterLimit}!Ended {
     defer guard.deinit(state.io);
     while (true) {
         if (guard.value().ended[index]) |end| return end;
-        state.changed.waitUncancelable(state.io, &guard, .none) catch |err| switch (err) {
+        guard.waitUncancelable(&state.changed, state.io, .none) catch |err| switch (err) {
             error.Timeout => unreachable, // unreachable: the wait has no deadline
             error.WaiterLimit => |e| return e,
         };
@@ -268,7 +268,7 @@ fn endOf(state: *Run, index: usize) error{WaiterLimit}!Ended {
 fn take(state: *Run) error{WaiterLimit}!void {
     var guard = state.board.acquireUncancelable(state.io);
     defer guard.deinit(state.io);
-    while (guard.value().free == 0) state.changed.waitUncancelable(state.io, &guard, .none) catch |err| switch (err) {
+    while (guard.value().free == 0) guard.waitUncancelable(&state.changed, state.io, .none) catch |err| switch (err) {
         error.Timeout => unreachable, // unreachable: the wait has no deadline
         error.WaiterLimit => |e| return e,
     };

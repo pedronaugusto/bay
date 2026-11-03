@@ -171,7 +171,7 @@ const Feed = struct {
 
     fn run(feed: *Feed) void {
         defer feed.file.deinit(feed.io);
-        feed.file.lend().get().writeStreamingAll(feed.io, feed.bytes) catch |err| {
+        feed.file.borrow().*.writeStreamingAll(feed.io, feed.bytes) catch |err| {
             feed.failed = err;
         };
     }
