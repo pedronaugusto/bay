@@ -160,6 +160,48 @@ fn findUnreleased(text: []const u8) ?Range {
     return null;
 }
 
+/// The body of release `version`'s section as written under its heading: what its GitHub
+/// Release says. Null where no section releases it.
+pub fn released(text: []const u8, version: std.SemanticVersion) ?[]const u8 {
+    var offset: usize = 0;
+    while (offset < text.len) {
+        const end = std.mem.findScalarPos(u8, text, offset, '\n') orelse text.len;
+        const line = text[offset..end];
+        if (std.mem.startsWith(u8, line, "## [")) if (std.mem.findScalar(u8, line, ']')) |close| if (parseVersion(line["## [".len..close])) |found| if (found.order(version) == .eq) {
+            const range = sectionAfter(text, offset);
+            return std.mem.trim(u8, text[range.start..range.end], " \t\r\n");
+        };
+        offset = end + 1;
+    }
+    return null;
+}
+
+test "a release's notes are its section's body, up to the next release; a version no section releases has none" {
+    const text =
+        \\# Changelog
+        \\
+        \\## [Unreleased]
+        \\
+        \\## [0.3.0] - 2026-10-31
+        \\
+        \\### Added
+        \\
+        \\- A step.
+        \\
+        \\## [0.2.0] - 2026-10-01
+        \\
+        \\### Fixed
+        \\
+        \\- A bug.
+        \\
+        \\[Unreleased]: https://example.com/compare/v0.3.0...HEAD
+        \\
+    ;
+    try std.testing.expectEqualStrings("### Added\n\n- A step.", released(text, .{ .major = 0, .minor = 3, .patch = 0 }).?);
+    try std.testing.expectEqualStrings("### Fixed\n\n- A bug.", released(text, .{ .major = 0, .minor = 2, .patch = 0 }).?);
+    try std.testing.expect(released(text, .{ .major = 0, .minor = 1, .patch = 0 }) == null);
+}
+
 fn lineOf(text: []const u8, offset: usize) usize {
     return std.mem.countScalar(u8, text[0..offset], '\n') + 1;
 }

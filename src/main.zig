@@ -146,7 +146,7 @@ const Release = struct {
     gate_bundle: ?[]const u8 = null,
     package: []const u8 = ".",
     pub const spec: ensign.Spec(@This()) = .{
-        .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed, gated here and on the machines in bay's machines.zon, then the branch and its tag pushed at once over SSH",
+        .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed, gated here and on the machines in bay's machines.zon, then the branch and its tag pushed at once over SSH; on GitHub, its release published with the section as its notes and, where the build has a dist step, the programs it makes and their SHA256SUMS. GITHUB_TOKEN authorizes the release",
         .options = .{
             .dry_run = .{ .help = "Print the version, the section as it will be written and the plan; change nothing" },
             .no_push = .{ .help = "Commit and gate, and push nothing: the gated commit is held here for a later bay release to push without gating it again" },
@@ -1185,6 +1185,7 @@ test {
     _ = each;
     _ = fetch;
     _ = git;
+    _ = @import("github.zig");
     _ = graph;
     _ = install;
     _ = licenses;

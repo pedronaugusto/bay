@@ -27,6 +27,7 @@ const lock = @import("lock.zig");
 const dirs = @import("dirs.zig");
 const git_source = @import("git.zig");
 const advertised = @import("remote.zig");
+const github = @import("github.zig");
 
 pub const Context = struct {
     io: Io,
@@ -297,6 +298,8 @@ fn releaseOne(c: Context, options: Options) !Outcome {
             if (options.push_unreleased and remote_has_branch and !std.mem.eql(u8, head, try must(c, &.{ "rev-parse", up.tracking }))) {
                 return pushUnreleased(c, up, head, options);
             }
+            // A release this clone pushed, or another's, at HEAD: its GitHub Release finished.
+            if (newest != null and current_there != null and std.mem.eql(u8, current_there.?, head) and !options.dry_run) try publishRelease(c, up, current_tag, current, .resumed);
             try say.note(c.io, "nothing to release: CHANGELOG.md's [Unreleased] lists nothing", .{});
             return .nothing;
         }
@@ -351,7 +354,75 @@ fn releaseOne(c: Context, options: Options) !Outcome {
     try push(c, up, commit, plan.tag);
     try forget(c.io, gated);
     try say.note(c.io, "released {s} {s} at {s}: {s} and the tag {s} on {s}", .{ parsed.name, plan.tag, commit[0..12], up.onto, plan.tag, up.remote });
+    try publishRelease(c, up, plan.tag, plan.version, .just_pushed);
     return .{ .released = plan.version };
+}
+
+/// The GitHub Release of a version's tag: the section the CHANGELOG released it with as its
+/// notes, and, where the build has a `dist` step, the programs it makes from the release
+/// commit and their SHA256SUMS. A remote off github.com has none. GitHub makes the release
+/// once and keeps it, so a run that stopped part way is finished by the next `bay release`
+/// at the tag.
+fn publishRelease(c: Context, up: Upstream, tag: []const u8, version: std.SemanticVersion, when: enum { just_pushed, resumed }) !void {
+    const repository = github.slug(up.url) orelse return;
+    const token = c.environ.get("GITHUB_TOKEN") orelse "";
+    if (token.len == 0) {
+        if (when == .just_pushed) try say.note(c.io, "{s} has no GitHub Release: GITHUB_TOKEN is not set, and bay release at {s} with it publishes one", .{ tag, tag });
+        return;
+    }
+    const log = try read(c, "CHANGELOG.md") orelse "";
+    const notes = changelog.released(log, version) orelse try say.fail(c.io, "CHANGELOG.md has no section for {s}: the GitHub Release takes its notes from it", .{tag});
+    const assets = try programs(c, tag);
+    var client: std.http.Client = .{ .allocator = c.a, .io = c.io };
+    defer client.deinit();
+    const base = c.environ.get("GITHUB_API_URL") orelse "";
+    var problem: github.Problem = .{};
+    const page = github.publish(.{ .client = &client, .a = c.a, .base = if (base.len == 0) github.default_api else base, .token = token }, repository, tag, notes, assets, &problem) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.GitHub => try say.fail(c.io, "{s} is tagged and pushed, and its GitHub Release is not finished: {s}; bay release at {s} finishes it", .{ tag, problem.what, tag }),
+    };
+    try say.note(c.io, "{s} on GitHub: {s}{s}", .{ tag, page, if (assets.len == 0) "" else try c.a.print(", with {d} files", .{assets.len}) });
+}
+
+/// What a release ships beside its notes: each program the build's `dist` step installs into
+/// `dist` under its prefix, built from the release commit into a directory of its own, and
+/// their SHA256SUMS. Nothing where the build has no `dist` step.
+fn programs(c: Context, tag: []const u8) ![]const github.Asset {
+    if (!hasStep(try bayOut(c, &.{ "build", "-l" }), "dist")) return &.{};
+    const prefix = try std.fs.path.join(c.a, &.{ c.package, ".zig-cache", "bay", "release", tag });
+    try bayIn(c, &.{ "build", "dist", "--prefix", prefix });
+    const built = try std.fs.path.join(c.a, &.{ prefix, "dist" });
+    var dir = Io.Dir.cwd().openDir(c.io, built, .{ .iterate = true }) catch |err|
+        try say.fail(c.io, "the dist step made no {s}: {t}", .{ built, err });
+    defer dir.close(c.io);
+    var assets: std.ArrayList(github.Asset) = .empty;
+    var it = dir.iterate();
+    while (try it.next(c.io)) |entry| {
+        if (entry.kind != .file) continue;
+        const name = try c.a.dupe(u8, entry.name);
+        try assets.append(c.a, .{ .name = name, .bytes = try aegis.own.readFile(c.io, dir, name, c.a, .fromRaw(512 << 20)) });
+    }
+    if (assets.items.len == 0) try say.fail(c.io, "the dist step put nothing in {s}", .{built});
+    try assets.append(c.a, .{ .name = "SHA256SUMS", .bytes = try github.sums(c.a, assets.items) });
+    return assets.items;
+}
+
+/// Whether `zig build -l`'s listing names `step`: each step a line of its own, its name first.
+fn hasStep(listing: []const u8, step: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t\r");
+        if (std.mem.eql(u8, words.next() orelse continue, step)) return true;
+    }
+    return false;
+}
+
+test "a build's listing names a step by the first word of its line, never inside another's" {
+    const listing = "  install (default)            Copy build artifacts to prefix path\n  dist                         Build the release programs\n  check                        Compile the dist programs\n";
+    try std.testing.expect(hasStep(listing, "dist"));
+    try std.testing.expect(hasStep(listing, "install"));
+    try std.testing.expect(!hasStep(listing, "programs"));
+    try std.testing.expect(!hasStep("  check   Compile the dist programs\n", "dist"));
 }
 
 /// Every git pin of the manifest names a release: its `?ref=` is a version tag on its
@@ -482,7 +553,7 @@ fn archiveAt(a: std.mem.Allocator, host: []const u8, scheme: []const u8, rest: [
             return text[start .. @intFromPtr(all[to].ptr) - @intFromPtr(text.ptr) + all[to].len];
         }
     }.of;
-    const github = std.mem.eql(u8, host, "github.com");
+    const on_github = std.mem.eql(u8, host, "github.com");
     if (std.mem.eql(u8, host, "codeload.github.com")) {
         if (s.len < 4) return null;
         for ([_][]const u8{ "tar.gz", "zip", "legacy.tar.gz", "legacy.zip" }) |format| {
@@ -495,7 +566,7 @@ fn archiveAt(a: std.mem.Allocator, host: []const u8, scheme: []const u8, rest: [
         if (!std.mem.eql(u8, s[3], "tarball") and !std.mem.eql(u8, s[3], "zipball")) return null;
         return .{ .repository = try a.print("https://github.com/{s}", .{span(path, s, 1, 2)}), .revision = span(path, s, 4, s.len - 1) };
     }
-    if (github and s.len >= 4 and (std.mem.eql(u8, s[2], "tarball") or std.mem.eql(u8, s[2], "zipball"))) {
+    if (on_github and s.len >= 4 and (std.mem.eql(u8, s[2], "tarball") or std.mem.eql(u8, s[2], "zipball"))) {
         return .{ .repository = try a.print("https://{s}/{s}", .{ host, span(path, s, 0, 1) }), .revision = span(path, s, 3, s.len - 1) };
     }
     if (std.mem.eql(u8, host, "bitbucket.org")) {
@@ -694,6 +765,11 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
     if (options.no_push) {
         try say.out(c.io, "\nhold it here, gated, for a later bay release to push\n", .{});
     } else try say.out(c.io, "\npush it to {s} and the tag {s} on {s} at once ({s}){s}\n", .{ up.onto, plan.tag, up.remote, up.url, if (up.set) ", which becomes the branch's upstream" else "" });
+    if (!options.no_push) if (github.slug(up.url)) |repository| {
+        const unset = if (c.environ.get("GITHUB_TOKEN")) |t| t.len == 0 else true;
+        const left: []const u8 = if (unset) " (GITHUB_TOKEN is not set: it would be left for a later run)" else "";
+        try say.out(c.io, "publish its GitHub Release on {s}: the section as its notes, and the dist step's programs and their SHA256SUMS where the build has one{s}\n", .{ repository, left });
+    };
 }
 
 /// `bay --workspace release`: the train. Members one at a time, each after the
@@ -791,6 +867,16 @@ fn repinned(c: Context) !bool {
     const message = if (all.len == 0) "What the build makes from the pins, made again" else try c.a.print("Pin {s}", .{try listed(c.a, all)});
     _ = try must(c, &.{ "commit", "--quiet", "-m", message });
     return true;
+}
+
+/// What `bay <args>` writes to its output, run in the package; a failure says so.
+fn bayOut(c: Context, args: []const []const u8) ![]const u8 {
+    const bay = c.environ.get("BAY").?; // safe: main sets BAY before any command
+    const argv = try std.mem.concat(c.a, []const u8, &.{ &.{bay}, args });
+    const result = std.process.run(c.a, c.io, .{ .argv = argv, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
+        try say.fail(c.io, "could not run bay {s}: {t}", .{ args[0], err });
+    if (result.term != .exited or result.term.exited != 0) try say.fail(c.io, "bay {s} failed in {s}: {s}", .{ args[0], c.package, std.mem.trim(u8, result.stderr, " \r\n") });
+    return result.stdout;
 }
 
 /// This bay run in the package with `args`; a failure stops the member.

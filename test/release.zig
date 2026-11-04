@@ -664,3 +664,140 @@ test "a workspace's train releases its members in order, each pinned at the rele
     try std.testing.expectEqual(1, std.mem.count(u8, try w.read("a", "build.zig.zon"), "?ref=v0.1.1#"));
     try std.testing.expectEqual(1, try w.gated(try w.head("a")));
 }
+
+/// GitHub's API as a test scripts it: a server on the loopback that answers each request in
+/// turn, one connection per request, and keeps what each asked. Closing it ends `serve`.
+const FakeGitHub = struct {
+    server: Io.net.Server,
+    replies: []const Reply = &.{},
+    seen: std.ArrayList(Seen) = .empty,
+
+    const Reply = struct { status: std.http.Status, body: []const u8 };
+    const Seen = struct { method: std.http.Method, target: []const u8, authorization: []const u8, body: []const u8 };
+
+    fn init(io: Io) !FakeGitHub {
+        var address = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        return .{ .server = try address.listen(io, .{ .reuse_address = true }) };
+    }
+
+    fn url(f: *FakeGitHub, a: std.mem.Allocator) ![]const u8 {
+        return a.print("http://127.0.0.1:{d}", .{f.server.socket.address.getPort()});
+    }
+
+    fn serve(f: *FakeGitHub, io: Io, a: std.mem.Allocator) void {
+        for (f.replies) |reply| f.answer(io, a, reply) catch return;
+    }
+
+    fn answer(f: *FakeGitHub, io: Io, a: std.mem.Allocator, reply: Reply) !void {
+        const stream = try f.server.accept(io);
+        defer stream.close(io);
+        var in_buffer: [16 * 1024]u8 = @splat(0);
+        var out_buffer: [16 * 1024]u8 = @splat(0);
+        var in = stream.reader(io, &in_buffer);
+        var out = stream.writer(io, &out_buffer);
+        var http: std.http.Server = .init(&in.interface, &out.interface);
+        var asked = try http.receiveHead();
+        const target = try a.dupe(u8, asked.head.target);
+        const method = asked.head.method;
+        var authorization: []const u8 = "";
+        var headers = asked.iterateHeaders();
+        while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
+            authorization = try a.dupe(u8, header.value);
+        };
+        var body_buffer: [4096]u8 = @splat(0);
+        const body = try (asked.readerExpectNone(&body_buffer)).allocRemaining(a, .limited(1 << 20));
+        try f.seen.append(a, .{ .method = method, .target = target, .authorization = authorization, .body = body });
+        try asked.respond(reply.body, .{ .status = reply.status, .keep_alive = false });
+    }
+
+    /// `bay release` in `dir` with this API and `token`, the replies answered in turn.
+    fn release(f: *FakeGitHub, w: *World, dir: []const u8, token: []const u8, replies: []const Reply) !std.process.RunResult {
+        f.replies = replies;
+        f.seen = .empty;
+        try w.f.env.put("GITHUB_API_URL", try f.url(w.f.a));
+        try w.f.env.put("GITHUB_TOKEN", token);
+        defer _ = w.f.env.swapRemove("GITHUB_TOKEN");
+        const thread = try std.Thread.spawn(.{}, serve, .{ f, w.f.io, w.f.a });
+        const result = try w.releaseIn(dir, &.{});
+        // A reply bay did not ask for leaves `serve` waiting: closing the server ends it.
+        f.server.deinit(w.f.io);
+        thread.join();
+        f.* = .{ .server = (try init(w.f.io)).server, .seen = f.seen };
+        return result;
+    }
+};
+
+/// The package's build with a `dist` step: its program, `p-program`, the release's file.
+const dist_build = gate_build[0 .. gate_build.len - "}\n".len] ++
+    "    b.step(\"dist\", \"Build the release programs\").dependOn(&b.addInstallFile(b.path(\"lib.zig\"), \"dist/p-program\").step);\n}\n";
+
+test "a release on GitHub is published with its section as notes and the dist step's programs; one left without a token is finished at its tag" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var w: World = try .init(a);
+    defer w.deinit();
+    try w.package("p", "1.0.0", "");
+    try w.f.write("p", "build.zig", dist_build);
+    try w.git("p", &.{ "commit", "--quiet", "-am", "A dist step" });
+    // Its remote named as GitHub names it; the ssh stand-in reaches it under its home.
+    const home = try w.path("ssh-home");
+    try w.git(".", &.{ "init", "--quiet", "--bare", "--initial-branch=main", try std.fs.path.join(a, &.{ home, "o", "p.git" }) });
+    try w.f.env.put("SSH_HOME", home);
+    try w.git("p", &.{ "remote", "set-url", "origin", "git@github.com:o/p.git" });
+    try w.git("p", &.{ "push", "--quiet", "--set-upstream", "origin", "main", "--tags" });
+    var fake: FakeGitHub = try .init(w.f.io);
+    defer fake.server.deinit(w.f.io);
+    const api = try fake.url(a);
+
+    // Released with a token: GitHub holds no release for the tag, so one is made with the
+    // section as its notes, and the program and its SHA256SUMS are uploaded.
+    try w.change("p", "### Added\n\n- A step.\n");
+    const program = try w.read("p", "lib.zig");
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(program, &digest, .{});
+    const sums = try a.print("{s}  p-program\n", .{&std.fmt.bytesToHex(digest, .lower)});
+    const made = try a.print("{{\"id\":7,\"upload_url\":\"{s}/upload{{?name,label}}\",\"html_url\":\"https://github.com/o/p/releases/tag/v1.1.0\"}}", .{api});
+    const published = try fake.release(&w, "p", "t", &.{
+        .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
+        .{ .status = .created, .body = made },
+        .{ .status = .created, .body = "{}" },
+        .{ .status = .created, .body = "{}" },
+    });
+    try std.testing.expect(succeeded(published));
+    try std.testing.expect(contains(published.stderr, "v1.1.0 on GitHub: https://github.com/o/p/releases/tag/v1.1.0, with 2 files"));
+    const seen = fake.seen.items;
+    try std.testing.expectEqual(4, seen.len);
+    try std.testing.expectEqualStrings("/repos/o/p/releases/tags/v1.1.0", seen[0].target);
+    try std.testing.expectEqualStrings("Bearer t", seen[0].authorization);
+    try std.testing.expectEqual(std.http.Method.POST, seen[1].method);
+    try std.testing.expectEqualStrings("/repos/o/p/releases", seen[1].target);
+    try std.testing.expectEqualStrings("{\"tag_name\":\"v1.1.0\",\"name\":\"v1.1.0\",\"body\":\"### Added\\n\\n- A step.\"}", seen[1].body);
+    try std.testing.expectEqualStrings("/upload?name=p-program", seen[2].target);
+    try std.testing.expectEqualStrings(program, seen[2].body);
+    try std.testing.expectEqualStrings("/upload?name=SHA256SUMS", seen[3].target);
+    try std.testing.expectEqualStrings(sums, seen[3].body);
+
+    // Released with no token: tagged and pushed, its GitHub Release left for a later run.
+    try w.change("p", "### Fixed\n\n- A bug.\n");
+    const later = try w.read("p", "lib.zig");
+    const tokenless = try fake.release(&w, "p", "", &.{});
+    try std.testing.expect(succeeded(tokenless));
+    try std.testing.expect(contains(tokenless.stderr, "v1.1.1 has no GitHub Release: GITHUB_TOKEN is not set"));
+    try std.testing.expectEqual(0, fake.seen.items.len);
+    try std.testing.expectEqualStrings(try w.head("p"), try w.remoteAt("p", "refs/tags/v1.1.1"));
+    // Run again at the tag with one, it finishes the release a run that stopped part way left:
+    // only the file GitHub does not hold yet is uploaded.
+    std.crypto.hash.sha2.Sha256.hash(later, &digest, .{});
+    const held = try a.print("{{\"id\":8,\"upload_url\":\"{s}/upload{{?name,label}}\",\"html_url\":\"https://github.com/o/p/releases/tag/v1.1.1\",\"assets\":[{{\"name\":\"p-program\"}}]}}", .{try fake.url(a)});
+    const finished = try fake.release(&w, "p", "t", &.{
+        .{ .status = .ok, .body = held },
+        .{ .status = .created, .body = "{}" },
+    });
+    try std.testing.expect(succeeded(finished));
+    try std.testing.expect(contains(finished.stderr, "nothing to release"));
+    try std.testing.expectEqual(2, fake.seen.items.len);
+    try std.testing.expectEqualStrings("/repos/o/p/releases/tags/v1.1.1", fake.seen.items[0].target);
+    try std.testing.expectEqualStrings("/upload?name=SHA256SUMS", fake.seen.items[1].target);
+    try std.testing.expectEqualStrings(try a.print("{s}  p-program\n", .{&std.fmt.bytesToHex(digest, .lower)}), fake.seen.items[1].body);
+}
