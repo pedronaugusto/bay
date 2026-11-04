@@ -2,7 +2,8 @@
 //! (`GIT_SSH`, `GIT_SSH_VARIANT=simple`), and it runs the command on this
 //! machine, so a release goes through git's own SSH transport to a scratch
 //! repository. The command is `git-upload-pack '<path>'` or
-//! `git-receive-pack '<path>'`, its path quoted as git quotes it.
+//! `git-receive-pack '<path>'`, its path quoted as git quotes it; a relative
+//! path is under `SSH_HOME`, as a server's home.
 const std = @import("std");
 
 pub fn main(init: std.process.Init) !u8 {
@@ -29,6 +30,11 @@ pub fn main(init: std.process.Init) !u8 {
     // ssh://host/C:/x reaches here as /C:/x.
     var directory = path.items;
     if (directory.len > 2 and directory[0] == '/' and directory[2] == ':') directory = directory[1..];
+    // A relative path is under the server's home, `SSH_HOME`: `git@github.com:o/r.git` reaches
+    // `$SSH_HOME/o/r.git`.
+    if (!std.fs.path.isAbsolute(directory)) if (init.environ_map.get("SSH_HOME")) |home| {
+        directory = try std.fs.path.join(a, &.{ home, directory });
+    };
     var child = try std.process.spawn(init.io, .{ .argv = &.{ "git", program["git-".len..], directory }, .environ_map = init.environ_map });
     return switch (try child.wait(init.io)) {
         .exited => |code| code,

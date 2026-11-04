@@ -38,6 +38,9 @@ pub const Fixture = struct {
         try env.put("GIT_SSH", try Io.Dir.cwd().realPathFileAlloc(std.testing.io, options.ssh, a));
         try env.put("GIT_SSH_VARIANT", "simple");
         _ = env.swapRemove("SSH_AUTH_SOCK");
+        // A release on a remote named as GitHub's reaches only the API a test serves.
+        _ = env.swapRemove("GITHUB_TOKEN");
+        _ = env.swapRemove("GITHUB_API_URL");
         // Windows keeps bay's data under LOCALAPPDATA: the fixture's too.
         try env.put("LOCALAPPDATA", try std.fs.path.join(a, &.{ root, "local" }));
         // git reads no configuration of the person's: none of the system's, an empty global one.
