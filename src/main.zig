@@ -15,6 +15,7 @@ const git = @import("git.zig");
 const published = @import("published.zig");
 const each = @import("each.zig");
 const store = @import("store.zig");
+const nuget_signature = @import("nuget_signature.zig");
 const prebuilt = @import("prebuilt.zig");
 const select = @import("select.zig");
 const licenses = @import("licenses.zig");
@@ -375,6 +376,11 @@ const Env = struct {
 
     fn input(env: Env) tidying.Input {
         return .{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig, .package = env.package };
+    }
+
+    /// The project's own cloak, for a NuGet pin's check (`nuget_signature.chosen`).
+    fn cloak(env: Env) !?nuget_signature.Cloak {
+        return nuget_signature.chosen(env.a, try manifest.parse(env.a, try env.readManifest()), env.package);
     }
 
     fn readManifest(env: Env) ![:0]const u8 {
@@ -810,7 +816,7 @@ fn prebuiltPin(env: Env, url: []const u8, args: Add, publisher: manifest.Publish
         } },
         .minisign, .nuget, .none => publisher,
     };
-    const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig }, url, key_publisher, env.package, if (args.license) |path| .{ .given = path } else .found);
+    const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig, .cloak = try env.cloak() }, url, key_publisher, env.package, if (args.license) |path| .{ .given = path } else .found);
     return .{ .name = name, .source = .{ .remote = .{ .url = url, .hash = pinned.hash } }, .prebuilt = pinned.prebuilt };
 }
 
@@ -942,7 +948,7 @@ fn update(env: Env, names: []const []const u8) !?[:0]const u8 {
                 try say.note(env.io, "{s} is a prebuilt, which follows no ref; bay update {s} <bay+https://…> moves it", .{ dependency.name, dependency.name });
                 continue;
             };
-            const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig }, url, fields.publisher, env.package, .{ .before = fields.license });
+            const pinned = try prebuilt.pin(.{ .io = env.io, .a = env.a, .environ = env.environ, .zig = env.zig, .cloak = try env.cloak() }, url, fields.publisher, env.package, .{ .before = fields.license });
             if (std.mem.eql(u8, pinned.hash, remote.hash) and std.mem.eql(u8, url, remote.url)) continue;
             text = try manifest.put(env.a, text, kind, .{ .name = dependency.name, .source = .{ .remote = .{ .url = url, .hash = pinned.hash } }, .lazy = dependency.lazy, .prebuilt = pinned.prebuilt });
             try say.note(env.io, "{s} {s} -> {s}", .{ dependency.name, remote.hash, pinned.hash });
@@ -1208,6 +1214,7 @@ test {
     _ = @import("minisign.zig");
     _ = @import("openpgp.zig");
     _ = @import("prebuilt.zig");
+    _ = @import("nuget_signature.zig");
     _ = published;
     _ = release;
     _ = remotes;

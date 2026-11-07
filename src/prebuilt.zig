@@ -79,6 +79,8 @@ pub const Context = struct {
     environ: *const std.process.Environ.Map,
     /// The Zig whose cache takes the tree: the one the package builds with.
     zig: []const u8,
+    /// The project's own cloak, whose check a NuGet pin's signature takes, or null for bay's.
+    cloak: ?nuget_signature.Cloak = null,
 };
 
 /// Puts the prebuilt pinned at `url` as `hash` in Zig's cache: its archive, kept or
@@ -249,7 +251,7 @@ fn fetchArchive(c: Context, https: []const u8, kept: []const u8, expected: ?arch
         else => |e| return e,
     };
     // A pin being written (no digest yet) takes the root from its URL, not from what bay keeps.
-    if (signed_root) |root| try nuget_signature.check(.{ .io = io, .a = a, .environ = c.environ }, &client, partial, https, root, expected == null);
+    if (signed_root) |root| try nuget_signature.check(.{ .io = io, .a = a, .environ = c.environ, .zig = c.zig, .cloak = c.cloak }, &client, partial, https, root, expected == null);
     const path = try std.fs.path.join(a, &.{ kept, try a.print("{x}", .{&checked.sha256}) });
     try Io.Dir.rename(.cwd(), partial, .cwd(), path, io);
     return .{ .archive = .{ .path = path, .format = authenticated.format }, .expected = checked };

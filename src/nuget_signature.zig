@@ -2,7 +2,8 @@
 //! §11): bay carries no CMS and no trust store of its own. The pin names its root by the root
 //! certificate's URL and SHA-256; the certificate is fetched and kept by its digest, as an
 //! archive is. The tool is built from the cloak bay pins, as bay pins Zig, with the Zig bay
-//! manages, once, and kept by the cloak it was built from.
+//! manages, once, and kept by the cloak it was built from; a project that lists cloak among its
+//! own dependencies or tools has its cloak's tool instead (`chosen`).
 const std = @import("std");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
@@ -16,15 +17,41 @@ pub const Context = struct {
     io: Io,
     a: std.mem.Allocator,
     environ: *const std.process.Environ.Map,
+    /// The Zig the project builds with: the one a project's own cloak is built with.
+    zig: []const u8,
+    /// The project's own cloak (`chosen`), or null for bay's.
+    cloak: ?Cloak = null,
 };
 
-/// The cloak the check is built from: a commit until cloak releases one with `cms`, then
+/// A cloak the check is built from.
+pub const Cloak = union(enum) {
+    /// Fetched by Zig, held to its hash, built once and kept by it.
+    remote: struct { url: []const u8, hash: []const u8 },
+    /// A checkout, built from where it is each time it is wanted.
+    path: []const u8,
+};
+
+/// The cloak bay pins, as it pins Zig: a commit until cloak releases one with `cms`, then
 /// its tag (bay's release refuses a pin that is not a tag).
-pub const cloak = .{
+pub const pinned = .{
     .url = "git+https://github.com/pedronaugusto/cloak#7ba3b839adbac5e6ad0e2db0ae5540b6be47a5f5",
     .hash = "cloak-0.23.1-9onwcc4aWwQVFDKedS3qXp41Vwq0EeRPaUwNHgHcL2BE",
     .zig = "0.17.0",
 };
+
+/// The project's own cloak, which wins over bay's: the dependency named `cloak` among its
+/// tools (`.dev_dependencies`) or, failing that, its dependencies; a path is resolved from
+/// `directory`, the project's. Null: bay's.
+pub fn chosen(a: std.mem.Allocator, project: manifest.Manifest, directory: []const u8) !?Cloak {
+    for ([_][]const manifest.Dependency{ project.dev, project.normal }) |list| for (list) |dependency| {
+        if (!std.mem.eql(u8, dependency.name, "cloak")) continue;
+        return switch (dependency.source) {
+            .remote => |remote| .{ .remote = .{ .url = remote.url, .hash = remote.hash } },
+            .path => |path| .{ .path = try std.fs.path.resolve(a, &.{ directory, path }) },
+        };
+    };
+    return null;
+}
 
 /// The tool's name, as cloak's build installs it.
 const tool_name = "cloak-nuget-check";
@@ -40,8 +67,7 @@ pub fn check(c: Context, client: *std.http.Client, package: []const u8, url: []c
     const io = c.io;
     const root_path = try rootFile(c, client, root, pinning);
     const tool = try toolPath(c);
-    var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&root.sha256}) catch unreachable; // 32 bytes are 64 digits
+    const hex = std.fmt.bytesToHex(root.sha256, .lower);
     const result = std.process.run(c.a, io, .{
         .argv = &.{ tool, "--root", root_path, "--root-sha256", &hex, package },
         .stdout_limit = .limited(4096),
@@ -78,31 +104,34 @@ fn holds(bytes: []const u8, sha256: [32]u8) bool {
     return std.mem.eql(u8, &actual, &sha256);
 }
 
-/// The tool, built from `cloak` the first time it is wanted and kept by cloak's hash.
+/// The tool: from the project's own cloak when it lists one, else from bay's; a fetched one
+/// built the first time it is wanted and kept by its hash.
 fn toolPath(c: Context) ![]const u8 {
     const io = c.io;
     const a = c.a;
     const tools = try std.fs.path.join(a, &.{ try dirs.data(io, a, c.environ), "tools" });
     try Io.Dir.cwd().createDirPath(io, tools);
-    const tool = try std.fs.path.join(a, &.{ tools, try a.print("{s}-{s}", .{ tool_name, cloak.hash }) });
+    const remote: struct { url: []const u8, hash: []const u8, zig: []const u8 } = switch (c.cloak orelse Cloak{ .remote = .{ .url = pinned.url, .hash = pinned.hash } }) {
+        .path => |path| return build(c, tools, path, c.zig, try std.fs.path.join(a, &.{ tools, try a.print("{s}-checkout", .{tool_name}) })),
+        .remote => |r| .{ .url = r.url, .hash = r.hash, .zig = if (c.cloak == null) try toolchain.path(io, a, c.environ, pinned.zig) else c.zig },
+    };
+    const tool = try std.fs.path.join(a, &.{ tools, try a.print("{s}-{s}", .{ tool_name, remote.hash }) });
     if (try exists(io, tool)) return tool;
     // One build at a time: another bay building waits here, then finds that build's tool.
     const lock = try Io.Dir.cwd().createFile(io, try std.fs.path.join(a, &.{ tools, "build.lock" }), .{ .lock = .exclusive });
     defer lock.close(io);
     if (try exists(io, tool)) return tool;
-
-    const zig = try toolchain.path(io, a, c.environ, cloak.zig);
-    try say.note(io, "building {s} from cloak, once", .{tool_name});
-    const fetched = std.process.run(a, io, .{ .argv = &.{ zig, "fetch", cloak.url }, .stdout_limit = .limited(1024), .stderr_limit = .limited(16 * 1024) }) catch |err|
-        try say.fail(io, "could not run {s} fetch: {t}", .{ zig, err });
+    try say.note(io, "building {s} from cloak {s}, once", .{ tool_name, remote.hash });
+    const fetched = std.process.run(a, io, .{ .argv = &.{ remote.zig, "fetch", remote.url }, .stdout_limit = .limited(1024), .stderr_limit = .limited(16 * 1024) }) catch |err|
+        try say.fail(io, "could not run {s} fetch: {t}", .{ remote.zig, err });
     if (fetched.term != .exited or fetched.term.exited != 0) {
         try say.relay(io, fetched.stderr);
-        try say.fail(io, "{s} fetch refused {s}", .{ zig, cloak.url });
+        try say.fail(io, "{s} fetch refused {s}", .{ remote.zig, remote.url });
     }
-    if (!std.mem.eql(u8, std.mem.trim(u8, fetched.stdout, " \n"), cloak.hash)) try say.fail(io, "{s} is not the cloak bay pins: it hashes to {s}", .{ cloak.url, fetched.stdout });
-
-    // The package as Zig keeps it, unpacked as bay unpacks an archive, and built there.
-    const tarball = try std.fs.path.join(a, &.{ try toolchain.globalCache(io, a, zig), "p", try a.print("{s}.tar.gz", .{cloak.hash}) });
+    if (!std.mem.eql(u8, std.mem.trim(u8, fetched.stdout, " \n"), remote.hash)) try say.fail(io, "{s} is not the cloak pinned as {s}: it hashes to {s}", .{ remote.url, remote.hash, fetched.stdout });
+    // The package as Zig keeps it, unpacked as bay unpacks an archive (its one top directory
+    // the tree), and built there.
+    const tarball = try std.fs.path.join(a, &.{ try toolchain.globalCache(io, a, remote.zig), "p", try a.print("{s}.tar.gz", .{remote.hash}) });
     const work = try std.fs.path.join(a, &.{ tools, "build" });
     try Io.Dir.cwd().deleteTree(io, work);
     defer Io.Dir.cwd().deleteTree(io, work) catch |err| say.note(io, "{s} is left behind: {t}", .{ work, err }) catch {};
@@ -110,18 +139,25 @@ fn toolPath(c: Context) ![]const u8 {
     var diagnostic: archive.Diagnostic = .{};
     archive.unpack(io, a, .{ .path = tarball, .format = .tar_gzip }, tree, 1 << 30, &diagnostic) catch |err|
         try say.fail(io, "could not unpack cloak ({s}): {t}", .{ tarball, err });
-    // bay unpacks as Zig's fetch does: the archive's one top directory is the tree.
-    const source = tree;
-    const prefix = try std.fs.path.join(a, &.{ work, "out" });
+    return build(c, tools, tree, remote.zig, tool);
+}
+
+/// cloak's tool built from the cloak at `source` with `zig`, put at `tool`.
+fn build(c: Context, tools: []const u8, source: []const u8, zig: []const u8, tool: []const u8) ![]const u8 {
+    const io = c.io;
+    const a = c.a;
+    const prefix = try std.fs.path.join(a, &.{ tools, "build-out" });
+    try Io.Dir.cwd().deleteTree(io, prefix);
+    defer Io.Dir.cwd().deleteTree(io, prefix) catch |err| say.note(io, "{s} is left behind: {t}", .{ prefix, err }) catch {};
     const built = std.process.run(a, io, .{
         .argv = &.{ zig, "build", "--prefix", prefix, "-Doptimize=ReleaseSafe" },
         .cwd = .{ .path = source },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
-    }) catch |err| try say.fail(io, "could not run {s} build: {t}", .{ zig, err });
+    }) catch |err| try say.fail(io, "could not run {s} build in {s}: {t}", .{ zig, source, err });
     if (built.term != .exited or built.term.exited != 0) {
         try say.relay(io, built.stderr);
-        try say.fail(io, "cloak's {s} did not build", .{tool_name});
+        try say.fail(io, "cloak's {s} did not build in {s}", .{ tool_name, source });
     }
     try Io.Dir.rename(.cwd(), try std.fs.path.join(a, &.{ prefix, "bin", tool_name }), .cwd(), tool, io);
     return tool;
@@ -133,4 +169,23 @@ fn exists(io: Io, path: []const u8) !bool {
         else => |e| return e,
     };
     return true;
+}
+
+const testing = std.testing;
+
+fn projectWith(a: std.mem.Allocator, deps: []const u8) !manifest.Manifest {
+    return manifest.parse(a, try a.dupeSentinel(u8, try std.fmt.allocPrint(a, ".{{ .name = .p, .version = \"0.0.0\", .fingerprint = 0x1, .dependencies = .{{}}, .dev_dependencies = .{{ {s} }} }}", .{deps}), 0));
+}
+
+test "a project with cloak among its tools has its own cloak's check, and one without has bay's" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const own = try projectWith(a, ".cloak = .{ .url = \"git+https://github.com/pedronaugusto/cloak#0123456789abcdef0123456789abcdef01234567\", .hash = \"cloak-0.24.0-AAAA\" }");
+    const remote = (try chosen(a, own, "/p")).?.remote;
+    try testing.expectEqualStrings("cloak-0.24.0-AAAA", remote.hash);
+    const checkout = try projectWith(a, ".cloak = .{ .path = \"../cloak\" }");
+    try testing.expectEqualStrings("/cloak", (try chosen(a, checkout, "/p")).?.path);
+    const none = try projectWith(a, ".other = .{ .path = \"../cloak\" }");
+    try testing.expectEqual(@as(?Cloak, null), try chosen(a, none, "/p"));
 }

@@ -7,6 +7,7 @@ const aegis = @import("aegis");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
+const nuget_signature = @import("nuget_signature.zig");
 const toolchain = @import("toolchain.zig");
 const say = @import("say.zig");
 const git = @import("git.zig");
@@ -30,6 +31,8 @@ pub const Store = struct {
     global: []const u8,
     /// Where bay unpacks an archive: the last of `directories`.
     unpacked: []const u8,
+    /// The project's own cloak, for a NuGet pin's check; null for bay's.
+    cloak: ?nuget_signature.Cloak = null,
     /// Package directories by hash, once found.
     found: std.array_hash_map.String([]const u8) = .empty,
 
@@ -41,6 +44,11 @@ pub const Store = struct {
             try std.fs.path.join(a, &.{ package, "zig-pkg" }),
             unpacked,
         }) };
+        // The project's manifest, read again for its cloak: a manifest bay cannot read is
+        // refused where it is read for the graph, so here it only leaves bay's cloak.
+        if (aegis.own.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ package, "build.zig.zon" }), a, .fromRaw(1 << 20))) |text| {
+            if (manifest.parse(a, try a.dupeSentinel(u8, text, 0))) |project| store.cloak = try nuget_signature.chosen(a, project, package) else |_| {}
+        } else |_| {}
         return store;
     }
 
@@ -77,7 +85,7 @@ pub const Store = struct {
     /// archive, or fetched by Zig first.
     pub fn directoryOf(store: *Store, remote: select.Place.Remote) ![]const u8 {
         // Zig fetches no prebuilt: bay brings it into Zig's cache, checked, and reads it there.
-        if (remote.prebuilt) |pin| if (!try store.withZig(remote.hash)) try prebuilt.bring(.{ .io = store.io, .a = store.a, .environ = store.environ, .zig = store.zig }, remote.url, remote.hash, pin);
+        if (remote.prebuilt) |pin| if (!try store.withZig(remote.hash)) try prebuilt.bring(.{ .io = store.io, .a = store.a, .environ = store.environ, .zig = store.zig, .cloak = store.cloak }, remote.url, remote.hash, pin);
         // Zig never fetches what only git reaches: such a package must be where Zig
         // looks, the project's zig-pkg or Zig's cache, not only in bay's copy.
         if (git.handles(remote.url) and !try store.withZig(remote.hash)) try store.fetch(remote);
