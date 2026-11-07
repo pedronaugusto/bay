@@ -6,18 +6,18 @@
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#a34e694246ad4b3245e24fc3357538e5dac05173",
-            .hash = "aegis-0.2.4-rsxouiMjCwBwwD1SWR_z23YmyBmdLH-NlEMYqt9dA_Z3",
+            .url = "git+https://github.com/pedronaugusto/aegis#3c0b13e5fc25797b5fbcc25fec48b0a8411cc668",
+            .hash = "aegis-0.2.4-rsxoug3uCwBiVYRBbQolOSbqdOEzmmUeaj19tWOo2rmc",
         },
 
         .ensign = .{
-            .url = "git+https://github.com/pedronaugusto/ensign?ref=v0.3.1#271c75f60534b7e9eb1c79ae6d3b8f94c28be705",
-            .hash = "ensign-0.3.1-6eMTD7ejBQCKWv4nIZ0aJ1sZp8iqcM98FSGwKTnd4mVJ",
+            .url = "git+https://github.com/pedronaugusto/ensign#47ae8ac45b9ccae0b2acc151aae246da2b684517",
+            .hash = "ensign-0.3.1-6eMTD6ClBQA_Er0WgjAgPssccItf3UByYL3rymaw5baj",
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock#f0b59c41348ad772c984753ea819f9345a37130d",
-            .hash = "airlock-0.6.0-rfvu6PdDCAChN1RPjYEz_v65zNQ-wOiR6ANrRrxzIWLH",
+            .url = "git+https://github.com/pedronaugusto/airlock#55f0265ad74ceff3ea14a1fca316f82aa3f45ae8",
+            .hash = "airlock-0.6.0-rfvu6DdECADPsZW3JjI6jPRt-hpplrgrRaA4M4Ey7e8W",
         },
     },
     .dev_dependencies = .{
@@ -27,8 +27,8 @@
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#e8fae93cc7a0858a579f18f9f173f99ffab509c2",
-            .hash = "shakedown-0.6.0-BR8U4_UyGACDv1Jlc8Q1J8QBvht3GkYTgi4SfQxpwj_h",
+            .url = "git+https://github.com/pedronaugusto/shakedown#acd95d337b222e0223e60b923b5abae8d33bfaf2",
+            .hash = "shakedown-0.6.0-BR8U435LGADOWAz8MqgysJwuG83P_RkOlBLEo8e130Sm",
         },
     },
 }
