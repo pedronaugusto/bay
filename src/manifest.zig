@@ -52,11 +52,16 @@ pub const Publisher = union(enum) {
     minisign: []const u8,
     /// An OpenPGP key file in the package; the signature is at the URL plus `.sig`.
     openpgp: []const u8,
-    /// nuget.org's catalog: the package's SHA-512 as nuget.org holds it.
-    nuget,
+    /// nuget.org's catalog: the package's SHA-512 as nuget.org holds it; with a root, the
+    /// package's author signature too, chained to that root (cloak's `cloak-nuget-check`).
+    nuget: ?NugetRoot,
     /// No one, written by hand so the choice is seen.
     none,
 };
+
+/// The root a NuGet package's author signature must chain to: a certificate at `url`, held
+/// to its SHA-256.
+pub const NugetRoot = struct { url: []const u8, sha256: [32]u8 };
 
 /// One entry of the manifest in `directory` that must change: `from`, in the
 /// list `kind`, becomes `to`.
@@ -292,7 +297,7 @@ fn publisherOf(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Par
     switch (node) {
         .enum_literal => |name| {
             const text = name.get(zoir);
-            if (std.mem.eql(u8, text, "nuget")) return .nuget;
+            if (std.mem.eql(u8, text, "nuget")) return .{ .nuget = null };
             if (std.mem.eql(u8, text, "none")) return .none;
             return error.InvalidManifest;
         },
@@ -300,6 +305,7 @@ fn publisherOf(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Par
             var fields: Fields = .of(literal);
             const only = fields.next(zoir) orelse return error.InvalidManifest;
             if (fields.next(zoir) != null) return error.InvalidManifest;
+            if (std.mem.eql(u8, only.name, "nuget")) return .{ .nuget = try nugetRootOf(arena, zoir, only.value) };
             const text = try string(arena, only.value);
             if (std.mem.eql(u8, only.name, "minisign")) return .{ .minisign = text };
             if (std.mem.eql(u8, only.name, "openpgp")) return .{ .openpgp = try inside(arena, only.value) };
@@ -307,6 +313,30 @@ fn publisherOf(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) Par
         },
         else => return error.InvalidManifest,
     }
+}
+
+/// `.{ .root = "<https url>", .root_sha256 = "<64 hex digits>" }`.
+fn nugetRootOf(arena: std.mem.Allocator, zoir: *const Zoir, node: Zoir.Node) ParseError!NugetRoot {
+    const literal = switch (node) {
+        .struct_literal => |l| l,
+        else => return error.InvalidManifest,
+    };
+    var fields: Fields = .of(literal);
+    var url: ?[]const u8 = null;
+    var sha256: ?[32]u8 = null;
+    while (fields.next(zoir)) |field| {
+        if (std.mem.eql(u8, field.name, "root") and url == null) {
+            url = try string(arena, field.value);
+            if (!std.mem.startsWith(u8, url.?, "https://")) return error.InvalidManifest;
+        } else if (std.mem.eql(u8, field.name, "root_sha256") and sha256 == null) {
+            const hex = try string(arena, field.value);
+            if (hex.len != 64) return error.InvalidManifest;
+            var bytes: [32]u8 = undefined;
+            _ = std.fmt.hexToBytes(&bytes, hex) catch return error.InvalidManifest;
+            sha256 = bytes;
+        } else return error.InvalidManifest;
+    }
+    return .{ .url = url orelse return error.InvalidManifest, .sha256 = sha256 orelse return error.InvalidManifest };
 }
 
 /// `source` with `dependency` in the `kind` list, added or replaced in place,
@@ -407,7 +437,11 @@ fn writeEntry(dependency: Dependency, w: *std.Io.Writer) std.Io.Writer.Error!voi
         switch (prebuilt.publisher) {
             .minisign => |key| try w.print(".publisher = .{{ .minisign = \"{f}\" }},\n", .{std.zig.fmtString(key)}),
             .openpgp => |file| try w.print(".publisher = .{{ .openpgp = \"{f}\" }},\n", .{portable(file)}),
-            .nuget, .none => try w.print(".publisher = .{t},\n", .{prebuilt.publisher}),
+            .nuget => |given| if (given) |root|
+                try w.print(".publisher = .{{ .nuget = .{{ .root = \"{f}\", .root_sha256 = \"{x}\" }} }},\n", .{ std.zig.fmtString(root.url), &root.sha256 })
+            else
+                try w.writeAll(".publisher = .nuget,\n"),
+            .none => try w.writeAll(".publisher = .none,\n"),
         }
         try w.print(".license = \"{f}\",\n", .{portable(prebuilt.license)});
     }
@@ -629,11 +663,40 @@ test "a prebuilt pin's fields are read, and put writes them back as they were" {
     try std.testing.expectEqualStrings("keys/msys2.pgp", layers.publisher.openpgp);
     try std.testing.expectEqualStrings("clang64/share/licenses/vulkan-validation-layers/LICENSE", layers.license);
     try std.testing.expect(parsed.dev[0].lazy);
-    try std.testing.expectEqual(Publisher.nuget, parsed.dev[1].prebuilt.?.publisher);
+    try std.testing.expectEqual(@as(?NugetRoot, null), parsed.dev[1].prebuilt.?.publisher.nuget);
     // Each entry put back as read leaves the manifest as it was.
     var edited: [:0]const u8 = text;
     for (parsed.dev) |dependency| edited = try put(a, edited, .dev, dependency);
     try std.testing.expectEqualStrings(text, edited);
+}
+
+test "a NuGet pin with a root reads back as written, and a root without its digest is refused" {
+    const sha = "552f7bdcf1a7af9e6ce672017f4f12abf77240c78e761ac203d1d9d20ac89988";
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source =
+        \\.{ .name = .x, .version = "0.0.0", .fingerprint = 0x1, .dependencies = .{
+        \\    .d3d12 = .{
+        \\        .url = "bay+https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.619.6/microsoft.direct3d.d3d12.1.619.6.nupkg",
+        \\        .hash = "N-V-x",
+        \\        .sha256 = "08f0489281401aa430fc37322d6c3fc98a8025175aacd714c10d562f4963f1e9",
+        \\        .size = 35477552,
+        \\        .publisher = .{ .nuget = .{ .root = "https://cacerts.digicert.com/DigiCertTrustedRootG4.crt", .root_sha256 = "552f7bdcf1a7af9e6ce672017f4f12abf77240c78e761ac203d1d9d20ac89988" } },
+        \\        .license = "LICENSE.txt",
+        \\    },
+        \\} }
+    ;
+    const parsed = try parse(a, source);
+    const root = parsed.normal[0].prebuilt.?.publisher.nuget.?;
+    try std.testing.expectEqualStrings("https://cacerts.digicert.com/DigiCertTrustedRootG4.crt", root.url);
+    var want: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&want, sha);
+    try std.testing.expectEqualSlices(u8, &want, &root.sha256);
+    const written = try a.print("{f}", .{entryText(parsed.normal[0])});
+    try std.testing.expect(std.mem.indexOf(u8, written, ".publisher = .{ .nuget = .{ .root = \"https://cacerts.digicert.com/DigiCertTrustedRootG4.crt\", .root_sha256 = \"" ++ sha ++ "\" } },") != null);
+    const missing = try std.mem.replaceOwned(u8, a, source, ", .root_sha256 = \"" ++ sha ++ "\"", "");
+    try std.testing.expectError(error.InvalidManifest, parse(a, try a.dupeSentinel(u8, missing, 0)));
 }
 
 test "a prebuilt's fields belong to a bay+ URL, which must have them all" {

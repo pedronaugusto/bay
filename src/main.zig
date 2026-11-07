@@ -110,6 +110,8 @@ const Add = struct {
     minisign: ?[]const u8 = null,
     openpgp: ?[]const u8 = null,
     nuget: bool = false,
+    nuget_root: ?[]const u8 = null,
+    nuget_root_sha256: ?[]const u8 = null,
     no_publisher: bool = false,
     license: ?[]const u8 = null,
     sources: []const []const u8,
@@ -123,6 +125,8 @@ const Add = struct {
             .minisign = .{ .value_name = "KEY", .help = "A prebuilt (bay+https://): its publisher's minisign key; the signature is at the URL plus .minisig" },
             .openpgp = .{ .value_name = "FILE", .hint = .file, .help = "A prebuilt: its publisher's OpenPGP key, a file in the package; the signature is at the URL plus .sig" },
             .nuget = .{ .help = "A prebuilt: a NuGet package, its SHA-512 read from nuget.org's catalog" },
+            .nuget_root = .{ .value_name = "URL", .help = "With --nuget: the root certificate the package's author signature must chain to, checked by cloak" },
+            .nuget_root_sha256 = .{ .value_name = "HEX", .help = "With --nuget-root: the root certificate's SHA-256" },
             .no_publisher = .{ .help = "A prebuilt whose publisher signs nothing: its digest alone holds it" },
             .license = .{ .value_name = "PATH", .help = "A prebuilt: the file in its tree that states its licence, when it holds no one licence file" },
             .sources = .{ .positional = true, .value_name = "URL-OR-DIRECTORY", .hint = .directory, .help = "A repository's URL (pinned at its newest release), a git URL with a ref, an archive URL, or a directory" },
@@ -772,8 +776,17 @@ fn publisherOf(env: Env, args: Add) !?manifest.Publisher {
         named = .{ .openpgp = file };
         count += 1;
     }
+    if ((args.nuget_root == null) != (args.nuget_root_sha256 == null)) try say.fail(env.io, "--nuget-root and --nuget-root-sha256 name a root together", .{});
+    if (args.nuget_root != null and !args.nuget) try say.fail(env.io, "--nuget-root is for a --nuget package", .{});
     if (args.nuget) {
-        named = .nuget;
+        named = .{ .nuget = if (args.nuget_root) |url| root: {
+            const hex = args.nuget_root_sha256.?;
+            var sha256: [32]u8 = undefined;
+            if (hex.len != 64) try say.fail(env.io, "--nuget-root-sha256 is 64 hexadecimal digits", .{});
+            _ = std.fmt.hexToBytes(&sha256, hex) catch try say.fail(env.io, "--nuget-root-sha256 is 64 hexadecimal digits", .{});
+            if (!std.mem.startsWith(u8, url, "https://")) try say.fail(env.io, "--nuget-root is fetched over https", .{});
+            break :root .{ .url = url, .sha256 = sha256 };
+        } else null };
         count += 1;
     }
     if (args.no_publisher) {

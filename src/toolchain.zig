@@ -312,3 +312,14 @@ test "a release is found by its version, a development version only as master" {
 test {
     _ = minisign;
 }
+
+/// Zig's global cache, as `zig env` reports it.
+pub fn globalCache(io: Io, a: std.mem.Allocator, zig: []const u8) ![]const u8 {
+    const result = std.process.run(a, io, .{ .argv = &.{ zig, "env" }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+        try say.fail(io, "could not run {s} env: {t}", .{ zig, err });
+    const Env = struct { global_cache_dir: []const u8 };
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    const env = std.zon.parse.fromSlice(Env, .{ .gpa = a, .arena = a, .source = try a.dupeSentinel(u8, result.stdout, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
+        try say.fail(io, "could not read {s} env", .{zig});
+    return env.global_cache_dir;
+}

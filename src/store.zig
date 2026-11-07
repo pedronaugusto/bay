@@ -7,6 +7,7 @@ const aegis = @import("aegis");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
+const toolchain = @import("toolchain.zig");
 const say = @import("say.zig");
 const git = @import("git.zig");
 const prebuilt = @import("prebuilt.zig");
@@ -36,7 +37,7 @@ pub const Store = struct {
     pub fn init(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, zig: []const u8, package: []const u8) !*Store {
         const store = try a.create(Store);
         const unpacked = try std.fs.path.join(a, &.{ package, unpacked_directory });
-        store.* = .{ .io = io, .a = a, .environ = environ, .zig = zig, .global = try globalCache(io, a, zig), .unpacked = unpacked, .directories = try a.dupe([]const u8, &.{
+        store.* = .{ .io = io, .a = a, .environ = environ, .zig = zig, .global = try toolchain.globalCache(io, a, zig), .unpacked = unpacked, .directories = try a.dupe([]const u8, &.{
             try std.fs.path.join(a, &.{ package, "zig-pkg" }),
             unpacked,
         }) };
@@ -281,13 +282,3 @@ fn placedPrebuilt(a: std.mem.Allocator, directory: []const u8, fields: manifest.
     return placed_pin;
 }
 
-/// Zig's global cache, as `zig env` reports it.
-pub fn globalCache(io: Io, a: std.mem.Allocator, zig: []const u8) ![]const u8 {
-    const result = std.process.run(a, io, .{ .argv = &.{ zig, "env" }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
-        try say.fail(io, "could not run {s} env: {t}", .{ zig, err });
-    const Env = struct { global_cache_dir: []const u8 };
-    var diagnostics: std.zon.parse.Diagnostics = undefined;
-    const env = std.zon.parse.fromSlice(Env, .{ .gpa = a, .arena = a, .source = try a.dupeSentinel(u8, result.stdout, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
-        try say.fail(io, "could not read {s} env", .{zig});
-    return env.global_cache_dir;
-}

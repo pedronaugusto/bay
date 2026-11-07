@@ -263,7 +263,13 @@ bay add --name layers --openpgp keys/msys2.asc --license clang64/share/licenses/
 The publisher is a minisign key (`--minisign <key>`, the signature at the URL plus
 `.minisig`), an OpenPGP key file in the package (`--openpgp <file>`, at the URL plus
 `.sig`), nuget.org's catalog for a package on api.nuget.org (`--nuget`), or none
-(`--no-publisher`, the digest alone). The pin records the archive's SHA-256 and size,
+(`--no-publisher`, the digest alone). nuget.org's catalog is nuget.org's word; a NuGet
+package's author signs it too, and `--nuget-root <url> --nuget-root-sha256 <hex>` holds
+that signature to a root you choose, named by its certificate's SHA-256 (the certificate
+is fetched from the URL and kept by its digest). bay checks the signature with cloak's
+`cloak-nuget-check`, which it builds once from the cloak it pins, with the Zig it manages:
+the author's signature must chain to that root, at the time its timestamp proves, and the
+package must be the one it signed. bay holds no trust store. The pin records the archive's SHA-256 and size,
 its publisher, the file in it that states its licence, and the hash Zig gives the tree
 it unpacks to. Wherever bay downloads it, the archive is held to its size, checked
 against its digest and its publisher before a byte is unpacked, unpacked as Zig unpacks

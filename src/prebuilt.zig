@@ -14,6 +14,7 @@ const archive = @import("archive.zig");
 const download = @import("download.zig");
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
+const nuget_signature = @import("nuget_signature.zig");
 
 /// Whether `url` is a prebuilt's: bay's prefix before the publisher's URL.
 pub fn handles(url: []const u8) bool {
@@ -232,6 +233,12 @@ fn fetchArchive(c: Context, https: []const u8, kept: []const u8, expected: ?arch
         } },
         .nuget => .{ .sha512 = try nugetHash(c, &client, https) },
     };
+    // The author's signature, where the pin names its root: after the bytes are nuget.org's,
+    // before a byte of them is unpacked.
+    const signed_root: ?manifest.NugetRoot = switch (word) {
+        .nuget => |given| given,
+        else => null,
+    };
     const authenticated = archive.authenticate(io, a, partial, checked, vouched) catch |err| switch (err) {
         error.SizeMismatch => try say.fail(io, "{s} is not {d} bytes, as its pin says", .{ https, checked.size }),
         error.DigestMismatch => try say.fail(io, "{s}'s SHA-256 is not its pin's: it is another archive", .{https}),
@@ -241,6 +248,8 @@ fn fetchArchive(c: Context, https: []const u8, kept: []const u8, expected: ?arch
         error.UnknownFormat => try say.fail(io, "{s} is no archive bay reads: a tar in gzip or zstd, or a zip", .{https}),
         else => |e| return e,
     };
+    // A pin being written (no digest yet) takes the root from its URL, not from what bay keeps.
+    if (signed_root) |root| try nuget_signature.check(.{ .io = io, .a = a, .environ = c.environ }, &client, partial, https, root, expected == null);
     const path = try std.fs.path.join(a, &.{ kept, try a.print("{x}", .{&checked.sha256}) });
     try Io.Dir.rename(.cwd(), partial, .cwd(), path, io);
     return .{ .archive = .{ .path = path, .format = authenticated.format }, .expected = checked };

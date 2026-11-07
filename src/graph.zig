@@ -128,9 +128,17 @@ pub fn outdated(r: resolve.Resolution) !void {
     const a = r.input.a;
     const io = r.input.io;
     const scratch = try std.fs.path.join(a, &.{ r.input.package, ".zig-cache", "bay", "add" });
+    var roots: std.array_hash_map.String([]const u8) = .empty;
     var prebuilts: std.array_hash_map.String(void) = .empty;
     for ([_][]const select.Revision{ r.graph.mains.values(), r.graph.selected.values() }) |revisions| for (revisions) |revision| for (revision.pins) |pin| {
-        if (pin.place == .remote and pin.place.remote.prebuilt != null) try prebuilts.put(a, pin.key, {});
+        if (pin.place == .remote and pin.place.remote.prebuilt != null) {
+            try prebuilts.put(a, pin.key, {});
+            // A NuGet pin's root is a pin too: listed with it, by the URL and digest it names.
+            switch (pin.place.remote.prebuilt.?.publisher) {
+                .nuget => |given| if (given) |signed| try roots.put(a, pin.key, try a.print("{s} (sha256 {x})", .{ signed.url, &signed.sha256 })),
+                else => {},
+            }
+        }
     };
     const named = try upstream.keys(a, r.graph);
     var unchecked: std.ArrayList([]const u8) = .empty;
@@ -164,6 +172,7 @@ pub fn outdated(r: resolve.Resolution) !void {
     if (!any) try say.note(io, "every package {s}is at its newest release, and none is retracted", .{if (all) "" else "checked "});
     if (unchecked.items.len != 0) try say.note(io, "not checked: {s}", .{try std.mem.join(a, "; ", unchecked.items)});
     if (prebuilts.count() != 0) try say.note(io, "not listed, as prebuilts follow no version bay can read: {s}; bay update <name> <bay+https://…> moves one", .{try std.mem.join(a, ", ", prebuilts.keys())});
+    for (roots.keys(), roots.values()) |key, held| try say.note(io, "{s}'s signature is held to the root {s}; a new root is pinned by bay add again, with --nuget-root", .{ key, held });
 }
 
 /// Whether the upstream pinned as `key` at `url` has a newer tag, which is printed;
