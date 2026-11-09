@@ -289,4 +289,3 @@ fn placedPrebuilt(a: std.mem.Allocator, directory: []const u8, fields: manifest.
     }
     return placed_pin;
 }
-
