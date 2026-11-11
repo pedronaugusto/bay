@@ -19,7 +19,7 @@ packages Zig builds, adding what a Zig manifest has no words for:
 A package developed with bay is still a plain Zig package. Anyone without bay builds
 it with `zig build` from its manifest, as before.
 
-Requires Zig 0.17.0. Work in progress.
+Requires Zig 0.17.
 
 ## Install
 
@@ -38,6 +38,12 @@ with the Zig on the `PATH`, or else the release bay was built with. `zig build d
 builds the program for every host into `zig-out/dist`: `bay-x86_64-linux`,
 `bay-aarch64-linux`, `bay-x86_64-macos`, `bay-aarch64-macos`, `bay-x86_64-windows.exe`
 and `bay-aarch64-windows.exe`.
+
+## Stability
+
+bay is 0.x and tracks Zig 0.17.x. A breaking change, to its commands or to the manifest
+keys it reads, comes only in a minor release (0.2 to 0.3), with a CHANGELOG entry saying
+what changed and what to write instead; a patch release never breaks.
 
 ## A first package
 

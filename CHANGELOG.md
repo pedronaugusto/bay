@@ -17,6 +17,10 @@
 - `bay licenses` knows Apache-2.0 WITH LLVM-exception by its wording, as libc++ ships it; it said Apache-2.0.
 - An upstream with no `build.zig.zon` (a C library's repository, a set of headers), which Zig names by its hash alone, is known by the key that pins it and by its URL: the repository, and the tag a git URL's `?ref=` names, or a GitHub `archive/refs/tags/<tag>` archive or `releases/download/<tag>/` asset. `bay outdated` compares that tag with the repository's tags named the same way (`v1.15`, `VER-2-13-3`; a pre-release never), and `bay licenses` and `bay tree` print the key and the tag. `bay audit` matches the tag against the advisories of the repository the URL comes from. Before, `outdated` passed such a package over, `licenses` listed it as `N-V-… 0.0.0`, and `audit` said only "not read for N-V-…". A series of patches over it in `patches/<key>`, which retrofit applies in the package's build, is counted beside its tag (`+ 2 patches`).
 
+### Changed
+
+- The README states bay's stability policy (0.x, tracking Zig 0.17.x; a breaking change to its commands or manifest keys only in a minor release, with its CHANGELOG entry; a patch release never breaks), where it said work was in progress.
+
 ### Fixed
 
 - `bay outdated` names each package it cannot check and why ("not checked: blob (its URL names no tag)"). Its "every package is at its newest release" line then says "every package checked". It said every package was newest while it had passed over the packages with no manifest, and the packages pinned by an archive URL.
