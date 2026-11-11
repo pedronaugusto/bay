@@ -1010,7 +1010,7 @@ fn today(a: std.mem.Allocator, io: Io) ![]const u8 {
 
 /// "a", "a and b", "a, b and c".
 fn listed(a: std.mem.Allocator, items: []const []const u8) ![]const u8 {
-    std.debug.assert(items.len != 0); // a re-pin names what moved
+    aegis.assert.invariant(items.len != 0, "a re-pin names what moved");
     if (items.len == 1) return items[0];
     return a.print("{s} and {s}", .{ try std.mem.join(a, ", ", items[0 .. items.len - 1]), items[items.len - 1] });
 }

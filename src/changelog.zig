@@ -3,6 +3,7 @@
 //! that release. bay writes releases from it; preflight checks a package's
 //! section against its API with the same reading. std only.
 const std = @import("std");
+const aegis = @import("aegis");
 
 /// A group of the section, in the order a release writes them: breaking
 /// changes first, as the family writes them, then Keep a Changelog's own.
@@ -61,7 +62,7 @@ pub const Change = enum {
 /// the minor and anything else the last number; from 1.0, semver's major, minor
 /// and patch. Pre-release and build parts are not versions a package releases.
 pub fn next(from: std.SemanticVersion, change: Change) std.SemanticVersion {
-    std.debug.assert(change != .none); // nothing changed makes no release
+    aegis.assert.invariant(change != .none, "nothing changed makes no release");
     if (from.major == 0) return switch (change) {
         .breaking => .{ .major = 0, .minor = from.minor + 1, .patch = 0 },
         else => .{ .major = 0, .minor = from.minor, .patch = from.patch + 1 },

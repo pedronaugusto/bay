@@ -128,7 +128,7 @@ pub fn describe(resolution: resolve.Resolution, dependency: manifest.Dependency)
 fn repin(input: Input, moves: *std.ArrayList(Move), text: [:0]const u8, pins: []const manifest.Repin, how: How, resolution: ?resolve.Resolution) ![:0]const u8 {
     var out = text;
     for (pins) |pin| {
-        std.debug.assert(std.mem.eql(u8, pin.directory, input.package)); // a tidy writes only the package's manifest
+        aegis.assert.invariant(std.mem.eql(u8, pin.directory, input.package), "a tidy writes only the package's manifest");
         const to = if (resolution) |r| try describe(r, pin.to) else pin.to.source.remote.hash;
         try moves.append(input.a, .{ .name = pin.from.name, .how = how, .to = to });
         out = try manifest.put(input.a, out, pin.kind, pin.to);
