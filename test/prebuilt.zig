@@ -106,7 +106,7 @@ const Published = struct {
 
     /// Whether bay keeps the archive in its data directory: it was brought.
     fn kept(published: Published, f: *Fixture) bool {
-        const path = std.fs.path.join(f.a, &.{ f.root, "data", "bay", "prebuilt", f.a.print("{x}", .{&published.sha256}) catch return false }) catch return false;
+        const path = f.dataDirPath(&.{ "prebuilt", f.a.print("{x}", .{&published.sha256}) catch return false }) catch return false;
         Io.Dir.cwd().access(f.io, path, .{}) catch return false;
         return true;
     }
@@ -183,12 +183,12 @@ test "a prebuilt pin is brought by bay fetch, checked by its digest and its publ
     // bay keep it: all gone first, so vendoring brings it.
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "app", "zig-pkg" }));
     try layers.uncached(&f);
-    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "data", "bay", "prebuilt" }));
+    try Io.Dir.cwd().deleteTree(f.io, try f.dataDirPath(&.{"prebuilt"}));
     const vendored = try f.bay("app", &.{"vendor"});
     if (!succeeded(vendored)) std.debug.print("{s}\n", .{vendored.stderr});
     try std.testing.expect(succeeded(vendored));
     try layers.uncached(&f);
-    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "data", "bay", "prebuilt" }));
+    try Io.Dir.cwd().deleteTree(f.io, try f.dataDirPath(&.{"prebuilt"}));
     const offline = try f.bay("app", &.{ "build", "run" });
     if (!succeeded(offline)) std.debug.print("{s}\n", .{offline.stderr});
     try std.testing.expect(succeeded(offline));
@@ -486,7 +486,7 @@ test "a prebuilt whose publisher signs with OpenPGP is pinned by the key file it
     // again by the key file the pin names, read from the package's directory.
     try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "app", "zig-pkg" }));
     try layers.uncached(&f);
-    try Io.Dir.cwd().deleteTree(f.io, try std.fs.path.join(a, &.{ f.root, "data", "bay", "prebuilt" }));
+    try Io.Dir.cwd().deleteTree(f.io, try f.dataDirPath(&.{"prebuilt"}));
     const ran = try f.bay("app", &.{ "build", "run" });
     if (!succeeded(ran)) std.debug.print("{s}\n", .{ran.stderr});
     try std.testing.expect(std.mem.find(u8, ran.stderr, "from the signed prebuilt") != null);

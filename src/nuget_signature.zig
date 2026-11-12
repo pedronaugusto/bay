@@ -185,7 +185,8 @@ test "a project with cloak among its tools has its own cloak's check, and one wi
     const remote = (try chosen(a, own, "/p")).?.remote;
     try testing.expectEqualStrings("cloak-0.24.0-AAAA", remote.hash);
     const checkout = try projectWith(a, ".cloak = .{ .path = \"../cloak\" }");
-    try testing.expectEqualStrings("/cloak", (try chosen(a, checkout, "/p")).?.path);
+    // Resolved as the system writes paths: `\cloak` on Windows.
+    try testing.expectEqualStrings(std.fs.path.sep_str ++ "cloak", (try chosen(a, checkout, "/p")).?.path);
     const none = try projectWith(a, ".other = .{ .path = \"../cloak\" }");
     try testing.expectEqual(@as(?Cloak, null), try chosen(a, none, "/p"));
 }

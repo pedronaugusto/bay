@@ -130,7 +130,7 @@ const World = struct {
     fn gateRecord(w: *World, dir: []const u8, tag: []const u8) ![]const u8 {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(try w.out(dir, &.{ "rev-parse", "--absolute-git-dir" }), &digest, .{});
-        const record = try std.fs.path.join(w.f.a, &.{ "data", "bay", "gated", &std.fmt.bytesToHex(digest, .lower), tag });
+        const record = try w.f.dataDir(&.{ "gated", &std.fmt.bytesToHex(digest, .lower), tag });
         return w.f.tmp.dir.readFileAlloc(w.f.io, record, w.f.a, .limited(256)) catch |err| switch (err) {
             error.FileNotFound => "",
             else => return err,

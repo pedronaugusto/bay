@@ -86,11 +86,22 @@ pub const Fixture = struct {
     /// so that what builds with the Zig a manifest names downloads nothing: its folder linked
     /// there whole, Zig's lib beside it.
     pub fn installZig(f: *Fixture) !void {
-        const data: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ "local", "bay", "data" } else &.{ "data", "bay" };
-        const toolchains = try std.fs.path.join(f.a, try std.mem.concat(f.a, []const u8, &.{ data, &.{"zig"} }));
+        const toolchains = try f.dataDir(&.{"zig"});
         try f.tmp.dir.createDirPath(f.io, toolchains);
         const installed = std.fs.path.dirname(try Io.Dir.cwd().realPathFileAlloc(f.io, options.zig, f.a)).?; // safe: a file's real path has a folder
         try f.folderLink(installed, try std.fs.path.join(f.a, &.{ toolchains, @import("builtin").zig_version_string }));
+    }
+
+    /// Where bay keeps `rest` of its data, from the fixture's root: under `LOCALAPPDATA` on
+    /// Windows, `XDG_DATA_HOME` elsewhere, as the fixture sets them (`dirs.data`).
+    pub fn dataDir(f: *Fixture, rest: []const []const u8) ![]const u8 {
+        const base: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ "local", "bay", "data" } else &.{ "data", "bay" };
+        return std.fs.path.join(f.a, try std.mem.concat(f.a, []const u8, &.{ base, rest }));
+    }
+
+    /// `dataDir`, as an absolute path.
+    pub fn dataDirPath(f: *Fixture, rest: []const []const u8) ![]const u8 {
+        return std.fs.path.join(f.a, &.{ f.root, try f.dataDir(rest) });
     }
 
     pub fn folderLink(f: *Fixture, target: []const u8, link: []const u8) !void {

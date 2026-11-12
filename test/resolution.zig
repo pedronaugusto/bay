@@ -1331,7 +1331,6 @@ test "two commits that say one version are no longer two contents: the newer one
     try std.testing.expect(succeeded(built));
     try std.testing.expect(std.mem.find(u8, built.stderr, "preflight sees the integration head, gantry sees the integration head") != null);
     // The history fetched is kept: commit objects alone, under bay's data directory.
-    const data: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ f.root, "local", "bay", "data" } else &.{ f.root, "data", "bay" };
-    const history = try std.fs.path.join(f.a, try std.mem.concat(f.a, []const u8, &.{ data, &.{ "history", try f.a.print("glint-{x}.git", .{fingerprint("glint")}) } }));
+    const history = try f.dataDirPath(&.{ "history", try f.a.print("glint-{x}.git", .{fingerprint("glint")}) });
     try std.testing.expect(succeeded(try f.run(".", &.{ "git", "-C", history, "cat-file", "-e", try f.a.print("{s}^{{commit}}", .{older}) })));
 }

@@ -2,7 +2,8 @@
 //! second refuses by name, never runs beside. Two trains once gated one checkout at once, and
 //! the second's build failed on a file the first was writing. The locks are files in bay's data
 //! directory, named for what they hold and its path, and the system lets them go when the
-//! process ends, however it ends.
+//! process ends, however it ends. What holds a lock says so in a file beside it, which no lock
+//! covers: Windows locks the whole of a locked file, so the one refused could not read it there.
 const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
@@ -44,13 +45,14 @@ fn take(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, k
     const locks = try std.fs.path.join(a, &.{ try dirs.data(io, a, environ), "locks" });
     try Io.Dir.cwd().createDirPath(io, locks);
     const file_path = try std.fs.path.join(a, &.{ locks, try name(a, kind, path) });
+    const holder_path = try std.mem.concat(a, u8, &.{ file_path, ".holder" });
     const file = Io.Dir.cwd().createFile(io, file_path, .{ .lock = .exclusive, .lock_nonblocking = true, .truncate = false, .read = true }) catch |err| switch (err) {
         error.WouldBlock => return .{
             .busy = .{
                 .path = path,
-                .holder = aegis.own.readFile(io, Io.Dir.cwd(), file_path, a, .fromRaw(4096)) catch |read| switch (read) {
+                .holder = aegis.own.readFile(io, Io.Dir.cwd(), holder_path, a, .fromRaw(4096)) catch |read| switch (read) {
                     error.Canceled => |e| return e,
-                    // Its holder is still writing what it is; the refusal stands without it.
+                    // Its holder has not written what it is yet; the refusal stands without it.
                     else => "",
                 },
             },
@@ -63,8 +65,7 @@ fn take(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, k
     // A clock set before 1970 reads as midnight.
     const seconds: u64 = @intCast(@max(0, now.raw())); // safe: clamped to zero and up
     const day = (std.time.epoch.EpochSeconds{ .secs = seconds }).getDaySeconds();
-    try file.setLength(io, 0);
-    try file.writePositionalAll(io, try a.print("since {d:0>2}:{d:0>2} UTC", .{ day.getHoursIntoDay(), day.getMinutesIntoHour() }), 0);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = holder_path, .data = try a.print("since {d:0>2}:{d:0>2} UTC", .{ day.getHoursIntoDay(), day.getMinutesIntoHour() }) });
     // Owned from here: its owner binds it where the caller keeps it.
     return .{ .held = .{ .file = .init(file) } };
 }
