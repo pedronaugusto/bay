@@ -456,7 +456,7 @@ test "a release stopped after its commit or its push is finished, and never tags
     try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.1"));
     // A run stopped before its gate ended has no record: the next run gates the commit again,
     // and a ref made by hand where bay once kept the record is no gate passed.
-    try w.f.tmp.dir.deleteTree(w.f.io, "data/bay/gated");
+    try w.f.tmp.dir.deleteTree(w.f.io, try w.f.dataDir(&.{"gated"}));
     try w.git("lib", &.{ "update-ref", "refs/bay/gated/v0.1.1", commit });
     try w.f.tmp.dir.deleteFile(w.f.io, hook);
     const resumed = try w.releaseIn("lib", &.{});
