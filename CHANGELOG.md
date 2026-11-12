@@ -19,6 +19,7 @@
 
 ### Changed
 
+- Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing bay calls changed.
 - The README states bay's stability policy (0.x, tracking Zig 0.17.x; a breaking change to its commands or manifest keys only in a minor release, with its CHANGELOG entry; a patch release never breaks), where it said work was in progress.
 - The contracts left on `std.debug.assert` (a re-pin's list, a tidy's manifest, a release's change) are `aegis.assert.invariant`: they hold in every build.
 
