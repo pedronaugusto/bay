@@ -10,6 +10,7 @@ const manifest = @import("manifest.zig");
 const workspace = @import("workspace.zig");
 const say = @import("say.zig");
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 
 const Member = struct {
     directory: []const u8,
@@ -119,7 +120,7 @@ pub fn train(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]c
 fn order(io: Io, a: std.mem.Allocator, directories: []const []const u8) ![]Member {
     const manifests = try a.alloc(manifest.Manifest, directories.len);
     for (manifests, directories) |*parsed, directory| {
-        const text = try aegis.own.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .fromRaw(1 << 20));
+        const text = (try intake.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .fromRaw(1 << 20))).readForParse();
         parsed.* = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
             error.InvalidManifest => try say.fail(io, "{s}/build.zig.zon is not a manifest bay can read", .{directory}),
             else => |e| return e,
@@ -240,7 +241,7 @@ fn attempt(state: *Run, member: *const Member, a: std.mem.Allocator) Attempt {
     defer give(state);
     const failed: Ended = .{ .outcome = .failed };
     const argv = std.mem.concat(a, []const u8, &.{ &.{state.bay}, state.command }) catch return .{ .ended = failed, .stderr = "bay: out of memory\n" };
-    const result = std.process.run(a, io, .{
+    const result = intake.run(a, io, .{
         .argv = argv,
         .cwd = .{ .path = member.directory },
         .environ_map = state.environ,
@@ -248,7 +249,7 @@ fn attempt(state: *Run, member: *const Member, a: std.mem.Allocator) Attempt {
         .stderr_limit = .limited(64 << 20),
     }) catch |err| return .{ .ended = failed, .stderr = a.print("bay: could not run bay: {t}\n", .{err}) catch "bay: could not run bay\n" };
     const ok = result.term == .exited and result.term.exited == 0;
-    return .{ .ended = if (ok) .{ .outcome = .ok } else failed, .stdout = result.stdout, .stderr = result.stderr };
+    return .{ .ended = if (ok) .{ .outcome = .ok } else failed, .stdout = result.stdout.readForParse(), .stderr = result.stderr.readForParse() };
 }
 
 /// The member at `index`'s end, once its task publishes it.

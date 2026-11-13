@@ -3,7 +3,7 @@
 //! license field, so it is read from the package's license files: an
 //! `SPDX-License-Identifier` line when one is there, else the license's text.
 const std = @import("std");
-const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
@@ -64,7 +64,7 @@ pub fn list(r: resolve.Resolution, dev: bool) !void {
 /// What a prebuilt's licence file, `file` in its tree at `directory`, states: its SPDX line
 /// or wording, read as a package's is, else that bay does not read it.
 fn prebuiltLicense(io: Io, a: std.mem.Allocator, directory: []const u8, file: []const u8) ![]const u8 {
-    const text = aegis.own.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, file }), a, .fromRaw(1 << 20)) catch |err| switch (err) {
+    const text = if (intake.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, file }), a, .fromRaw(1 << 20))) |taken| taken.readForParse() else |err| switch (err) {
         error.FileNotFound => return a.print("no {s} in its tree, which its pin names: look before shipping", .{file}),
         else => |e| return e,
     };
@@ -86,7 +86,7 @@ fn licenseOf(io: Io, a: std.mem.Allocator, directory: []const u8) !?[]const u8 {
     var entries = dir.iterate();
     while (try entries.next(io)) |entry| {
         if (entry.kind != .file or !isLicenseFile(entry.name)) continue;
-        const text = try aegis.own.readFile(io, dir, entry.name, a, .fromRaw(1 << 20));
+        const text = (try intake.readFile(io, dir, entry.name, a, .fromRaw(1 << 20))).readForParse();
         if (try identify(a, text)) |id| {
             for (found.items) |known| {
                 if (std.mem.eql(u8, known, id)) break;

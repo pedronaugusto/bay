@@ -2,6 +2,7 @@
 //! `cargo tree` and Go's `go mod graph` do, `bay outdated` names newer
 //! releases, `bay vendor` keeps every package a build uses in the project.
 const std = @import("std");
+const intake = @import("intake.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
@@ -277,14 +278,14 @@ fn unpack(r: resolve.Resolution, dependencies: []const u8, mode: []const u8, nam
     // Relative to the scratch build, as the store's fetch passes it: Zig 0.17 refuses the
     // path dependencies of a package unpacked under an absolute --pkg-dir.
     const relative = try std.fs.path.join(a, &.{ "..", "..", "..", "zig-pkg" });
-    const result = std.process.run(a, io, .{ .argv = &.{ r.input.zig, "build", mode, "--pkg-dir", relative }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
+    const result = intake.run(a, io, .{ .argv = &.{ r.input.zig, "build", mode, "--pkg-dir", relative }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(io, "could not run {s}: {t}", .{ r.input.zig, err });
     if (result.term != .exited or result.term.exited != 0) {
         // Windows makes a symbolic link only for an account holding the privilege. Zig
         // notes every link it could not make; bay names the first, and what to do.
-        if (builtin.os.tag == .windows) if (linkRefused(result.stderr)) |link|
+        if (builtin.os.tag == .windows) if (linkRefused(result.stderr.readForParse())) |link|
             try say.fail(io, "{s}, with every package below it, lazy ones included, holds a link this account may not make, {s}: Windows makes one only for an account with SeCreateSymbolicLinkPrivilege, the \"Create symbolic links\" right; `bay vendor` without --all-hosts vendors what this host's builds take", .{ name orelse "the graph", link });
-        try say.relay(io, result.stderr);
+        try say.relay(io, result.stderr.readForParse());
         try say.fail(io, "Zig could not unpack the packages into {s}", .{destination});
     }
 }

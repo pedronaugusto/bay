@@ -6,6 +6,7 @@
 //! covers: Windows locks the whole of a locked file, so the one refused could not read it there.
 const std = @import("std");
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
@@ -50,7 +51,7 @@ fn take(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, k
         error.WouldBlock => return .{
             .busy = .{
                 .path = path,
-                .holder = aegis.own.readFile(io, Io.Dir.cwd(), holder_path, a, .fromRaw(4096)) catch |read| switch (read) {
+                .holder = if (intake.readFile(io, Io.Dir.cwd(), holder_path, a, .fromRaw(4096))) |taken| taken.readForParse() else |read| switch (read) {
                     error.Canceled => |e| return e,
                     // Its holder has not written what it is yet; the refusal stands without it.
                     else => "",

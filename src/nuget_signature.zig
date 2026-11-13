@@ -5,6 +5,7 @@
 //! manages, once, and kept by the cloak it was built from; a project that lists cloak among its
 //! own dependencies or tools has its cloak's tool instead (`chosen`).
 const std = @import("std");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const archive = @import("archive.zig");
@@ -47,7 +48,7 @@ pub fn chosen(a: std.mem.Allocator, project: manifest.Manifest, directory: []con
         if (!std.mem.eql(u8, dependency.name, "cloak")) continue;
         return switch (dependency.source) {
             .remote => |remote| .{ .remote = .{ .url = remote.url, .hash = remote.hash } },
-            .path => |path| .{ .path = try std.fs.path.resolve(a, &.{ directory, path }) },
+            .path => |path| .{ .path = try std.fs.path.resolveAlloc(a, &.{ directory, path }) },
         };
     };
     return null;
@@ -68,13 +69,13 @@ pub fn check(c: Context, client: *std.http.Client, package: []const u8, url: []c
     const root_path = try rootFile(c, client, root, pinning);
     const tool = try toolPath(c);
     const hex = std.fmt.bytesToHex(root.sha256, .lower);
-    const result = std.process.run(c.a, io, .{
+    const result = intake.run(c.a, io, .{
         .argv = &.{ tool, "--root", root_path, "--root-sha256", &hex, package },
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(4096),
     }) catch |err| try say.fail(io, "could not run {s}: {t}", .{ tool, err });
     if (result.term == .exited and result.term.exited == 0) return;
-    try say.relay(io, result.stderr);
+    try say.relay(io, result.stderr.readForParse());
     try say.fail(io, "{s}: its author's signature does not hold to the root its pin names ({s})", .{ url, root.url });
 }
 
@@ -86,8 +87,10 @@ fn rootFile(c: Context, client: *std.http.Client, root: manifest.NugetRoot, fres
     const kept = try std.fs.path.join(a, &.{ try dirs.data(io, a, c.environ), "prebuilt", "roots" });
     try Io.Dir.cwd().createDirPath(io, kept);
     const path = try std.fs.path.join(a, &.{ kept, try a.print("{x}.der", .{&root.sha256}) });
-    if (!fresh) if (Io.Dir.cwd().readFileAlloc(io, path, a, .limited(largest_root))) |bytes| {
-        if (holds(bytes, root.sha256)) return path;
+    // glint-ignore: Z026 -- a kept root that cannot be read is downloaded again below
+    if (!fresh) if (intake.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(largest_root))) |kept_root_read| {
+        const kept_root = kept_root_read.readForParse();
+        if (holds(kept_root, root.sha256)) return path;
     } else |_| {};
     try say.note(io, "downloading {s}", .{root.url});
     const bytes = download.getAlloc(client, a, root.url, largest_root) catch |err| try say.fail(io, "could not download the root {s}: {t}", .{ root.url, err });
@@ -122,18 +125,19 @@ fn toolPath(c: Context) ![]const u8 {
     defer lock.close(io);
     if (try exists(io, tool)) return tool;
     try say.note(io, "building {s} from cloak {s}, once", .{ tool_name, remote.hash });
-    const fetched = std.process.run(a, io, .{ .argv = &.{ remote.zig, "fetch", remote.url }, .stdout_limit = .limited(1024), .stderr_limit = .limited(16 * 1024) }) catch |err|
+    const fetched = intake.run(a, io, .{ .argv = &.{ remote.zig, "fetch", remote.url }, .stdout_limit = .limited(1024), .stderr_limit = .limited(16 * 1024) }) catch |err|
         try say.fail(io, "could not run {s} fetch: {t}", .{ remote.zig, err });
     if (fetched.term != .exited or fetched.term.exited != 0) {
-        try say.relay(io, fetched.stderr);
+        try say.relay(io, fetched.stderr.readForParse());
         try say.fail(io, "{s} fetch refused {s}", .{ remote.zig, remote.url });
     }
-    if (!std.mem.eql(u8, std.mem.trim(u8, fetched.stdout, " \n"), remote.hash)) try say.fail(io, "{s} is not the cloak pinned as {s}: it hashes to {s}", .{ remote.url, remote.hash, fetched.stdout });
+    if (!std.mem.eql(u8, std.mem.trim(u8, fetched.stdout.readForParse(), " \n"), remote.hash)) try say.fail(io, "{s} is not the cloak pinned as {s}: it hashes to {s}", .{ remote.url, remote.hash, fetched.stdout.readForParse() });
     // The package as Zig keeps it, unpacked as bay unpacks an archive (its one top directory
     // the tree), and built there.
     const tarball = try std.fs.path.join(a, &.{ try toolchain.globalCache(io, a, remote.zig), "p", try a.print("{s}.tar.gz", .{remote.hash}) });
     const work = try std.fs.path.join(a, &.{ tools, "build" });
     try Io.Dir.cwd().deleteTree(io, work);
+    // glint-ignore: Z026 -- a note that cannot be written leaves the tree behind unsaid, nothing worse
     defer Io.Dir.cwd().deleteTree(io, work) catch |err| say.note(io, "{s} is left behind: {t}", .{ work, err }) catch {};
     const tree = try std.fs.path.join(a, &.{ work, "tree" });
     var diagnostic: archive.Diagnostic = .{};
@@ -148,15 +152,16 @@ fn build(c: Context, tools: []const u8, source: []const u8, zig: []const u8, too
     const a = c.a;
     const prefix = try std.fs.path.join(a, &.{ tools, "build-out" });
     try Io.Dir.cwd().deleteTree(io, prefix);
+    // glint-ignore: Z026 -- a note that cannot be written leaves the tree behind unsaid, nothing worse
     defer Io.Dir.cwd().deleteTree(io, prefix) catch |err| say.note(io, "{s} is left behind: {t}", .{ prefix, err }) catch {};
-    const built = std.process.run(a, io, .{
+    const built = intake.run(a, io, .{
         .argv = &.{ zig, "build", "--prefix", prefix, "-Doptimize=ReleaseSafe" },
         .cwd = .{ .path = source },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
     }) catch |err| try say.fail(io, "could not run {s} build in {s}: {t}", .{ zig, source, err });
     if (built.term != .exited or built.term.exited != 0) {
-        try say.relay(io, built.stderr);
+        try say.relay(io, built.stderr.readForParse());
         try say.fail(io, "cloak's {s} did not build in {s}", .{ tool_name, source });
     }
     try Io.Dir.rename(.cwd(), try std.fs.path.join(a, &.{ prefix, "bin", tool_name }), .cwd(), tool, io);
@@ -174,7 +179,7 @@ fn exists(io: Io, path: []const u8) !bool {
 const testing = std.testing;
 
 fn projectWith(a: std.mem.Allocator, deps: []const u8) !manifest.Manifest {
-    return manifest.parse(a, try a.dupeSentinel(u8, try std.fmt.allocPrint(a, ".{{ .name = .p, .version = \"0.0.0\", .fingerprint = 0x1, .dependencies = .{{}}, .dev_dependencies = .{{ {s} }} }}", .{deps}), 0));
+    return manifest.parse(a, try a.dupeSentinel(u8, try a.print(".{{ .name = .p, .version = \"0.0.0\", .fingerprint = 0x1, .dependencies = .{{}}, .dev_dependencies = .{{ {s} }} }}", .{deps}), 0));
 }
 
 test "a project with cloak among its tools has its own cloak's check, and one without has bay's" {

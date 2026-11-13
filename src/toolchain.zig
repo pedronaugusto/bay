@@ -3,7 +3,7 @@
 //! ziglang.org, its digest and minisign signature verified, unpacked under bay's
 //! data directory in `zig/<version>`, and used from there without the network.
 const std = @import("std");
-const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -30,7 +30,7 @@ const oldest: std.SemanticVersion = .{ .major = 0, .minor = 17, .patch = 0 };
 pub fn forPackage(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8) ![]const u8 {
     if (environ.get("ZIG")) |zig| return zig;
     const manifest_path = try std.fs.path.join(a, &.{ package, "build.zig.zon" });
-    const text = try aegis.own.readFile(io, Io.Dir.cwd(), manifest_path, a, .fromRaw(1 << 20));
+    const text = (try intake.readFile(io, Io.Dir.cwd(), manifest_path, a, .fromRaw(1 << 20))).readForParse();
     const parsed = manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
         error.InvalidManifest => try say.fail(io, "{s} is not a manifest bay can read", .{manifest_path}),
         error.OutOfMemory => |e| return e,
@@ -206,7 +206,7 @@ fn check(io: Io, archive: []const u8, build: Build, verifier: *minisign.Verifier
     const file = try Io.Dir.cwd().openFile(io, archive, .{});
     defer file.close(io);
     var buffer: [64 * 1024]u8 = undefined;
-    var reader = file.readerStreaming(io, &.{});
+    var reader = intake.readerStreaming(file, io, &.{});
     var sha256: Sha256 = .init(.{});
     while (true) {
         try io.checkCancel();
@@ -226,7 +226,7 @@ fn unpack(io: Io, a: std.mem.Allocator, archive: []const u8, into: []const u8) !
     const file = try Io.Dir.cwd().openFile(io, archive, .{});
     defer file.close(io);
     var buffer: [64 * 1024]u8 = undefined;
-    var reader = file.reader(io, &buffer);
+    var reader = intake.reader(file, io, &buffer);
     if (builtin.os.tag == .windows) {
         std.zip.extract(dir, &reader, .{}) catch |err| try say.fail(io, "could not unzip {s}: {t}", .{ archive, err });
         return;
@@ -315,11 +315,11 @@ test {
 
 /// Zig's global cache, as `zig env` reports it.
 pub fn globalCache(io: Io, a: std.mem.Allocator, zig: []const u8) ![]const u8 {
-    const result = std.process.run(a, io, .{ .argv = &.{ zig, "env" }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+    const result = intake.run(a, io, .{ .argv = &.{ zig, "env" }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(io, "could not run {s} env: {t}", .{ zig, err });
     const Env = struct { global_cache_dir: []const u8 };
     var diagnostics: std.zon.parse.Diagnostics = undefined;
-    const env = std.zon.parse.fromSlice(Env, .{ .gpa = a, .arena = a, .source = try a.dupeSentinel(u8, result.stdout, 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
+    const env = std.zon.parse.fromSlice(Env, .{ .gpa = a, .arena = a, .source = try a.dupeSentinel(u8, result.stdout.readForParse(), 0), .diagnostics = &diagnostics, .ignore_unknown_fields = true }) catch
         try say.fail(io, "could not read {s} env", .{zig});
     return env.global_cache_dir;
 }

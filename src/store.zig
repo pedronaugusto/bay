@@ -3,7 +3,7 @@
 //! bay's own unpacked copy of an archive in Zig's global cache (`p/<hash>.tar.gz`);
 //! else fetched by Zig itself, whose hash must be the pin's.
 const std = @import("std");
-const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const select = @import("select.zig");
@@ -46,7 +46,10 @@ pub const Store = struct {
         }) };
         // The project's manifest, read again for its cloak: a manifest bay cannot read is
         // refused where it is read for the graph, so here it only leaves bay's cloak.
-        if (aegis.own.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ package, "build.zig.zon" }), a, .fromRaw(1 << 20))) |text| {
+        // glint-ignore: Z026 -- a manifest bay cannot read is refused where the graph reads it; here it only leaves bay's cloak
+        if (intake.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ package, "build.zig.zon" }), a, .fromRaw(1 << 20))) |text_read| {
+            const text = text_read.readForParse();
+            // glint-ignore: Z026 -- a manifest bay cannot read is refused where the graph reads it; here it only leaves bay's cloak
             if (manifest.parse(a, try a.dupeSentinel(u8, text, 0))) |project| store.cloak = try nuget_signature.chosen(a, project, package) else |_| {}
         } else |_| {}
         return store;
@@ -126,10 +129,10 @@ pub const Store = struct {
         // the path dependencies of a package unpacked under an absolute --pkg-dir absolute,
         // then refuses them ("expected path relative to build root").
         const destination = try std.fs.path.join(store.a, &.{ "..", std.fs.path.basename(store.unpacked) });
-        const result = std.process.run(store.a, store.io, .{ .argv = &.{ store.zig, "build", "--fetch", "--pkg-dir", destination }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
+        const result = intake.run(store.a, store.io, .{ .argv = &.{ store.zig, "build", "--fetch", "--pkg-dir", destination }, .cwd = .{ .path = scratch }, .stderr_limit = .limited(1 << 20) }) catch |err|
             try say.fail(store.io, "could not run {s} build --fetch: {t}", .{ store.zig, err });
         if (result.term != .exited or result.term.exited != 0) {
-            try say.relay(store.io, result.stderr);
+            try say.relay(store.io, result.stderr.readForParse());
             try say.fail(store.io, "could not fetch {s} as it is pinned, {s}", .{ remote.url, remote.hash });
         }
         try Io.Dir.cwd().deleteTree(store.io, scratch);
@@ -181,7 +184,7 @@ pub const Store = struct {
         var out = try Io.Dir.cwd().openDir(io, partial, .{});
         defer out.close(io);
         var buffer: [16 * 1024]u8 = undefined;
-        var reader = archive.reader(io, &buffer);
+        var reader = intake.reader(archive, io, &buffer);
         var window: [std.compress.flate.max_window_len]u8 = undefined;
         var decompress: std.compress.flate.Decompress = .init(&reader.interface, .gzip, &window);
         var diagnostics: std.tar.Diagnostics = .{ .allocator = store.a };
@@ -211,7 +214,7 @@ pub fn developedAt(io: Io, a: std.mem.Allocator, directory: []const u8) !select.
 
 fn read(io: Io, a: std.mem.Allocator, directory: []const u8, place: select.Place, developed: bool) !select.Revision {
     const path = try std.fs.path.join(a, &.{ directory, "build.zig.zon" });
-    const text = aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20)) catch |err| switch (err) {
+    const text = if (intake.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20))) |taken| taken.readForParse() else |err| switch (err) {
         error.FileNotFound => return placed(place),
         else => |e| return e,
     };

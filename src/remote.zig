@@ -181,7 +181,7 @@ fn newestWhere(list: []const Tag, line: ?std.SemanticVersion, retracted: []const
 /// Whether `version` is one of the versions `retracted` names.
 pub fn isRetracted(retracted: []const []const u8, version: std.SemanticVersion) bool {
     for (retracted) |text| {
-        const named = std.SemanticVersion.parse(text) catch continue; // a malformed entry retracts nothing
+        const named = std.SemanticVersion.parse(text) catch continue; // glint-ignore: Z026 -- a malformed entry retracts nothing
         if (named.order(version) == .eq) return true;
     }
     return false;

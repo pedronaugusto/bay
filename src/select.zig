@@ -373,7 +373,7 @@ fn hashed(hash: []const u8) Place {
 }
 
 fn rev(name: []const u8, fingerprint: u64, version: []const u8, hash: []const u8, pins: []const Pin) Revision {
-    return .{ .identity = .{ .name = name, .fingerprint = fingerprint }, .version = Version.parse(version) catch unreachable, .place = hashed(hash), .pins = pins }; // unreachable: test versions are valid
+    return .{ .identity = .{ .name = name, .fingerprint = fingerprint }, .version = Version.parse(version) catch unreachable, .place = hashed(hash), .pins = pins }; // glint-ignore: Z026 -- test versions are valid
 }
 
 /// A revision pinned at `commit` of its repository; a release when `tag` is its version's tag.

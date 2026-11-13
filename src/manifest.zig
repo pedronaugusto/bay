@@ -694,7 +694,7 @@ test "a NuGet pin with a root reads back as written, and a root without its dige
     _ = try std.fmt.hexToBytes(&want, sha);
     try std.testing.expectEqualSlices(u8, &want, &root.sha256);
     const written = try a.print("{f}", .{entryText(parsed.normal[0])});
-    try std.testing.expect(std.mem.indexOf(u8, written, ".publisher = .{ .nuget = .{ .root = \"https://cacerts.digicert.com/DigiCertTrustedRootG4.crt\", .root_sha256 = \"" ++ sha ++ "\" } },") != null);
+    try std.testing.expect(std.mem.find(u8, written, ".publisher = .{ .nuget = .{ .root = \"https://cacerts.digicert.com/DigiCertTrustedRootG4.crt\", .root_sha256 = \"" ++ sha ++ "\" } },") != null);
     const missing = try std.mem.replaceOwned(u8, a, source, ", .root_sha256 = \"" ++ sha ++ "\"", "");
     try std.testing.expectError(error.InvalidManifest, parse(a, try a.dupeSentinel(u8, missing, 0)));
 }

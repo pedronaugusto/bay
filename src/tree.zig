@@ -5,6 +5,7 @@
 //! executable bit from a file's first bytes) is done here too, so what bay writes
 //! hashes as Zig's fetch of the same files.
 const std = @import("std");
+const intake = @import("intake.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const say = @import("say.zig");
@@ -119,7 +120,7 @@ pub fn markExecutables(io: Io, a: std.mem.Allocator, path: []const u8) !void {
         const file = try dir.openFile(io, entry.path, .{});
         defer file.close(io);
         var header: [4]u8 = undefined;
-        const length = try file.readPositional(io, &.{&header}, 0);
+        const length = try intake.readPositional(file, io, &.{&header}, 0);
         if (startsAsProgram(header[0..length])) try file.setPermissions(io, .executable_file);
     }
 }

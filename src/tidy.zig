@@ -6,6 +6,7 @@
 //! without changing the package.
 const std = @import("std");
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const resolve = @import("resolve.zig");
@@ -83,7 +84,7 @@ fn nested(input: Input, own: manifest.Manifest) ![]const Nested {
         }
         if (entry.kind != .file or !std.mem.eql(u8, entry.basename, "build.zig.zon") or std.mem.eql(u8, entry.path, "build.zig.zon")) continue;
         const path = try a.dupe(u8, entry.path);
-        const text = try a.dupeSentinel(u8, try aegis.own.readFile(input.io, dir, path, a, .fromRaw(1 << 20)), 0);
+        const text = try a.dupeSentinel(u8, (try intake.readFile(input.io, dir, path, a, .fromRaw(1 << 20))).readForParse(), 0);
         // A manifest bay cannot read is a fixture's business, as preflight's lint names it.
         const theirs = manifest.parse(a, text) catch |err| switch (err) {
             error.InvalidManifest => continue,

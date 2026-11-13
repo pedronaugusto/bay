@@ -12,6 +12,7 @@
 const std = @import("std");
 const Io = std.Io;
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
 const lock = @import("lock.zig");
@@ -29,7 +30,7 @@ pub const file_name = "machines.zon";
 /// The machines the person named; none when there is no `machines.zon`.
 pub fn load(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map) ![]const Machine {
     const path = try std.fs.path.join(a, &.{ try dirs.config(io, a, environ), file_name });
-    const text = aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20)) catch |err| switch (err) {
+    const text = if (intake.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(1 << 20))) |taken| taken.readForParse() else |err| switch (err) {
         error.FileNotFound => return &.{},
         else => try say.fail(io, "could not read {s}: {t}", .{ path, err }),
     };
@@ -80,7 +81,7 @@ pub const Terminal = aegis.BlockingGuarded(struct {
 /// machine's), and the gate's log, whole, where a red gate's output is read after.
 pub const Output = struct {
     name: ?[]const u8,
-    log: Io.File,
+    log: aegis.own.OwnedIo(Io.File, closeFile),
     terminal: *Terminal,
 };
 
@@ -143,7 +144,7 @@ const bundle_limit: usize = 1 << 30;
 
 /// Gates the bundle's commit on `machine`; whether its gate is green. Its lines go to `output`.
 pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, machine: Machine, request: Request, output: *Output) !bool {
-    const bundle = try aegis.own.readFile(io, Io.Dir.cwd(), request.bundle, a, .fromRaw(bundle_limit));
+    const bundle = (try intake.readFile(io, Io.Dir.cwd(), request.bundle, a, .fromRaw(bundle_limit))).readForParse();
     // The machine's paths are its own: joined with `/`, which Windows takes too.
     const copy = try a.print("{s}/{s}", .{ std.mem.trimEnd(u8, machine.directory, "/\\"), request.repository });
     const argv = try std.mem.concat(a, []const u8, &.{ machine.bay, &.{ "release", "--gate-bundle", copy, "--package", request.package } });
@@ -185,18 +186,20 @@ fn closeFile(file: *Io.File, io: Io) void {
 fn relay(io: Io, file: Io.File, output: *Output) void {
     defer file.close(io);
     var buffer: [16 << 10]u8 = undefined;
-    var reader = file.readerStreaming(io, &buffer);
+    var reader = intake.readerStreaming(file, io, &buffer);
     while (true) {
         const text = (reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             // A line longer than the buffer goes in parts.
             error.StreamTooLong => {
                 const part = reader.interface.buffered();
+                // glint-ignore: Z026 -- a line the terminal or the log refuses ends the relay; the gate's exit says how it ended
                 line(io, output, part) catch return;
                 reader.interface.toss(part.len);
                 continue;
             },
             error.ReadFailed => return,
         }) orelse return;
+        // glint-ignore: Z026 -- a line the terminal or the log refuses ends the relay; the gate's exit says how it ended
         line(io, output, std.mem.trimEnd(u8, text, "\r")) catch return;
     }
 }
@@ -218,8 +221,8 @@ fn write(io: Io, output: *Output, text: []const u8) !void {
         try say.relay(io, text);
         try say.relay(io, "\n");
     }
-    try output.log.writeStreamingAll(io, text);
-    try output.log.writeStreamingAll(io, "\n");
+    try output.log.borrow().writeStreamingAll(io, text);
+    try output.log.borrow().writeStreamingAll(io, "\n");
 }
 
 /// The machine's side of `gate`: the bundle on stdin fetched into the
@@ -228,7 +231,7 @@ fn write(io: Io, output: *Output, text: []const u8) !void {
 /// in it run. Returns the gate's exit code.
 pub fn receive(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, directory: []const u8, package: []const u8) !u8 {
     var input_buffer: [64 << 10]u8 = undefined;
-    var input = Io.File.stdin().readerStreaming(io, &input_buffer);
+    var input = intake.readerStreaming(Io.File.stdin(), io, &input_buffer);
     const bytes = input.interface.allocRemaining(a, .limited(bundle_limit)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => try say.fail(io, "no release commit came on stdin: {t}", .{err}),
@@ -271,8 +274,8 @@ fn git(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, cw
 
 fn gitOutput(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, cwd: ?[]const u8, args: []const []const u8) ![]const u8 {
     const argv = try std.mem.concat(a, []const u8, &.{ &.{"git"}, args });
-    const result = std.process.run(a, io, .{ .argv = argv, .cwd = if (cwd) |path| .{ .path = path } else .inherit, .environ_map = environ }) catch |err|
+    const result = intake.run(a, io, .{ .argv = argv, .cwd = if (cwd) |path| .{ .path = path } else .inherit, .environ_map = environ }) catch |err|
         try say.fail(io, "could not run git: {t}", .{err});
-    if (result.term != .exited or result.term.exited != 0) try say.fail(io, "git {s}: {s}", .{ args[0], std.mem.trim(u8, result.stderr, " \r\n") });
-    return std.mem.trim(u8, result.stdout, " \r\n");
+    if (result.term != .exited or result.term.exited != 0) try say.fail(io, "git {s}: {s}", .{ args[0], std.mem.trim(u8, result.stderr.readForParse(), " \r\n") });
+    return std.mem.trim(u8, result.stdout.readForParse(), " \r\n");
 }

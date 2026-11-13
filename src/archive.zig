@@ -17,6 +17,7 @@
 //! away, empty directories dropped, programs marked by their first bytes.
 const std = @import("std");
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Sha512 = std.crypto.hash.sha2.Sha512;
@@ -145,7 +146,7 @@ pub fn authenticate(io: Io, a: std.mem.Allocator, path: []const u8, expected: Ex
     var witness: Witness = try .of(a, publisher);
     const file = try Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
-    var reader = file.readerStreaming(io, &.{});
+    var reader = intake.readerStreaming(file, io, &.{});
     var sha256: Sha256 = .init(.{});
     var head: [6]u8 = @splat(0);
     var length: u64 = 0;
@@ -344,7 +345,7 @@ const Tar = struct {
     fn open(tar: *Tar, io: Io, a: std.mem.Allocator, archive: Authenticated) !void {
         tar.file = .init(try Io.Dir.cwd().openFile(io, archive.path, .{}));
         errdefer tar.file.deinit(io);
-        tar.reader = tar.file.borrow().reader(io, &tar.buffer);
+        tar.reader = intake.reader(tar.file.borrow().*, io, &tar.buffer);
         tar.diagnostics = .{ .allocator = a };
         const input = &tar.reader.interface;
         const decompressed = switch (archive.format) {
@@ -424,7 +425,7 @@ const Zip = struct {
         _ = a;
         zip.file = .init(try Io.Dir.cwd().openFile(io, archive.path, .{}));
         errdefer zip.file.deinit(io);
-        zip.reader = zip.file.borrow().reader(io, &zip.buffer);
+        zip.reader = intake.reader(zip.file.borrow().*, io, &zip.buffer);
         zip.iterator = std.zip.Iterator.init(&zip.reader) catch return zip.failure();
     }
 
@@ -487,7 +488,7 @@ const Zip = struct {
 /// a later frame declaring more than the first is refused by the decoder.
 fn windowOf(io: Io, file: Io.File) !u32 {
     var bytes: [18]u8 = undefined;
-    const length = try file.readPositional(io, &.{&bytes}, 0);
+    const length = try intake.readPositional(file, io, &.{&bytes}, 0);
     var in: Io.Reader = .fixed(bytes[0..length]);
     _ = in.takeInt(u32, .little) catch return error.Malformed;
     const header = zstd.Decompress.Frame.Zstandard.Header.decode(&in) catch return error.Malformed;
@@ -720,7 +721,7 @@ const Fixture = struct {
 };
 
 fn expectFile(a: std.mem.Allocator, directory: []const u8, name: []const u8, data: []const u8) !void {
-    const text = try aegis.own.readFile(testing.io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, name }), a, .fromRaw(1 << 20));
+    const text = (try intake.readFile(testing.io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, name }), a, .fromRaw(1 << 20))).readForParse();
     try testing.expectEqualStrings(data, text);
 }
 

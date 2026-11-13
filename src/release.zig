@@ -13,6 +13,7 @@
 //! without gating it again. No tag is ever made on a commit no gate passed.
 const std = @import("std");
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const changelog = @import("changelog.zig");
 const manifest = @import("manifest.zig");
@@ -63,12 +64,12 @@ const Ran = struct { ok: bool, out: []const u8, err: []const u8 };
 
 fn git(c: Context, args: []const []const u8) !Ran {
     const argv = try std.mem.concat(c.a, []const u8, &.{ &.{"git"}, args });
-    const result = std.process.run(c.a, c.io, .{ .argv = argv, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
+    const result = intake.run(c.a, c.io, .{ .argv = argv, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
         try say.fail(c.io, "could not run git: {t}", .{err});
     return .{
         .ok = result.term == .exited and result.term.exited == 0,
-        .out = std.mem.trim(u8, result.stdout, " \r\n"),
-        .err = std.mem.trim(u8, result.stderr, " \r\n"),
+        .out = std.mem.trim(u8, result.stdout.readForParse(), " \r\n"),
+        .err = std.mem.trim(u8, result.stderr.readForParse(), " \r\n"),
     };
 }
 
@@ -182,7 +183,7 @@ fn gatedPath(a: std.mem.Allocator, data: []const u8, git_dir: []const u8, tag: [
 
 /// The commit recorded at `path`, or null when there is none.
 fn recorded(io: Io, a: std.mem.Allocator, path: []const u8) !?[]const u8 {
-    const text = aegis.own.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(256)) catch |err| switch (err) {
+    const text = if (intake.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(256))) |taken| taken.readForParse() else |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -204,7 +205,7 @@ fn forget(io: Io, path: []const u8) !void {
 fn read(c: Context, name: []const u8) !?[:0]const u8 {
     var dir = try Io.Dir.cwd().openDir(c.io, c.package, .{});
     defer dir.close(c.io);
-    const text = aegis.own.readFile(c.io, dir, name, c.a, .fromRaw(16 << 20)) catch |err| switch (err) {
+    const text = if (intake.readFile(c.io, dir, name, c.a, .fromRaw(16 << 20))) |taken| taken.readForParse() else |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -400,7 +401,7 @@ fn programs(c: Context, tag: []const u8) ![]const github.Asset {
     while (try it.next(c.io)) |entry| {
         if (entry.kind != .file) continue;
         const name = try c.a.dupe(u8, entry.name);
-        try assets.append(c.a, .{ .name = name, .bytes = try aegis.own.readFile(c.io, dir, name, c.a, .fromRaw(512 << 20)) });
+        try assets.append(c.a, .{ .name = name, .bytes = (try intake.readFile(c.io, dir, name, c.a, .fromRaw(512 << 20))).readForParse() });
     }
     if (assets.items.len == 0) try say.fail(c.io, "the dist step put nothing in {s}", .{built});
     try assets.append(c.a, .{ .name = "SHA256SUMS", .bytes = try github.sums(c.a, assets.items) });
@@ -489,6 +490,7 @@ fn pinsHoldTheirHashes(c: Context, parsed: manifest.Manifest) !void {
 fn isRelease(tags: []const advertised.Tag, revision: []const u8) bool {
     const name = if (std.mem.startsWith(u8, revision, "refs/tags/")) revision["refs/tags/".len..] else revision;
     for (tags) |tag| {
+        // glint-ignore: Z026 -- a tag that names no version is no release
         _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, tag.name, "v")) tag.name[1..] else tag.name) catch continue;
         if (std.mem.eql(u8, tag.name, name)) return true;
         if (git_source.isCommit(revision) and std.mem.eql(u8, tag.commit, revision)) return true;
@@ -669,11 +671,11 @@ fn gateEverywhere(c: Context, gate_machines: []const machines.Machine) !?[]const
         const log = try std.fs.path.join(c.a, &.{ cache, try c.a.print("gate-{s}.log", .{name}) });
         one.* = .{ .where = if (index == 0) "here" else try c.a.print("on {s}", .{name}), .log = log, .output = .{
             .name = if (index == 0) null else name,
-            .log = try Io.Dir.cwd().createFile(c.io, log, .{}),
+            .log = .init(try Io.Dir.cwd().createFile(c.io, log, .{})),
             .terminal = &terminal,
         } };
     }
-    defer for (gates) |one| one.output.log.close(c.io);
+    defer for (gates) |*one| one.output.log.deinit(c.io);
     var group: Io.Group = .init;
     group.async(c.io, gateHere, .{ c, &gates[0] });
     for (gate_machines, gates[1..]) |machine, *one| group.async(c.io, gateThere, .{ c, machine, request, one });
@@ -873,10 +875,10 @@ fn repinned(c: Context) !bool {
 fn bayOut(c: Context, args: []const []const u8) ![]const u8 {
     const bay = c.environ.get("BAY").?; // safe: main sets BAY before any command
     const argv = try std.mem.concat(c.a, []const u8, &.{ &.{bay}, args });
-    const result = std.process.run(c.a, c.io, .{ .argv = argv, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
+    const result = intake.run(c.a, c.io, .{ .argv = argv, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
         try say.fail(c.io, "could not run bay {s}: {t}", .{ args[0], err });
-    if (result.term != .exited or result.term.exited != 0) try say.fail(c.io, "bay {s} failed in {s}: {s}", .{ args[0], c.package, std.mem.trim(u8, result.stderr, " \r\n") });
-    return result.stdout;
+    if (result.term != .exited or result.term.exited != 0) try say.fail(c.io, "bay {s} failed in {s}: {s}", .{ args[0], c.package, std.mem.trim(u8, result.stderr.readForParse(), " \r\n") });
+    return result.stdout.readForParse();
 }
 
 /// This bay run in the package with `args`; a failure stops the member.

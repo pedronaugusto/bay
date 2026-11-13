@@ -1,0 +1,11 @@
+{
+  "seams": [
+    {
+      "file": "src/intake.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "where bytes from outside enter bay: the files it reads whole, the readers it makes, what the programs it runs print, and standard input, a file's bytes and a program's output marked untrusted for the parsers that refine them"
+    }
+  ]
+}

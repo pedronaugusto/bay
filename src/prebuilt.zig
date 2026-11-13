@@ -7,6 +7,7 @@
 //! the pin's.
 const std = @import("std");
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const Sha512 = std.crypto.hash.sha2.Sha512;
 const manifest = @import("manifest.zig");
@@ -230,7 +231,7 @@ fn fetchArchive(c: Context, https: []const u8, kept: []const u8, expected: ?arch
         .none => .none,
         .minisign => |key| .{ .minisign = .{ .key = key, .signature = try download.getAlloc(&client, a, try a.print("{s}.minisig", .{https}), 4096), .file = fileName(https) } },
         .openpgp => |key_file| .{ .openpgp = .{
-            .keys = aegis.own.readFile(io, Io.Dir.cwd(), key_file, a, .fromRaw(1 << 20)) catch |err| try say.fail(io, "could not read {s}, the key {s}'s pin names: {t}", .{ key_file, https, err }),
+            .keys = if (intake.readFile(io, Io.Dir.cwd(), key_file, a, .fromRaw(1 << 20))) |taken| taken.readForParse() else |err| try say.fail(io, "could not read {s}, the key {s}'s pin names: {t}", .{ key_file, https, err }),
             .signature = try download.getAlloc(&client, a, try a.print("{s}.sig", .{https}), 64 * 1024),
         } },
         .nuget => .{ .sha512 = try nugetHash(c, &client, https) },
@@ -261,7 +262,7 @@ fn fetchArchive(c: Context, https: []const u8, kept: []const u8, expected: ?arch
 fn digestOf(c: Context, path: []const u8) !archive.Expected {
     const file = try Io.Dir.cwd().openFile(c.io, path, .{});
     defer file.close(c.io);
-    var reader = file.readerStreaming(c.io, &.{});
+    var reader = intake.readerStreaming(file, c.io, &.{});
     var sha256: std.crypto.hash.sha2.Sha256 = .init(.{});
     var buffer: [64 * 1024]u8 = undefined;
     var length: u64 = 0;
@@ -320,14 +321,14 @@ fn fileName(url: []const u8) []const u8 {
 
 /// Zig's hash of the tree at `tree`, as `zig fetch` prints it, the tree kept in Zig's cache.
 fn zigFetch(c: Context, tree: []const u8) ![]const u8 {
-    const result = std.process.run(c.a, c.io, .{ .argv = &.{ c.zig, "fetch", tree }, .stdout_limit = .limited(1024), .stderr_limit = .limited(1 << 20) }) catch |err|
+    const result = intake.run(c.a, c.io, .{ .argv = &.{ c.zig, "fetch", tree }, .stdout_limit = .limited(1024), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(c.io, "could not run {s} fetch: {t}", .{ c.zig, err });
     if (result.term != .exited or result.term.exited != 0) {
-        try say.relay(c.io, result.stderr);
+        try say.relay(c.io, result.stderr.readForParse());
         try say.fail(c.io, "{s} fetch refused {s}", .{ c.zig, tree });
     }
-    const hash = aegis.input.Untrusted([]const u8).init(result.stdout).parse({}, ZigHash.parse) catch
-        try say.fail(c.io, "{s} fetch printed no package hash for {s}: {s}", .{ c.zig, tree, result.stdout });
+    const hash = aegis.input.Untrusted([]const u8).init(result.stdout.readForParse()).parse({}, ZigHash.parse) catch
+        try say.fail(c.io, "{s} fetch printed no package hash for {s}: {s}", .{ c.zig, tree, result.stdout.readForParse() });
     return hash.text;
 }
 

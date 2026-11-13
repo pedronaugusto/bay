@@ -27,6 +27,7 @@ const release = @import("release.zig");
 const tidying = @import("tidy.zig");
 const machines = @import("machines.zig");
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const ensign = @import("ensign");
 
 /// bay's command line: what each command takes, its help and completions,
@@ -386,7 +387,7 @@ const Env = struct {
     fn readManifest(env: Env) ![:0]const u8 {
         var package_dir = try env.dir();
         defer package_dir.deinit(env.io);
-        const text = try aegis.own.readFile(env.io, package_dir.borrow().*, "build.zig.zon", env.a, .fromRaw(1 << 20));
+        const text = (try intake.readFile(env.io, package_dir.borrow().*, "build.zig.zon", env.a, .fromRaw(1 << 20))).readForParse();
         return env.a.dupeSentinel(u8, text, 0);
     }
 };
@@ -467,9 +468,9 @@ fn bringPrebuilts(env: Env, parsed: manifest.Manifest, resolution: resolve.Resol
     if (lazy.count() == 0) return;
     // Zig names what the configuration asks for, then stops at a prebuilt's URL, which it cannot fetch.
     const probe = try buildArgv(env, parsed, resolution, where, try std.mem.concat(env.a, []const u8, &.{ before, &.{"-l"} }), after);
-    const listed = std.process.run(env.a, env.io, .{ .argv = probe, .cwd = .{ .path = env.package }, .environ_map = env.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+    const listed = intake.run(env.a, env.io, .{ .argv = probe, .cwd = .{ .path = env.package }, .environ_map = env.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
-    var lines = std.mem.splitScalar(u8, listed.stderr, '\n');
+    var lines = std.mem.splitScalar(u8, listed.stderr.readForParse(), '\n');
     while (lines.next()) |line| {
         const at = std.mem.find(u8, line, asks_lazy) orelse continue;
         const hash = std.mem.trim(u8, line[at + asks_lazy.len ..], " \r");
@@ -483,9 +484,9 @@ const Listing = struct { configured: bool, stdout: []const u8, stderr: []const u
 
 fn stepsOf(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where) !Listing {
     const argv = try buildArgv(env, parsed, resolution, where, &.{"-l"}, &.{});
-    const listed = std.process.run(env.a, env.io, .{ .argv = argv, .cwd = .{ .path = env.package }, .environ_map = env.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+    const listed = intake.run(env.a, env.io, .{ .argv = argv, .cwd = .{ .path = env.package }, .environ_map = env.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
-    return .{ .configured = listed.term == .exited and listed.term.exited == 0, .stdout = listed.stdout, .stderr = listed.stderr };
+    return .{ .configured = listed.term == .exited and listed.term.exited == 0, .stdout = listed.stdout.readForParse(), .stderr = listed.stderr.readForParse() };
 }
 
 /// The zig build command line over a resolved graph: `before` ahead of the
@@ -870,7 +871,7 @@ fn local(env: Env, path: []const u8, name: ?[]const u8) !manifest.Dependency {
     if (name) |given| return .{ .name = given, .source = .{ .path = relative } };
     var dir = try Io.Dir.cwd().openDir(env.io, absolute, .{});
     defer dir.close(env.io);
-    const text = aegis.own.readFile(env.io, dir, "build.zig.zon", env.a, .fromRaw(1 << 20)) catch try say.fail(env.io, "{s} has no build.zig.zon; name it with --name", .{path});
+    const text = if (intake.readFile(env.io, dir, "build.zig.zon", env.a, .fromRaw(1 << 20))) |taken| taken.readForParse() else |_| try say.fail(env.io, "{s} has no build.zig.zon; name it with --name", .{path});
     const parsed = try manifest.parse(env.a, try env.a.dupeSentinel(u8, text, 0));
     return .{ .name = parsed.name, .source = .{ .path = relative } };
 }
@@ -1102,9 +1103,9 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
             else => return 1,
         }
     }
-    const text = try aegis.own.readFile(io, dir, "build.zig.zon", a, .fromRaw(1 << 20));
+    const text = (try intake.readFile(io, dir, "build.zig.zon", a, .fromRaw(1 << 20))).readForParse();
     if (try manifest.ensureList(a, try a.dupeSentinel(u8, text, 0), .dev)) |edited| try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = edited });
-    const build = aegis.own.readFile(io, dir, "build.zig", a, .fromRaw(1 << 20)) catch |err| switch (err) {
+    const build = if (intake.readFile(io, dir, "build.zig", a, .fromRaw(1 << 20))) |taken| taken.readForParse() else |err| switch (err) {
         error.FileNotFound => try say.fail(io, "build.zig.zon has no build.zig beside it", .{}),
         else => return err,
     };

@@ -7,7 +7,7 @@
 //! repository's newest release is also what `bay add` pins and `bay install`
 //! builds when given the repository's URL.
 const std = @import("std");
-const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
 const remotes = @import("remote.zig");
@@ -37,6 +37,7 @@ pub fn plan(a: std.mem.Allocator, owners: []const Owned, members: []const manife
     const Member = struct { version: std.SemanticVersion, fingerprint: u64, released: ?manifest.Dependency = null, looked: bool = false };
     var versions: std.array_hash_map.String(Member) = .empty;
     for (members) |parsed| {
+        // glint-ignore: Z026 -- a member whose version is no semantic version has no release to re-pin
         const version = std.SemanticVersion.parse(parsed.version) catch continue;
         try versions.put(a, parsed.name, .{ .version = version, .fingerprint = parsed.fingerprint });
     }
@@ -131,7 +132,7 @@ const Remote = struct {
 };
 
 fn read(io: Io, a: std.mem.Allocator, directory: []const u8) !manifest.Manifest {
-    const text = try aegis.own.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .fromRaw(1 << 20));
+    const text = (try intake.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ directory, "build.zig.zon" }), a, .fromRaw(1 << 20))).readForParse();
     return manifest.parse(a, try a.dupeSentinel(u8, text, 0)) catch |err| switch (err) {
         error.InvalidManifest => try say.fail(io, "{s}/build.zig.zon is not a manifest bay can read", .{directory}),
         else => |e| return e,

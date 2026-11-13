@@ -9,6 +9,7 @@
 //! URL like any other: Zig builds it from the cache and never fetches it.
 const std = @import("std");
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Io = std.Io;
 const say = @import("say.zig");
 const tree = @import("tree.zig");
@@ -61,16 +62,16 @@ pub fn fetch(io: Io, a: std.mem.Allocator, zig: []const u8, scratch: []const u8,
     _ = try git(io, a, null, &.{ "init", "--quiet", "--bare", repository });
     _ = try git(io, a, repository, &.{ "fetch", "--quiet", "--depth", "1", p.repository, commit });
     try checkout(io, a, repository, commit, files);
-    const hashed = std.process.run(a, io, .{ .argv = &.{ zig, "fetch", files }, .stdout_limit = .limited(1 << 16), .stderr_limit = .limited(1 << 20) }) catch |err|
+    const hashed = intake.run(a, io, .{ .argv = &.{ zig, "fetch", files }, .stdout_limit = .limited(1 << 16), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(io, "could not run {s} fetch: {t}", .{ zig, err });
     if (hashed.term != .exited or hashed.term.exited != 0) {
-        try say.relay(io, hashed.stderr);
+        try say.relay(io, hashed.stderr.readForParse());
         try say.fail(io, "{s} at {s} is not a package Zig can hash", .{ p.repository, commit });
     }
     try Io.Dir.cwd().deleteTree(io, scratch);
     return .{
         .url = if (ref) |name| try a.print("git+{s}?ref={s}#{s}", .{ p.repository, name, commit }) else try a.print("git+{s}#{s}", .{ p.repository, commit }),
-        .hash = try a.dupe(u8, std.mem.trim(u8, hashed.stdout, " \r\n")),
+        .hash = try a.dupe(u8, std.mem.trim(u8, hashed.stdout.readForParse(), " \r\n")),
     };
 }
 
@@ -220,7 +221,7 @@ const Objects = struct {
         })) };
         const child = objects.child.borrow();
         objects.in = child.stdin.?.writerStreaming(io, &objects.in_buffer); // safe: stdin is piped
-        objects.out = child.stdout.?.readerStreaming(io, &objects.out_buffer); // safe: stdout is piped
+        objects.out = intake.readerStreaming(child.stdout.?, io, &objects.out_buffer); // safe: stdout is piped
         return objects;
     }
 
@@ -313,10 +314,10 @@ pub const History = struct {
 /// question git answers by its exit code.
 fn status(io: Io, a: std.mem.Allocator, directory: []const u8, args: []const []const u8) !struct { code: u8, stderr: []const u8 } {
     const argv = try std.mem.concat(a, []const u8, &.{ &.{ "git", "-C", directory }, args });
-    const result = std.process.run(a, io, .{ .argv = argv, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+    const result = intake.run(a, io, .{ .argv = argv, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(io, "could not run git: {t}", .{err});
     return switch (result.term) {
-        .exited => |code| .{ .code = code, .stderr = result.stderr },
+        .exited => |code| .{ .code = code, .stderr = result.stderr.readForParse() },
         else => try say.fail(io, "git {s} did not end as asked", .{args[0]}),
     };
 }
@@ -328,13 +329,13 @@ fn git(io: Io, a: std.mem.Allocator, directory: ?[]const u8, args: []const []con
     try argv.append(a, "git");
     if (directory) |path| try argv.appendSlice(a, &.{ "-C", path });
     try argv.appendSlice(a, args);
-    const result = std.process.run(a, io, .{ .argv = argv.items, .stdout_limit = .limited(256 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
+    const result = intake.run(a, io, .{ .argv = argv.items, .stdout_limit = .limited(256 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(io, "could not run git: {t}", .{err});
     if (result.term != .exited or result.term.exited != 0) {
-        try say.relay(io, result.stderr);
+        try say.relay(io, result.stderr.readForParse());
         try say.fail(io, "git {s} failed", .{args[0]});
     }
-    return result.stdout;
+    return result.stdout.readForParse();
 }
 
 test "a pinned git URL's repository, ref and commit" {
