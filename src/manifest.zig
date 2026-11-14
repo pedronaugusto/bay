@@ -746,6 +746,60 @@ test "any bytes parse or are refused, and a dependency put into what parses pars
     try shakedown.check(std.testing.allocator, {}, property.body, .{});
 }
 
+test "dependencies written in every form a manifest takes parse back as written" {
+    const shakedown = @import("shakedown");
+    const property = struct {
+        fn body(_: void, case: *shakedown.Case) anyerror!void {
+            var arena: std.heap.ArenaAllocator = .init(case.gpa);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var normal: std.Io.Writer.Allocating = .init(a);
+            var dev: std.Io.Writer.Allocating = .init(a);
+            var wants: [2]std.ArrayList(Dependency) = .{ .empty, .empty };
+            const spellings = [_][]const u8{ "", "-core", "_x" };
+            for (0..shakedown.gen.intRange(case.source, usize, 0, 10)) |n| {
+                const name = try a.print("d{d}{s}", .{ n, spellings[shakedown.gen.intRange(case.source, usize, 0, spellings.len - 1)] });
+                const kind = shakedown.gen.intRange(case.source, usize, 0, 1);
+                const lazy = shakedown.gen.boolean(case.source);
+                const source: Source = if (shakedown.gen.boolean(case.source))
+                    .{ .remote = .{ .url = try a.print("git+https://example.org/{s}#{d}", .{ name, n }), .hash = try a.print("{s}-0.{d}.0-x", .{ name, n }) } }
+                else
+                    .{ .path = try a.print("../{s}", .{name}) };
+                const w = if (kind == 0) &normal.writer else &dev.writer;
+                try w.print(".{f} = .{{ ", .{std.zig.fmtIdPU(name)});
+                switch (source) {
+                    .remote => |remote| try w.print(".url = \"{s}\", .hash = \"{s}\"", .{ remote.url, remote.hash }),
+                    .path => |path| try w.print(".path = \"{s}\"", .{path}),
+                }
+                // Written false as often as left out: both are a dependency fetched at once.
+                if (lazy) try w.writeAll(", .lazy = true") else if (shakedown.gen.boolean(case.source)) try w.writeAll(", .lazy = false");
+                try w.writeAll(" }, ");
+                try wants[kind].append(a, .{ .name = name, .source = source, .lazy = lazy });
+            }
+            const text = try a.dupeSentinel(u8, try a.print(".{{ .name = .demo, .version = \"0.0.0\", .dependencies = .{{ {s}}}, .dev_dependencies = .{{ {s}}} }}", .{ normal.written(), dev.written() }), 0);
+            errdefer std.debug.print("manifest: {s}\n", .{text});
+            const parsed = try parse(a, text);
+            for ([_][]const Dependency{ parsed.normal, parsed.dev }, wants) |got, want| {
+                try std.testing.expectEqual(want.items.len, got.len);
+                for (want.items, got) |w, g| {
+                    try std.testing.expectEqualStrings(w.name, g.name);
+                    try std.testing.expectEqual(w.lazy, g.lazy);
+                    try std.testing.expectEqual(std.meta.activeTag(w.source), std.meta.activeTag(g.source));
+                    switch (w.source) {
+                        .remote => |remote| {
+                            try std.testing.expectEqualStrings(remote.url, g.source.remote.url);
+                            try std.testing.expectEqualStrings(remote.hash, g.source.remote.hash);
+                        },
+                        .path => |path| try std.testing.expectEqualStrings(path, g.source.path),
+                    }
+                    try std.testing.expectEqual(null, g.prebuilt);
+                }
+            }
+        }
+    };
+    try shakedown.check(std.testing.allocator, {}, property.body, .{});
+}
+
 fn parseAny(bytes: []const u8) anyerror!void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

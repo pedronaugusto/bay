@@ -171,6 +171,58 @@ test "a link's target reaches a path inside the tree, or nothing when it leaves 
     }
 }
 
+test "a link's target made of steps up and names reaches the path they lead to, or nothing past the tree's root" {
+    const shakedown = @import("shakedown");
+    const property = struct {
+        fn body(_: void, case: *shakedown.Case) anyerror!void {
+            var arena: std.heap.ArenaAllocator = .init(case.gpa);
+            defer arena.deinit();
+            const a = arena.allocator();
+            // The link sits `depth` folders down; its target climbs `up` of them, then names `down` more.
+            const depth = shakedown.gen.intRange(case.source, usize, 0, 4);
+            const up = shakedown.gen.intRange(case.source, usize, 0, depth + 2);
+            const down = shakedown.gen.intRange(case.source, usize, 0, 3);
+            var link: std.ArrayList(u8) = .empty;
+            var folders: std.ArrayList([]const u8) = .empty;
+            for (0..depth) |n| {
+                const folder = try a.print("f{d}", .{n});
+                try folders.append(a, folder);
+                try link.print(a, "{s}/", .{folder});
+            }
+            try link.appendSlice(a, "link");
+            // Steps that go nowhere (`.`, a doubled `/`) between the others, never first: a target
+            // starting with `/` is absolute.
+            var target: std.ArrayList(u8) = .empty;
+            var names: std.ArrayList([]const u8) = .empty;
+            const steps = up + down;
+            for (0..steps) |n| {
+                if (n != 0) {
+                    try target.append(a, '/');
+                    switch (shakedown.gen.intRange(case.source, u8, 0, 3)) {
+                        0 => try target.appendSlice(a, "./"),
+                        1 => try target.append(a, '/'),
+                        else => {},
+                    }
+                }
+                if (n < up) try target.appendSlice(a, "..") else {
+                    const name = try a.print("n{d}", .{n});
+                    try names.append(a, name);
+                    try target.appendSlice(a, name);
+                }
+            }
+            if (steps == 0) try target.append(a, '.');
+            errdefer std.debug.print("link {s} -> {s}\n", .{ link.items, target.items });
+            const parsed = try LinkTarget.parse(.{ .a = a, .link = link.items }, target.items);
+            try std.testing.expectEqualStrings(target.items, parsed.text);
+            if (up > depth) return std.testing.expectEqual(null, parsed.within);
+            const reached = try std.mem.join(a, "/", try std.mem.concat(a, []const u8, &.{ folders.items[0 .. depth - up], names.items }));
+            if (reached.len == 0) return std.testing.expectEqual(null, parsed.within);
+            try std.testing.expectEqualStrings(reached, parsed.within orelse return error.TestUnexpectedResult);
+        }
+    };
+    try shakedown.check(std.testing.allocator, {}, property.body, .{});
+}
+
 test "a folder that is a link is found on a path" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
