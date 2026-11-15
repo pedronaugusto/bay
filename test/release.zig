@@ -25,8 +25,18 @@ const gate_program =
     \\    const head = try std.process.run(a, io, .{ .argv = &.{ "git", "rev-parse", "HEAD" }, .environ_map = init.environ_map });
     \\    const sha = std.mem.trim(u8, head.stdout, " \r\n");
     \\    const log = init.environ_map.get("GATE_LOG") orelse return error.NoGateLog;
+    \\    // Gates run side by side, and a clock may tick in microseconds (a Mac's): a name taken
+    \\    // by another gate's record is passed over for the next free one, made exclusively.
     \\    const now = std.Io.Clock.real.now(io).toNanoseconds();
-    \\    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/{s}-{d}", .{ log, sha, now }), .data = init.environ_map.get("PREFLIGHT_PORTABLE") orelse "unset" });
+    \\    var n: usize = 0;
+    \\    const file = while (true) : (n += 1) {
+    \\        break std.Io.Dir.cwd().createFile(io, try std.fmt.allocPrint(a, "{s}/{s}-{d}-{d}", .{ log, sha, now, n }), .{ .exclusive = true }) catch |err| switch (err) {
+    \\            error.PathAlreadyExists => continue,
+    \\            else => |e| return e,
+    \\        };
+    \\    };
+    \\    defer file.close(io);
+    \\    try file.writeStreamingAll(io, init.environ_map.get("PREFLIGHT_PORTABLE") orelse "unset");
     \\    if (std.Io.Dir.cwd().access(io, "red", .{})) |_| return error.Red else |_| {}
     \\}
     \\
