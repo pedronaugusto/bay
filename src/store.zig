@@ -13,6 +13,9 @@ const say = @import("say.zig");
 const git = @import("git.zig");
 const prebuilt = @import("prebuilt.zig");
 const tree = @import("tree.zig");
+const archive_ = @import("archive.zig");
+const aegis = @import("aegis");
+const warp = @import("warp");
 const dirs = @import("dirs.zig");
 const scratchManifest = @import("root.zig").scratchManifest;
 
@@ -185,19 +188,33 @@ pub const Store = struct {
         defer out.close(io);
         var buffer: [16 * 1024]u8 = undefined;
         var reader = intake.reader(archive, io, &buffer);
-        var window: [std.compress.flate.max_window_len]u8 = undefined;
-        var decompress: std.compress.flate.Decompress = .init(&reader.interface, .gzip, &window);
-        var diagnostics: std.tar.Diagnostics = .{ .allocator = store.a };
-        try std.tar.extract(io, out, &decompress.reader, .{ .diagnostics = &diagnostics, .mode_mode = .ignore, .exclude_empty_directories = true });
-        if (diagnostics.errors.items.len != 0) try say.fail(io, "{s} did not unpack: {d} entries failed", .{ archive_path, diagnostics.errors.items.len });
+        const options: warp.Inflate.Options = .{ .accept = .gzip };
+        var decompress = warp.Inflate.Reader.init(&reader.interface, try store.a.alloc(u8, options.windowLen() + 4096), options) catch |err| switch (err) {
+            error.InvalidOptions, error.BufferTooSmall => aegis.assert.never("gzip at the default window, in a buffer of its length and the reader's 4 KiB"),
+        };
+        archive_.extractTar(io, store.a, out, &decompress.interface, null) catch |err| switch (err) {
+            error.ReadFailed => if (reader.err) |cause| return cause else try say.fail(io, "{s} did not unpack: {t}", .{ archive_path, decompress.err() orelse err }),
+            else => try say.fail(io, "{s} did not unpack: {t}", .{ archive_path, err }),
+        };
         // An archive holding one directory holds the package in it.
-        const root = if (diagnostics.root_dir.len != 0) try std.fs.path.join(store.a, &.{ partial, diagnostics.root_dir }) else partial;
+        const root = if (try onlyDirectory(io, store.a, partial)) |top| try std.fs.path.join(store.a, &.{ partial, top }) else partial;
         try tree.markExecutables(io, store.a, root);
         try Io.Dir.cwd().rename(root, Io.Dir.cwd(), destination, io);
         if (root.len != partial.len) try Io.Dir.cwd().deleteTree(io, partial);
         return destination;
     }
 };
+
+/// The one directory `dir` holds, when it holds nothing else: an archive's top directory, which
+/// Zig takes away.
+fn onlyDirectory(io: Io, a: std.mem.Allocator, path: []const u8) !?[]const u8 {
+    var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    const first = try it.next(io) orelse return null;
+    if (first.kind != .directory or try it.next(io) != null) return null;
+    return try a.dupe(u8, first.name);
+}
 
 /// The revision whose files are in `directory`: its manifest read, its pins
 /// with path dependencies made absolute. A package without a manifest pins

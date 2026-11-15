@@ -666,11 +666,13 @@ test "a workspace's train releases its members in order, each pinned at the rele
 }
 
 /// GitHub's API as a test scripts it: a server on the loopback that answers each request in
-/// turn, one connection per request, and keeps what each asked. Closing it ends `serve`.
+/// turn, one connection per request, and keeps what each asked. `stop` ends `serve`.
 const FakeGitHub = struct {
     server: Io.net.Server,
     replies: []const Reply = &.{},
     seen: std.ArrayList(Seen) = .empty,
+    /// Set by `stop`: the connection `serve` takes next ends it, unanswered.
+    stopping: std.atomic.Value(bool) = .init(false),
 
     const Reply = struct { status: std.http.Status, body: []const u8 };
     const Seen = struct { method: std.http.Method, target: []const u8, authorization: []const u8, body: []const u8 };
@@ -685,12 +687,24 @@ const FakeGitHub = struct {
     }
 
     fn serve(f: *FakeGitHub, io: Io, a: std.mem.Allocator) void {
-        for (f.replies) |reply| f.answer(io, a, reply) catch return;
+        for (f.replies) |reply| {
+            const stream = f.server.accept(io) catch return;
+            defer stream.close(io);
+            if (f.stopping.load(.acquire)) return;
+            f.answer(io, a, stream, reply) catch return;
+        }
     }
 
-    fn answer(f: *FakeGitHub, io: Io, a: std.mem.Allocator, reply: Reply) !void {
-        const stream = try f.server.accept(io);
-        defer stream.close(io);
+    /// Ends `serve`: a connection it takes once `stopping` is set, which wakes it where it
+    /// waits in `accept` for a reply bay did not ask for. Where it has answered every reply,
+    /// the connection waits in the listen queue until the server is closed.
+    fn stop(f: *FakeGitHub, io: Io) !void {
+        f.stopping.store(true, .release);
+        const wake = try f.server.socket.address.connect(io, .{ .mode = .stream });
+        wake.close(io);
+    }
+
+    fn answer(f: *FakeGitHub, io: Io, a: std.mem.Allocator, stream: Io.net.Stream, reply: Reply) !void {
         var in_buffer: [16 * 1024]u8 = @splat(0);
         var out_buffer: [16 * 1024]u8 = @splat(0);
         var in = stream.reader(io, &in_buffer);
@@ -718,10 +732,11 @@ const FakeGitHub = struct {
         try w.f.env.put("GITHUB_TOKEN", token);
         defer _ = w.f.env.swapRemove("GITHUB_TOKEN");
         const thread = try std.Thread.spawn(.{}, serve, .{ f, w.f.io, w.f.a });
-        const result = try w.releaseIn(dir, &.{});
-        // A reply bay did not ask for leaves `serve` waiting: closing the server ends it.
-        f.server.deinit(w.f.io);
+        const result = w.releaseIn(dir, &.{});
+        // `serve` ends before the server it accepts on is closed.
+        try f.stop(w.f.io);
         thread.join();
+        f.server.deinit(w.f.io);
         f.* = .{ .server = (try init(w.f.io)).server, .seen = f.seen };
         return result;
     }

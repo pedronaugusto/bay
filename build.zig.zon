@@ -16,19 +16,29 @@
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock#55f0265ad74ceff3ea14a1fca316f82aa3f45ae8",
-            .hash = "airlock-0.6.0-rfvu6DdECADPsZW3JjI6jPRt-hpplrgrRaA4M4Ey7e8W",
+            .url = "git+https://github.com/pedronaugusto/airlock#0f9e91526b1c9dbe5193bb6ae3e127057a6d2961",
+            .hash = "airlock-0.6.0-rfvu6ApsCAA0DHgkbjaviDMWCgIXXdIcXeOhIV4nlwP-",
+        },
+
+        .hold = .{
+            .url = "git+https://github.com/pedronaugusto/hold#47bf34e5bec755d595fb9119b422c11002800002",
+            .hash = "hold-0.1.1-jtBierv2BQCnb6FZNqtzlEwiHwl6LoNFmuIIEloRU5Hd",
+        },
+
+        .warp = .{
+            .url = "git+https://github.com/pedronaugusto/warp#79a4611d2189a355afd5cf6af89bbbd5025fbea1",
+            .hash = "warp-0.4.5-JASxFVJULgAVkMEA-ELTZWZq3mSEwYCUywr0x51UMUTB",
         },
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#c2f441b69549de7094bf2e1a3f5b25854f4cd8d2",
-            .hash = "preflight-0.18.6-LX1ZwhOnGgDnSB12naxqofLH0PVBlxm-mW9-jiyZZnbR",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#f991816b108a21e4508924e3c220fcc36615aa77",
+            .hash = "preflight-0.18.6-LX1Zwnv-GwCkV_vbReMV3ld3WZ9xyw7vAG1gSja5eupx",
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#acd95d337b222e0223e60b923b5abae8d33bfaf2",
-            .hash = "shakedown-0.6.0-BR8U435LGADOWAz8MqgysJwuG83P_RkOlBLEo8e130Sm",
+            .url = "git+https://github.com/pedronaugusto/shakedown#327bc61dc5cdf6ac93865684847f4451ac3eced9",
+            .hash = "shakedown-0.6.0-BR8U4ztYGwBShgx6F8H8RO6Qq21kxUXUUuzu2J5WG2Ci",
         },
     },
 }

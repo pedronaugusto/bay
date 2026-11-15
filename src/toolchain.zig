@@ -4,6 +4,8 @@
 //! data directory in `zig/<version>`, and used from there without the network.
 const std = @import("std");
 const intake = @import("intake.zig");
+const archive_ = @import("archive.zig");
+const warp = @import("warp");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -228,16 +230,20 @@ fn unpack(io: Io, a: std.mem.Allocator, archive: []const u8, into: []const u8) !
     var buffer: [64 * 1024]u8 = undefined;
     var reader = intake.reader(file, io, &buffer);
     if (builtin.os.tag == .windows) {
-        std.zip.extract(dir, &reader, .{}) catch |err| try say.fail(io, "could not unzip {s}: {t}", .{ archive, err });
+        archive_.extractZip(io, a, dir, &reader, null) catch |err| switch (err) {
+            error.ReadFailed => try say.fail(io, "could not read {s}: {t}", .{ archive, reader.err orelse err }),
+            else => try say.fail(io, "could not unzip {s}: {t}", .{ archive, err }),
+        };
         return;
     }
-    var xz = std.compress.xz.Decompress.init(&reader.interface, a, &.{}) catch |err|
-        try say.fail(io, "{s} is not xz: {t}", .{ archive, err });
+    var xz_buffer: [16 * 1024]u8 = undefined;
+    var xz: warp.xz.Decompress.Reader = .init(a, &reader.interface, &xz_buffer, warp.xz.Decompress.windowLength(archive_.xz_dictionary_max), .{});
     defer xz.deinit();
-    std.tar.extract(io, dir, &xz.reader, .{}) catch |err| switch (err) {
+    archive_.extractTar(io, a, dir, &xz.interface, null) catch |err| switch (err) {
         error.ReadFailed => {
             if (reader.err) |cause| try say.fail(io, "could not read {s}: {t}", .{ archive, cause });
-            try say.fail(io, "could not unpack {s}: {t}", .{ archive, xz.err orelse err });
+            if (xz.err()) |cause| try say.fail(io, "{s} is not the xz it should be: {t}", .{ archive, cause });
+            try say.fail(io, "could not unpack {s}: {t}", .{ archive, err });
         },
         else => try say.fail(io, "could not unpack {s}: {t}", .{ archive, err }),
     };

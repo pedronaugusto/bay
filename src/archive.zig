@@ -1,11 +1,11 @@
 //! The archives bay unpacks itself: a prebuilt pin's (designs/bay.md §11), which
 //! Zig's fetch refuses. Three formats, told by their first bytes, never by a name or
 //! what the server calls them: a tar compressed by gzip or by zstd, and a zip of
-//! stored or deflated entries (a NuGet package is one). xz is refused by name, so
-//! std's xz reader, which panics where a tar is skipped through (`discard`), is never
-//! reached; bzip2 has no decoder in std. A zip is read by std's own reader, an
-//! encrypted entry refused, and its CRCs are not checked (std's `verify_checksums`
-//! panics, unwritten).
+//! stored or deflated entries (a NuGet package is one). xz and bzip2 are refused by
+//! name. Every archive byte goes through hold's tar and zip readers and warp's
+//! decoders, which check each length they read; std's readers, which stop the program
+//! on some malformed archives, never see one. A zip's encrypted entries are refused,
+//! and each entry's CRC-32 is checked.
 //!
 //! An archive is read only once it is authenticated (`authenticate`): its size and
 //! SHA-256 those the pin holds, then its publisher's signature over its bytes, so
@@ -15,14 +15,18 @@
 //! tree, links last, through tree.zig, as git's checkout is written. The tree is the
 //! one Zig's own fetch makes of the same archive: a single top directory taken
 //! away, empty directories dropped, programs marked by their first bytes.
+//!
+//! Zig's own archives (a toolchain, a package Zig keeps) are written by hold's
+//! extraction instead (`extractTar`, `extractZip`).
 const std = @import("std");
 const aegis = @import("aegis");
 const intake = @import("intake.zig");
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Sha512 = std.crypto.hash.sha2.Sha512;
-const zstd = std.compress.zstd;
 const flate = std.compress.flate;
+const hold = @import("hold");
+const warp = @import("warp");
 const openpgp = @import("openpgp.zig");
 const minisign = @import("minisign.zig");
 const tree = @import("tree.zig");
@@ -177,9 +181,10 @@ pub fn authenticate(io: Io, a: std.mem.Allocator, path: []const u8, expected: Ex
 pub const zstd_window_max: u64 = 128 << 20;
 
 pub const UnpackError = error{
-    /// The compressed stream, the tar in it, or the zip is not one std reads.
+    /// The compressed stream, the tar in it, or the zip is malformed, or an entry is not
+    /// what its zip record declares.
     Malformed,
-    /// A zstd frame declares a window above `zstd_window_max`, or none.
+    /// A zstd frame declares a window above `zstd_window_max`.
     WindowTooLarge,
     /// An entry other than a file, a directory or a symbolic link: a hard link, a device.
     UnsupportedEntry,
@@ -326,72 +331,69 @@ fn closeFile(file: *Io.File, io: Io) void {
     file.close(io);
 }
 
-/// A tar's entries, read through the archive's decompressor.
+/// A tar's entries, read by hold's tar reader through warp's decompressor.
 const Tar = struct {
     file: aegis.own.OwnedIo(Io.File, closeFile),
     reader: Io.File.Reader,
     buffer: [64 * 1024]u8,
-    /// The decompressor the tar is read through, and its window.
-    decompress: union(enum) { gzip: flate.Decompress, zstd: zstd.Decompress },
-    window: []u8,
-    iterator: std.tar.Iterator,
-    /// The entry `next` found last.
-    current: std.tar.Iterator.File,
-    diagnostics: std.tar.Diagnostics,
-    file_name: [Io.Dir.max_path_bytes]u8,
-    link_name: [Io.Dir.max_path_bytes]u8,
+    /// The decompressor the tar is read through; its buffer is the window.
+    decompress: union(enum) { gzip: warp.Inflate.Reader, zstd: warp.zstd.Decompress.Reader },
+    tar: hold.tar.Reader,
+    contents_buffer: [16 * 1024]u8,
 
     /// Opens the archive in place: the readers point into `tar`.
     fn open(tar: *Tar, io: Io, a: std.mem.Allocator, archive: Authenticated) !void {
         tar.file = .init(try Io.Dir.cwd().openFile(io, archive.path, .{}));
         errdefer tar.file.deinit(io);
         tar.reader = intake.reader(tar.file.borrow().*, io, &tar.buffer);
-        tar.diagnostics = .{ .allocator = a };
         const input = &tar.reader.interface;
         const decompressed = switch (archive.format) {
             .tar_gzip => gzip: {
-                tar.window = try a.alloc(u8, flate.max_window_len);
-                tar.decompress = .{ .gzip = .init(input, .gzip, tar.window) };
-                break :gzip &tar.decompress.gzip.reader;
+                const options: warp.Inflate.Options = .{ .accept = .gzip };
+                tar.decompress = .{ .gzip = warp.Inflate.Reader.init(input, try a.alloc(u8, options.windowLen() + 4096), options) catch |err| switch (err) {
+                    error.InvalidOptions, error.BufferTooSmall => aegis.assert.never("gzip at the default window, in a buffer of its length and the reader's 4 KiB"),
+                } };
+                break :gzip &tar.decompress.gzip.interface;
             },
             .tar_zstd => zstd: {
                 const window = try windowOf(io, tar.file.borrow().*);
-                tar.window = try a.alloc(u8, window + zstd.block_size_max);
-                tar.decompress = .{ .zstd = .init(input, tar.window, .{ .window_len = window }) };
-                break :zstd &tar.decompress.zstd.reader;
+                tar.decompress = .{ .zstd = .init(input, try a.alloc(u8, 4096 + window.size + window.block), .{}) };
+                break :zstd &tar.decompress.zstd.interface;
             },
             .zip => unreachable, // unpack reads a zip as a Zip
         };
-        tar.iterator = .init(decompressed, .{ .file_name_buffer = &tar.file_name, .link_name_buffer = &tar.link_name, .diagnostics = &tar.diagnostics });
+        tar.tar = .init(a, decompressed, &tar.contents_buffer, .{});
     }
 
     fn close(tar: *Tar, io: Io) void {
+        tar.tar.deinit();
         tar.file.deinit(io);
     }
 
     /// The next file, directory or link; an entry of another kind is refused by name.
     fn next(tar: *Tar, a: std.mem.Allocator, diagnostic: *Diagnostic) !?Entry {
-        const file = tar.iterator.next() catch |err| switch (err) {
+        const entry = (tar.tar.next() catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.ReadFailed => return tar.failure(),
-            else => return error.Malformed,
-        };
-        for (tar.diagnostics.errors.items) |refused| switch (refused) {
-            .unsupported_file_type => |entry| {
-                diagnostic.entry = try a.dupe(u8, entry.file_name);
+            error.Invalid, error.Truncated, error.LimitExceeded => return error.Malformed,
+        }) orelse return null;
+        const kind: std.tar.FileKind = switch (entry.kind) {
+            .file => .file,
+            .directory => .directory,
+            .symlink => .sym_link,
+            .hardlink, .character_device, .block_device, .fifo, .other => {
+                diagnostic.entry = try a.dupe(u8, entry.name);
                 return error.UnsupportedEntry;
             },
-            else => return error.Malformed,
         };
-        tar.current = file orelse return null;
-        return .{ .name = tar.current.name, .kind = tar.current.kind, .size = tar.current.size, .link = tar.current.link_name };
+        return .{ .name = entry.name, .kind = kind, .size = if (kind == .file) entry.size else 0, .link = entry.link };
     }
 
     /// The file `next` found, written to `w`.
     fn contents(tar: *Tar, w: *Io.Writer) !void {
-        tar.iterator.streamRemaining(tar.current, w) catch |err| switch (err) {
+        _ = tar.tar.contents().streamRemaining(w) catch |err| switch (err) {
             error.WriteFailed => |e| return e,
-            error.ReadFailed, error.EndOfStream => return tar.failure(),
+            error.ReadFailed => return tar.failure(),
         };
     }
 
@@ -399,8 +401,8 @@ const Tar = struct {
     fn failure(tar: *Tar) anyerror {
         if (tar.reader.err) |err| return err;
         return switch (tar.decompress) {
-            .zstd => |d| if (d.err) |err| switch (err) {
-                error.WindowOversize, error.WindowSizeUnknown => error.WindowTooLarge,
+            .zstd => |*d| if (d.err()) |err| switch (err) {
+                error.WindowTooLarge => error.WindowTooLarge,
                 else => error.Malformed,
             } else error.Malformed,
             .gzip => error.Malformed,
@@ -408,75 +410,81 @@ const Tar = struct {
     }
 };
 
-/// A zip's entries, in its central directory's order, read by std's zip reader: stored or
-/// deflated, never encrypted, each written by `Entry.extractTo` exactly as long as the
-/// directory says it is, and no CRC checked.
+/// A zip's entries, in its central directory's order, read by hold's zip reader, which
+/// checks every record against the archive's bounds before any is read: stored or deflated
+/// (what Zig's fetch reads), never encrypted, each exactly as long as the directory says and
+/// its CRC-32 checked.
 const Zip = struct {
     file: aegis.own.OwnedIo(Io.File, closeFile),
     reader: Io.File.Reader,
     buffer: [64 * 1024]u8,
-    iterator: std.zip.Iterator,
+    archive: hold.zip.Archive,
+    records: hold.zip.Archive.Iterator,
     /// The entry `next` found last.
-    current: std.zip.Iterator.Entry,
-    name: [Io.Dir.max_path_bytes]u8,
+    current: hold.zip.Record,
+    contents_buffer: [16 * 1024]u8,
 
-    /// Opens the archive in place: the reader points into `zip`.
+    /// Opens the archive in place: the readers point into `zip`.
     fn open(zip: *Zip, io: Io, a: std.mem.Allocator, archive: Authenticated) !void {
-        _ = a;
         zip.file = .init(try Io.Dir.cwd().openFile(io, archive.path, .{}));
         errdefer zip.file.deinit(io);
         zip.reader = intake.reader(zip.file.borrow().*, io, &zip.buffer);
-        zip.iterator = std.zip.Iterator.init(&zip.reader) catch return zip.failure();
+        zip.archive = hold.zip.Archive.open(a, .{ .file = &zip.reader }, .{}) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.ReadFailed => return zip.failure(),
+            else => return error.Malformed,
+        };
+        zip.records = zip.archive.iterate();
     }
 
     fn close(zip: *Zip, io: Io) void {
+        zip.archive.deinit();
         zip.file.deinit(io);
     }
 
     /// The next file or directory; an entry encrypted or compressed otherwise is refused,
-    /// by name where the directory gives one.
+    /// naming it.
     fn next(zip: *Zip, a: std.mem.Allocator, diagnostic: *Diagnostic) !?Entry {
-        const entry = (zip.iterator.next() catch |err| switch (err) {
-            error.ZipEncryptionUnsupported => return error.Encrypted,
-            else => return zip.failure(),
-        }) orelse return null;
-        // The name as std reads it, whatever the method: std reads no name of an entry
-        // compressed otherwise, and such an entry is refused naming it.
-        var named = entry;
-        named.compression_method = .store;
-        const name = named.getFilename(&zip.reader, &zip.name, .{}) catch |err| switch (err) {
-            // Read before std refuses it: a backslash, absolute, or `..`.
-            error.ZipFilenameHasBackslash, error.ZipBadFilename => {
-                diagnostic.entry = try a.dupe(u8, zip.name[0..entry.filename_len]);
-                return error.UnsafeName;
-            },
-            else => return zip.failure(),
-        };
-        switch (entry.compression_method) {
-            .store, .deflate => {},
+        const record = zip.records.next() orelse return null;
+        // The name's bytes as the record holds them, as Zig's fetch reads a zip's names.
+        const name = record.raw_name;
+        if (record.encryption != .none) {
+            diagnostic.entry = try a.dupe(u8, name);
+            return error.Encrypted;
+        }
+        switch (record.method) {
+            .stored, .deflate => {},
             else => {
                 diagnostic.entry = try a.dupe(u8, name);
                 return error.UnsupportedMethod;
             },
         }
         // A stored entry is its bytes: stored at another length than it declares, it is no zip.
-        if (entry.compression_method == .store and entry.compressed_size != entry.uncompressed_size) return error.Malformed;
+        if (record.method == .stored and record.compressed != record.entry.size) return error.Malformed;
+        if (name.len == 0) return error.Malformed;
         // A directory's name ends in a slash, and it holds no bytes.
         const directory = name[name.len - 1] == '/';
-        if (directory and entry.uncompressed_size != 0) return error.Malformed;
-        zip.current = entry;
-        return .{ .name = name, .kind = if (directory) .directory else .file, .size = entry.uncompressed_size, .link = "" };
+        if (directory and record.entry.size != 0) return error.Malformed;
+        zip.current = record;
+        return .{ .name = name, .kind = if (directory) .directory else .file, .size = record.entry.size, .link = "" };
     }
 
     /// The file `next` found, written to `w`.
     fn contents(zip: *Zip, w: *Io.Writer) !void {
-        zip.current.extractTo(&zip.reader, w) catch |err| switch (err) {
+        var entry: hold.zip.Archive.Contents = undefined;
+        zip.archive.contents(&entry, zip.current, &zip.contents_buffer, .{}) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.ReadFailed => return zip.failure(),
+            else => return error.Malformed,
+        };
+        defer entry.deinit();
+        _ = entry.reader().streamRemaining(w) catch |err| switch (err) {
             error.WriteFailed => |e| return e,
-            else => return zip.failure(),
+            error.ReadFailed => return if (entry.err() != null) error.Malformed else zip.failure(),
         };
     }
 
-    /// Why reading stopped: the file's error, or the zip's being none std reads.
+    /// Why reading stopped: the file's error, or the zip's being none hold reads.
     fn failure(zip: *Zip) anyerror {
         if (zip.reader.err) |err| return err;
         if (zip.reader.seek_err) |err| return err;
@@ -484,17 +492,40 @@ const Zip = struct {
     }
 };
 
-/// The window the archive's first zstd frame declares, refused above `zstd_window_max`;
-/// a later frame declaring more than the first is refused by the decoder.
-fn windowOf(io: Io, file: Io.File) !u32 {
+/// The window the archive's first zstd frame declares, refused above `zstd_window_max`, and
+/// the largest block it may hold; a later frame declaring more than the first is refused by
+/// the decoder (`WindowTooLarge`).
+fn windowOf(io: Io, file: Io.File) !struct { size: usize, block: usize } {
     var bytes: [18]u8 = undefined;
     const length = try intake.readPositional(file, io, &.{&bytes}, 0);
-    var in: Io.Reader = .fixed(bytes[0..length]);
-    _ = in.takeInt(u32, .little) catch return error.Malformed;
-    const header = zstd.Decompress.Frame.Zstandard.Header.decode(&in) catch return error.Malformed;
-    const window = header.windowSize() orelse return error.WindowTooLarge;
-    if (window > zstd_window_max) return error.WindowTooLarge;
-    return @intCast(window); // safe: at most zstd_window_max
+    const frame = warp.zstd.frameHeader(bytes[0..length], .standard) catch return error.Malformed;
+    const header = switch (frame) {
+        .zstd => |h| h,
+        // A tar is in zstd frames; a skippable frame first is no such archive.
+        .skippable => return error.Malformed,
+    };
+    if (header.window_size > zstd_window_max) return error.WindowTooLarge;
+    return .{ .size = @intCast(header.window_size), .block = header.blockMax() }; // safe: at most zstd_window_max
+}
+
+/// The largest xz dictionary bay decodes, as `zstd_window_max`: xz's own presets reach 64 MiB.
+pub const xz_dictionary_max: u64 = 128 << 20;
+
+/// Extracts the tar `input` gives into `dir` under hold's hostile-input rules: names kept
+/// inside, links only where they stay inside, no devices, permissions as Python's `data`
+/// filter leaves them. Zig's own archives (a toolchain, a package Zig keeps) are read so.
+pub fn extractTar(io: Io, a: std.mem.Allocator, dir: Io.Dir, input: *Io.Reader, diagnostic: ?*hold.Diagnostic) hold.Extract.Error!void {
+    var buffer: [16 * 1024]u8 = undefined;
+    var tar: hold.tar.Reader = .init(a, input, &buffer, .{ .diagnostic = diagnostic });
+    defer tar.deinit();
+    _ = try hold.extract(io, a, dir, .{ .tar = &tar }, .{ .times = false, .diagnostic = diagnostic });
+}
+
+/// Extracts the zip `file` holds into `dir`, as `extractTar` a tar.
+pub fn extractZip(io: Io, a: std.mem.Allocator, dir: Io.Dir, file: *Io.File.Reader, diagnostic: ?*hold.Diagnostic) (hold.zip.Archive.OpenError || hold.Extract.Error)!void {
+    var zip = try hold.zip.Archive.open(a, .{ .file = file }, .{ .diagnostic = diagnostic });
+    defer zip.deinit();
+    _ = try hold.extract(io, a, dir, .{ .zip = &zip }, .{ .times = false, .diagnostic = diagnostic });
 }
 
 /// `name` made relative and plain, as Zig's tar reader takes it (`.` and empty parts
@@ -895,8 +926,7 @@ test "a zip entry encrypted, compressed by another method, climbing out, or larg
     defer arena.deinit();
     const a = arena.allocator();
     for ([_]struct { members: []const ZipMember, err: anyerror, entry: []const u8 }{
-        // std's reader refuses an encrypted entry before it reads its name.
-        .{ .members = &.{ .{ .name = "pkg/a", .data = "a" }, .{ .name = "pkg/secret", .data = "x", .encrypted = true } }, .err = error.Encrypted, .entry = "" },
+        .{ .members = &.{ .{ .name = "pkg/a", .data = "a" }, .{ .name = "pkg/secret", .data = "x", .encrypted = true } }, .err = error.Encrypted, .entry = "pkg/secret" },
         // LZMA, method 14.
         .{ .members = &.{.{ .name = "pkg/a", .data = "a", .method = @fromBackingInt(14) }}, .err = error.UnsupportedMethod, .entry = "pkg/a" },
         .{ .members = &.{ .{ .name = "pkg/a", .data = "a" }, .{ .name = "pkg/../escape", .data = "x" } }, .err = error.UnsafeName, .entry = "pkg/../escape" },
@@ -926,25 +956,51 @@ test "a zip cut short, or whose entry's header disagrees with its directory, is 
     defer cut.deinit();
     var diagnostic: Diagnostic = .{};
     try testing.expectError(error.Malformed, cut.unpacked(a, &diagnostic));
-    // The entry's own header names another length than the directory does.
+    // The entry's own header names another method than the directory does (stored for deflated).
     const changed = try a.dupe(u8, zip);
-    changed[@offsetOf(std.zip.LocalFileHeader, "uncompressed_size")] ^= 1;
+    changed[@offsetOf(std.zip.LocalFileHeader, "compression_method")] ^= 8;
     var disagreeing: Fixture = try .init(a, changed);
     defer disagreeing.deinit();
     try testing.expectError(error.Malformed, disagreeing.unpacked(a, &diagnostic));
 }
 
-test "a zip entry holding more than it declares is never written past its declared size, and a stored one is refused" {
+test "a zip entry holding more than it declares is refused, deflated or stored" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // Its contents end at the declared size with more of the stream left, or its CRC-32 is
+    // not that of the declared bytes: either way the entry is not what its record says.
     var deflated: Fixture = try .init(a, try zipOf(a, &.{.{ .name = "pkg/a", .data = "declared, and more", .declared = 8 }}));
     defer deflated.deinit();
     var diagnostic: Diagnostic = .{};
-    try expectFile(a, try deflated.unpacked(a, &diagnostic), "a", "declared");
+    try testing.expectError(error.Malformed, deflated.unpacked(a, &diagnostic));
     var stored: Fixture = try .init(a, try zipOf(a, &.{.{ .name = "pkg/a", .data = "declared, and more", .method = .store, .declared = 8 }}));
     defer stored.deinit();
     try testing.expectError(error.Malformed, stored.unpacked(a, &diagnostic));
+}
+
+test "a zip whose directory record's name, extra and comment lengths pass 64 KiB together is refused, not read past" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // An empty entry's local header, then its directory record naming a 65,535-byte name the
+    // archive does not hold, then the end record. std's reader summed the record's lengths in
+    // 16 bits and stopped the program (the release tier's fuzz finding, 2026-11-15).
+    var zip: [30 + 46 + 22]u8 = @splat(0);
+    zip[0..4].* = "PK\x03\x04".*;
+    const record = zip[30..][0..46];
+    record[0..4].* = "PK\x01\x02".*;
+    std.mem.writeInt(u16, record[28..30], 0xffff, .little);
+    const end = zip[76..][0..22];
+    end[0..4].* = "PK\x05\x06".*;
+    std.mem.writeInt(u16, end[8..10], 1, .little);
+    std.mem.writeInt(u16, end[10..12], 1, .little);
+    std.mem.writeInt(u32, end[12..16], 46, .little);
+    std.mem.writeInt(u32, end[16..20], 30, .little);
+    var fixture: Fixture = try .init(a, &zip);
+    defer fixture.deinit();
+    var diagnostic: Diagnostic = .{};
+    try testing.expectError(error.Malformed, fixture.unpacked(a, &diagnostic));
 }
 
 test "any bytes made from a zip unpack within the bound or are refused" {
@@ -961,7 +1017,8 @@ test "any bytes made from a zip unpack within the bound or are refused" {
     const where = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
     const Context = struct { examples: []const []const u8, tmp: Io.Dir, path: []const u8, into: []const u8 };
     const property = struct {
-        const bound = 4096;
+        // Under what the examples hold, so a tree past it is one an unpack must refuse.
+        const bound = 12;
         fn body(context: Context, case: *shakedown.Case) anyerror!void {
             var bytes: [4096]u8 = undefined;
             const input = shakedown.gen.mutated(case.source, &bytes, context.examples);
@@ -993,6 +1050,112 @@ test "any bytes made from a zip unpack within the bound or are refused" {
         .path = try std.fs.path.join(a, &.{ where, "archive" }),
         .into = try std.fs.path.join(a, &.{ where, "tree" }),
     }, property.body, .{});
+}
+
+test "any bytes made from a tar, in gzip or in zstd, unpack within the bound or are refused" {
+    const shakedown = @import("shakedown");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tars: []const []const u8 = &.{
+        try tarOf(a, &.{ .{ .name = "pkg", .kind = .directory }, .{ .name = "pkg/bin/tool", .data = "#!/bin/sh\n" }, .{ .name = "pkg/bin/lib", .kind = .link, .data = "../lib" }, .{ .name = "pkg/lib/a", .data = "library" } }),
+        try tarOf(a, &.{ .{ .name = "a", .data = "one" }, .{ .name = "b", .kind = .hard_link, .data = "a" } }),
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const where = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    const Context = struct { tars: []const []const u8, tmp: Io.Dir, path: []const u8, into: []const u8 };
+    const property = struct {
+        // Under what the examples hold, so a tree past it is one an unpack must refuse.
+        const bound = 12;
+        fn body(context: Context, case: *shakedown.Case) anyerror!void {
+            var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer scratch.deinit();
+            const s = scratch.allocator();
+            // The tar's bytes changed and then compressed, so the tar reader meets them; or the
+            // compressed stream's own bytes changed, so the decompressor does.
+            var bytes: [4096]u8 = undefined;
+            const zstd = shakedown.gen.boolean(case.source);
+            const input = if (shakedown.gen.boolean(case.source)) compressed: {
+                const tar = shakedown.gen.mutated(case.source, &bytes, context.tars);
+                break :compressed if (zstd) try zstdOf(s, tar, 10) else try gzipOf(s, tar);
+            } else raw: {
+                var streams: [2][]const u8 = undefined;
+                for (context.tars, &streams) |tar, *stream| stream.* = if (zstd) try zstdOf(s, tar, 10) else try gzipOf(s, tar);
+                break :raw shakedown.gen.mutated(case.source, &bytes, &streams);
+            };
+            try context.tmp.deleteTree(testing.io, "tree");
+            try context.tmp.writeFile(testing.io, .{ .sub_path = "archive", .data = input });
+            var digest: [Sha256.digest_length]u8 = undefined;
+            Sha256.hash(input, &digest, .{});
+            const archive = authenticate(testing.io, s, context.path, .{ .sha256 = digest, .size = input.len }, .none) catch return;
+            if (archive.format == .zip) return;
+            var diagnostic: Diagnostic = .{};
+            unpack(testing.io, s, archive, context.into, bound, &diagnostic) catch return;
+            // What was written is no larger than the bound, every byte of it in the tree.
+            var dir = try context.tmp.openDir(testing.io, "tree", .{ .iterate = true });
+            defer dir.close(testing.io);
+            var walker = try dir.walk(s);
+            var total: u64 = 0;
+            while (try walker.next(testing.io)) |entry| {
+                if (entry.kind == .file) total += (try entry.dir.statFile(testing.io, entry.basename, .{})).size;
+            }
+            try testing.expect(total <= bound);
+        }
+    };
+    try shakedown.check(testing.allocator, Context{
+        .tars = tars,
+        .tmp = tmp.dir,
+        .path = try std.fs.path.join(a, &.{ where, "archive" }),
+        .into = try std.fs.path.join(a, &.{ where, "tree" }),
+    }, property.body, .{});
+}
+
+test "any bytes made from a tar in gzip or xz, or from a zip, extract as Zig's own archives do or are refused" {
+    const shakedown = @import("shakedown");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tar = try tarOf(a, &.{ .{ .name = "zig", .kind = .directory }, .{ .name = "zig/zig", .data = "\x7fELF" }, .{ .name = "zig/lib/std", .kind = .link, .data = "../std" }, .{ .name = "zig/a", .data = "one" }, .{ .name = "zig/b", .kind = .hard_link, .data = "zig/a" } });
+    var xz: warp.xz.Compressor = try .init(a, .{});
+    const xz_bytes = try a.alloc(u8, warp.xz.Compressor.bound(.{}, tar.len));
+    const examples: []const []const u8 = &.{ try gzipOf(a, tar), xz_bytes[0..try xz.compress(tar, xz_bytes)], try zipOf(a, &.{ .{ .name = "zig/", .method = .store }, .{ .name = "zig/zig.exe", .data = "MZ" } }) };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Context = struct { examples: []const []const u8, tmp: Io.Dir };
+    const property = struct {
+        fn body(context: Context, case: *shakedown.Case) anyerror!void {
+            var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer scratch.deinit();
+            const s = scratch.allocator();
+            var bytes: [4096]u8 = undefined;
+            const input = shakedown.gen.mutated(case.source, &bytes, context.examples);
+            try context.tmp.deleteTree(testing.io, "tree");
+            var out = try context.tmp.createDirPathOpen(testing.io, "tree", .{});
+            defer out.close(testing.io);
+            if (std.mem.startsWith(u8, input, "PK")) {
+                try context.tmp.writeFile(testing.io, .{ .sub_path = "archive", .data = input });
+                const file = try context.tmp.openFile(testing.io, "archive", .{});
+                defer file.close(testing.io);
+                var buffer: [4096]u8 = undefined;
+                var reader = intake.reader(file, testing.io, &buffer);
+                extractZip(testing.io, s, out, &reader, null) catch return;
+                return;
+            }
+            var in: Io.Reader = .fixed(input);
+            var window_buffer: [16 * 1024]u8 = undefined;
+            if (std.mem.startsWith(u8, input, "\x1f\x8b")) {
+                const options: warp.Inflate.Options = .{ .accept = .gzip };
+                var gzip = try warp.Inflate.Reader.init(&in, try s.alloc(u8, options.windowLen() + 4096), options);
+                extractTar(testing.io, s, out, &gzip.interface, null) catch return;
+            } else {
+                var reader: warp.xz.Decompress.Reader = .init(s, &in, &window_buffer, warp.xz.Decompress.windowLength(1 << 20), .{});
+                defer reader.deinit();
+                extractTar(testing.io, s, out, &reader.interface, null) catch return;
+            }
+        }
+    };
+    try shakedown.check(testing.allocator, Context{ .examples = examples, .tmp = tmp.dir }, property.body, .{});
 }
 
 test "a minisign signature naming the archive, or the SHA-512 its publisher's index holds, vouches for it; another does not" {

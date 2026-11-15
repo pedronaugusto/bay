@@ -1,7 +1,7 @@
 const std = @import("std");
 const zon = @import("build.zig.zon");
 
-/// The bay program: std, aegis, airlock and ensign; and the `changelog` module, std only. Its tests are
+/// The bay program: std, aegis, airlock, ensign, hold and warp; and the `changelog` module, std only. Its tests are
 /// its development build's (`bay test`).
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -41,39 +41,47 @@ pub fn dev(b: *std.Build, tools: type) void {
     const step = b.step("test", "Run the tests");
     const check = b.step("check", "Compile the program and the tests without running them");
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown");
-    tests(b, package, target, optimize, shakedown, step, check);
+    const test_filter = b.option([]const u8, "test-filter", "Run only the tests whose names hold this");
+    const filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
+    tests(b, package, target, optimize, shakedown, filters, step, check);
     // The release tier fuzzes the properties and runs the suite under ThreadSanitizer: a
     // workspace runs its members on threads of its own.
     tools.preflight.addCi(b, package, .{ .tests = step, .test_timeout = .{ .bound = .{ .limit = .fromSeconds(300), .reason = "an end-to-end test builds its fixtures' packages with Zig from cold, a build runner each, which a hosted Windows runner or a shared machine takes past two minutes" } }, .hardened = .{ .fuzz_step = "test", .tsan_step = "test" } });
 }
 
-/// bay's root module from `package`'s sources, built in `b`, with aegis, airlock and ensign.
+/// bay's root module from `package`'s sources, built in `b`, with aegis, airlock, ensign, and hold
+/// and warp, which read the archives it unpacks.
 fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize) *std.Build.Module {
     const aegis = package.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const airlock = package.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock");
     const ensign = package.dependency("ensign", .{ .target = target, .optimize = optimize }).module("ensign");
+    const hold = package.dependency("hold", .{ .target = target, .optimize = optimize }).module("hold");
+    const warp = package.dependency("warp", .{ .target = target, .optimize = optimize }).module("warp");
     const own = b.addOptions();
     own.addOption([]const u8, "version", zon.version);
     return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "aegis", .module = aegis },
         .{ .name = "airlock", .module = airlock },
         .{ .name = "ensign", .module = ensign },
+        .{ .name = "hold", .module = hold },
+        .{ .name = "warp", .module = warp },
         .{ .name = "own", .module = own.createModule() },
     } });
 }
 
 /// The unit tests, their properties on `shakedown`, and bay end to end over real packages,
-/// run with the Zig that builds it. `step` runs them; `check` only compiles them, and the program.
-fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize, shakedown: *std.Build.Module, step: *std.Build.Step, check: *std.Build.Step) void {
+/// run with the Zig that builds it, those named by `filters` alone when there are any. `step` runs
+/// them; `check` only compiles them, and the program.
+fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.lang.Optimize, shakedown: *std.Build.Module, filters: []const []const u8, step: *std.Build.Step, check: *std.Build.Step) void {
     // The tests' one way of linking a folder, tested on its own.
     const link = b.createModule(.{ .root_source_file = package.path("test/link.zig"), .target = target, .optimize = optimize });
-    const link_test = b.addTest(.{ .root_module = link });
+    const link_test = b.addTest(.{ .root_module = link, .filters = filters });
     step.dependOn(&b.addRunArtifact(link_test).step);
     check.dependOn(&link_test.step);
     const unit_module = program(b, package, target, optimize);
     unit_module.addImport("shakedown", shakedown);
     unit_module.addImport("link", link);
-    const unit = b.addTest(.{ .root_module = unit_module });
+    const unit = b.addTest(.{ .root_module = unit_module, .filters = filters });
     step.dependOn(&b.addRunArtifact(unit).step);
     check.dependOn(&unit.step);
     const exe = b.addExecutable(.{ .name = "bay", .root_module = program(b, package, target, optimize) });
@@ -93,7 +101,7 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
             .target = target,
             .optimize = optimize,
             .imports = &.{ .{ .name = "options", .module = options.createModule() }, .{ .name = "link", .module = link } },
-        }) });
+        }), .filters = filters });
         check.dependOn(&end_to_end.step);
         // End to end, bay runs the Zig that builds it, which runs on this host alone: a
         // build for another machine (the riscv64 kernel's leg) runs the unit tests there.

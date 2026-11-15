@@ -171,7 +171,7 @@ fn unpacked(c: Context, url: []const u8, authenticated: archive.Authenticated, b
     var diagnostic: archive.Diagnostic = .{};
     archive.unpack(io, c.a, authenticated, tree, bound, &diagnostic) catch |err| switch (err) {
         error.Malformed => try say.fail(io, "{s} is not an archive std reads", .{url}),
-        error.WindowTooLarge => try say.fail(io, "{s} declares a zstd window above 128 MiB, or none", .{url}),
+        error.WindowTooLarge => try say.fail(io, "{s} declares a zstd window above 128 MiB", .{url}),
         error.UnsupportedEntry => try say.fail(io, "{s} holds {s}, which is neither a file, a directory nor a link", .{ url, diagnostic.entry }),
         error.UnsupportedMethod => try say.fail(io, "{s} holds {s}, compressed by a method other than stored or deflate", .{ url, diagnostic.entry }),
         error.Encrypted => try say.fail(io, "{s} holds an encrypted entry", .{url}),
