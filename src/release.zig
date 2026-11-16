@@ -490,8 +490,8 @@ fn pinsHoldTheirHashes(c: Context, parsed: manifest.Manifest) !void {
 fn isRelease(tags: []const advertised.Tag, revision: []const u8) bool {
     const name = if (std.mem.startsWith(u8, revision, "refs/tags/")) revision["refs/tags/".len..] else revision;
     for (tags) |tag| {
-        // glint-ignore: Z026 -- a tag that names no version is no release
-        _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, tag.name, "v")) tag.name[1..] else tag.name) catch continue;
+        // A tag that names no version is no release.
+        if (advertised.versionOf(tag) == null) continue;
         if (std.mem.eql(u8, tag.name, name)) return true;
         if (git_source.isCommit(revision) and std.mem.eql(u8, tag.commit, revision)) return true;
     }

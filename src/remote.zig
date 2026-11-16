@@ -160,7 +160,12 @@ pub fn tagOf(list: []const Tag, version: std.SemanticVersion) ?Tag {
 
 /// The version a tag names: `v1.2.0` or `1.2.0`; null for any other tag.
 pub fn versionOf(tag: Tag) ?std.SemanticVersion {
-    const text = if (std.mem.startsWith(u8, tag.name, "v")) tag.name[1..] else tag.name;
+    return semantic(if (std.mem.startsWith(u8, tag.name, "v")) tag.name[1..] else tag.name);
+}
+
+/// `text` as a semantic version, or null when it is none: `parse` fails only for text that is no
+/// version, or one whose numbers do not fit, and either is no version a pin or a release names.
+pub fn semantic(text: []const u8) ?std.SemanticVersion {
     return std.SemanticVersion.parse(text) catch null;
 }
 
@@ -181,7 +186,8 @@ fn newestWhere(list: []const Tag, line: ?std.SemanticVersion, retracted: []const
 /// Whether `version` is one of the versions `retracted` names.
 pub fn isRetracted(retracted: []const []const u8, version: std.SemanticVersion) bool {
     for (retracted) |text| {
-        const named = std.SemanticVersion.parse(text) catch continue; // glint-ignore: Z026 -- a malformed entry retracts nothing
+        // A malformed entry retracts nothing.
+        const named = semantic(text) orelse continue;
         if (named.order(version) == .eq) return true;
     }
     return false;

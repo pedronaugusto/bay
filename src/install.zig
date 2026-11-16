@@ -160,7 +160,7 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
         // As `bay add` keeps them: packages unpacked under the store's place, fetches in a
         // scratch beside them, which each fetch empties.
         const place = try std.fs.path.join(c.a, &.{ data, "fetch" });
-        const packages = try store.Store.init(c.io, c.a, c.environ, c.zig, place);
+        const packages = try store.Store.init(c.io, c.a, c.environ, c.zig, place, null);
         const scratch = try std.fs.path.join(c.a, &.{ place, root.directory, "add" });
         // A repository's URL is installed at its newest release, as `bay add` pins it.
         const url = try published.fetchable(c.io, c.a, c.zig, packages, scratch, source);

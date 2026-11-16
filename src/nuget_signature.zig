@@ -87,11 +87,14 @@ fn rootFile(c: Context, client: *std.http.Client, root: manifest.NugetRoot, fres
     const kept = try std.fs.path.join(a, &.{ try dirs.data(io, a, c.environ), "prebuilt", "roots" });
     try Io.Dir.cwd().createDirPath(io, kept);
     const path = try std.fs.path.join(a, &.{ kept, try a.print("{x}.der", .{&root.sha256}) });
-    // glint-ignore: Z026 -- a kept root that cannot be read is downloaded again below
     if (!fresh) if (intake.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(largest_root))) |kept_root_read| {
         const kept_root = kept_root_read.readForParse();
         if (holds(kept_root, root.sha256)) return path;
-    } else |_| {};
+    } else |err| switch (err) {
+        // None kept yet: downloaded below.
+        error.FileNotFound => {},
+        else => try say.note(io, "the kept root {s} could not be read ({t}): downloading it again", .{ path, err }),
+    };
     try say.note(io, "downloading {s}", .{root.url});
     const bytes = download.getAlloc(client, a, root.url, largest_root) catch |err| try say.fail(io, "could not download the root {s}: {t}", .{ root.url, err });
     if (!holds(bytes, root.sha256)) try say.fail(io, "{s} is not the root its pin names: its SHA-256 differs", .{root.url});
@@ -137,23 +140,36 @@ fn toolPath(c: Context) ![]const u8 {
     const tarball = try std.fs.path.join(a, &.{ try toolchain.globalCache(io, a, remote.zig), "p", try a.print("{s}.tar.gz", .{remote.hash}) });
     const work = try std.fs.path.join(a, &.{ tools, "build" });
     try Io.Dir.cwd().deleteTree(io, work);
-    // glint-ignore: Z026 -- a note that cannot be written leaves the tree behind unsaid, nothing worse
-    defer Io.Dir.cwd().deleteTree(io, work) catch |err| say.note(io, "{s} is left behind: {t}", .{ work, err }) catch {};
-    const tree = try std.fs.path.join(a, &.{ work, "tree" });
+    return cleared(io, work, unpackAndBuild(c, tools, tarball, work, remote.zig, tool));
+}
+
+/// The cloak in `tarball` unpacked under `work` and built into `tool`.
+fn unpackAndBuild(c: Context, tools: []const u8, tarball: []const u8, work: []const u8, zig: []const u8, tool: []const u8) ![]const u8 {
+    const tree = try std.fs.path.join(c.a, &.{ work, "tree" });
     var diagnostic: archive.Diagnostic = .{};
-    archive.unpack(io, a, .{ .path = tarball, .format = .tar_gzip }, tree, 1 << 30, &diagnostic) catch |err|
-        try say.fail(io, "could not unpack cloak ({s}): {t}", .{ tarball, err });
-    return build(c, tools, tree, remote.zig, tool);
+    archive.unpack(c.io, c.a, .{ .path = tarball, .format = .tar_gzip }, tree, 1 << 30, &diagnostic) catch |err|
+        try say.fail(c.io, "could not unpack cloak ({s}): {t}", .{ tarball, err });
+    return build(c, tools, tree, zig, tool);
+}
+
+/// `result`, once the scratch at `path` that made it is removed, however it ended: a scratch
+/// that cannot be removed is said and left for the next build, which removes it first.
+fn cleared(io: Io, path: []const u8, result: anytype) @TypeOf(result) {
+    Io.Dir.cwd().deleteTree(io, path) catch |err| try say.note(io, "{s} is left behind: {t}", .{ path, err });
+    return result;
 }
 
 /// cloak's tool built from the cloak at `source` with `zig`, put at `tool`.
 fn build(c: Context, tools: []const u8, source: []const u8, zig: []const u8, tool: []const u8) ![]const u8 {
+    const prefix = try std.fs.path.join(c.a, &.{ tools, "build-out" });
+    try Io.Dir.cwd().deleteTree(c.io, prefix);
+    return cleared(c.io, prefix, buildInto(c, prefix, source, zig, tool));
+}
+
+/// `build`, its output under `prefix`.
+fn buildInto(c: Context, prefix: []const u8, source: []const u8, zig: []const u8, tool: []const u8) ![]const u8 {
     const io = c.io;
     const a = c.a;
-    const prefix = try std.fs.path.join(a, &.{ tools, "build-out" });
-    try Io.Dir.cwd().deleteTree(io, prefix);
-    // glint-ignore: Z026 -- a note that cannot be written leaves the tree behind unsaid, nothing worse
-    defer Io.Dir.cwd().deleteTree(io, prefix) catch |err| say.note(io, "{s} is left behind: {t}", .{ prefix, err }) catch {};
     const built = intake.run(a, io, .{
         .argv = &.{ zig, "build", "--prefix", prefix, "-Doptimize=ReleaseSafe" },
         .cwd = .{ .path = source },

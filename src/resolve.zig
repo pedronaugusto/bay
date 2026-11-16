@@ -13,6 +13,7 @@ const std = @import("std");
 const intake = @import("intake.zig");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
+const nuget_signature = @import("nuget_signature.zig");
 const select = @import("select.zig");
 const store = @import("store.zig");
 const say = @import("say.zig");
@@ -140,7 +141,7 @@ pub const Resolution = struct {
 /// Resolves the package's graph; a graph with no selection is refused in a sentence.
 pub fn resolve(input: Input) !Resolution {
     const a = input.a;
-    const packages = try store.Store.init(input.io, a, input.environ, input.zig, input.package);
+    const packages = try store.Store.init(input.io, a, input.environ, input.zig, input.package, try nuget_signature.chosen(a, input.parsed, input.package));
     var mains: std.ArrayList(select.Revision) = .empty;
     // Every package under development takes part with its development, as Go
     // counts each workspace module's tests: every member resolves one graph.

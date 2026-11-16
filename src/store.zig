@@ -40,21 +40,15 @@ pub const Store = struct {
     found: std.array_hash_map.String([]const u8) = .empty,
 
     /// The store for a package: its `zig-pkg`, which both its builds use, and bay's unpacked copies.
-    pub fn init(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, zig: []const u8, package: []const u8) !*Store {
+    /// `cloak` is the project's own (`nuget_signature.chosen` of the manifest the caller read),
+    /// null for bay's.
+    pub fn init(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, zig: []const u8, package: []const u8, cloak: ?nuget_signature.Cloak) !*Store {
         const store = try a.create(Store);
         const unpacked = try std.fs.path.join(a, &.{ package, unpacked_directory });
         store.* = .{ .io = io, .a = a, .environ = environ, .zig = zig, .global = try toolchain.globalCache(io, a, zig), .unpacked = unpacked, .directories = try a.dupe([]const u8, &.{
             try std.fs.path.join(a, &.{ package, "zig-pkg" }),
             unpacked,
-        }) };
-        // The project's manifest, read again for its cloak: a manifest bay cannot read is
-        // refused where it is read for the graph, so here it only leaves bay's cloak.
-        // glint-ignore: Z026 -- a manifest bay cannot read is refused where the graph reads it; here it only leaves bay's cloak
-        if (intake.readFile(io, Io.Dir.cwd(), try std.fs.path.join(a, &.{ package, "build.zig.zon" }), a, .fromRaw(1 << 20))) |text_read| {
-            const text = text_read.readForParse();
-            // glint-ignore: Z026 -- a manifest bay cannot read is refused where the graph reads it; here it only leaves bay's cloak
-            if (manifest.parse(a, try a.dupeSentinel(u8, text, 0))) |project| store.cloak = try nuget_signature.chosen(a, project, package) else |_| {}
-        } else |_| {}
+        }), .cloak = cloak };
         return store;
     }
 

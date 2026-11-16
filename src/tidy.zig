@@ -9,6 +9,7 @@ const aegis = @import("aegis");
 const intake = @import("intake.zig");
 const Io = std.Io;
 const manifest = @import("manifest.zig");
+const nuget_signature = @import("nuget_signature.zig");
 const resolve = @import("resolve.zig");
 const workspace = @import("workspace.zig");
 const published = @import("published.zig");
@@ -54,7 +55,7 @@ pub fn tidied(input: Input, text: [:0]const u8) !Tidied {
         // Releases first: what they pin is then part of the selection.
         const scratch = try std.fs.path.join(a, &.{ input.package, root.directory, "add" });
         const owner: published.Owned = .{ .directory = input.package, .parsed = try manifest.parse(a, out) };
-        const syncs = try published.syncs(input.io, a, input.zig, try store.Store.init(input.io, a, input.environ, input.zig, input.package), scratch, &.{owner}, try std.mem.concat(a, []const u8, &.{ &.{input.package}, others }));
+        const syncs = try published.syncs(input.io, a, input.zig, try store.Store.init(input.io, a, input.environ, input.zig, input.package, try nuget_signature.chosen(a, owner.parsed, input.package)), scratch, &.{owner}, try std.mem.concat(a, []const u8, &.{ &.{input.package}, others }));
         out = try repin(input, &moves, out, syncs, .released, null);
     }
     const resolution = try resolved(input, try manifest.parse(a, out));

@@ -149,7 +149,7 @@ pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
     const copy = try a.print("{s}/{s}", .{ std.mem.trimEnd(u8, machine.directory, "/\\"), request.repository });
     const argv = try std.mem.concat(a, []const u8, &.{ machine.bay, &.{ "release", "--gate-bundle", copy, "--package", request.package } });
     var child = std.process.spawn(io, .{ .argv = argv, .environ_map = environ, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe }) catch |err| {
-        try line(io, output, try a.print("could not run {s}: {t}", .{ machine.bay[0], err }));
+        line(io, output, try a.print("could not run {s}: {t}", .{ machine.bay[0], err }));
         return false;
     };
     var fed: Feed = .{ .io = io, .file = .init(child.stdin.?), .bytes = bundle }; // safe: spawned with a pipe
@@ -159,7 +159,7 @@ pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
     child.stderr = null;
     try relayAll(io, &child, &streams, &fed, output);
     const term = try child.wait(io);
-    if (fed.failed) |err| try line(io, output, try a.print("the release commit did not reach it: {t}", .{err}));
+    if (fed.failed) |err| line(io, output, try a.print("the release commit did not reach it: {t}", .{err}));
     return term == .exited and term.exited == 0 and fed.failed == null;
 }
 
@@ -192,27 +192,27 @@ fn relay(io: Io, file: Io.File, output: *Output) void {
             // A line longer than the buffer goes in parts.
             error.StreamTooLong => {
                 const part = reader.interface.buffered();
-                // glint-ignore: Z026 -- a line the terminal or the log refuses ends the relay; the gate's exit says how it ended
-                line(io, output, part) catch return;
+                line(io, output, part);
                 reader.interface.toss(part.len);
                 continue;
             },
             error.ReadFailed => return,
         }) orelse return;
-        // glint-ignore: Z026 -- a line the terminal or the log refuses ends the relay; the gate's exit says how it ended
-        line(io, output, std.mem.trimEnd(u8, text, "\r")) catch return;
+        line(io, output, std.mem.trimEnd(u8, text, "\r"));
     }
 }
 
-/// One line to the terminal, after the machine's name, and to the gate's log, whole.
-fn line(io: Io, output: *Output, text: []const u8) !void {
+/// One line to the terminal, after the machine's name, and to the gate's log, whole. The first
+/// line either refuses is kept as the terminal's `unwritten`, which the release returns when its
+/// gates end; the lines after it are still read and dropped, so the gate runs to its end rather
+/// than meeting a closed pipe.
+fn line(io: Io, output: *Output, text: []const u8) void {
     var guard = output.terminal.acquireUncancelable(io);
     defer guard.deinit(io);
     const state = guard.value();
     if (state.unwritten != null) return;
     write(io, output, text) catch |err| {
         state.unwritten = err;
-        return err;
     };
 }
 

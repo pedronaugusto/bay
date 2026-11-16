@@ -37,8 +37,8 @@ pub fn plan(a: std.mem.Allocator, owners: []const Owned, members: []const manife
     const Member = struct { version: std.SemanticVersion, fingerprint: u64, released: ?manifest.Dependency = null, looked: bool = false };
     var versions: std.array_hash_map.String(Member) = .empty;
     for (members) |parsed| {
-        // glint-ignore: Z026 -- a member whose version is no semantic version has no release to re-pin
-        const version = std.SemanticVersion.parse(parsed.version) catch continue;
+        // A member whose version is no semantic version has no release to re-pin.
+        const version = remotes.semantic(parsed.version) orelse continue;
         try versions.put(a, parsed.name, .{ .version = version, .fingerprint = parsed.fingerprint });
     }
     var list: std.ArrayList(manifest.Repin) = .empty;
