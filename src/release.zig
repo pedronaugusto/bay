@@ -426,41 +426,116 @@ test "a build's listing names a step by the first word of its line, never inside
     try std.testing.expect(!hasStep("  check   Compile the dist programs\n", "dist"));
 }
 
-/// Every git pin of the manifest names a release: its `?ref=` is a version tag on its
-/// repository, at the commit the pin holds. A release pinned on a branch or a bare commit
-/// builds from code no tag fixes, and its consumers would take it.
+/// Every remote pin of the manifest is fixed as a release must be (`pinRule`): a Zig package at
+/// a version tag on its repository, an archive that is no package at its exact commit. A
+/// release pinned on a branch or any ref that moves builds from code nothing fixes, and its
+/// consumers would take it.
 fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
     var wrong: std.ArrayList([]const u8) = .empty;
     for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev, parsed.overrides }) |list| for (list) |dependency| switch (dependency.source) {
         .path => {},
-        .remote => |at| {
-            if (!std.mem.startsWith(u8, at.url, "git+")) {
-                // A forge's archive of one revision is that revision of its repository: a
-                // release only at a version tag or the commit one names. A known forge's URL
-                // bay cannot read as one is refused; any other URL names no repository bay can
-                // read, and its hash fixes the bytes its host published.
-                switch (try forgeOf(c.a, at.url)) {
-                    .elsewhere => {},
-                    .unread => |host| try wrong.append(c.a, try c.a.print("{s} (a URL on {s} that bay cannot read as an archive of one revision; pin a version tag: bay update)", .{ dependency.name, host })),
-                    .archive => |archive| if (!isRelease(try advertised.tags(c.io, c.a, try c.a.print("git+{s}", .{archive.repository})), archive.revision))
-                        try wrong.append(c.a, try c.a.print("{s} (an archive of {s}, no version tag of its repository)", .{ dependency.name, archive.revision })),
-                }
-                continue;
-            }
-            const pin = git_source.releasePin(at.url) orelse {
-                const p = git_source.parts(at.url);
-                try wrong.append(c.a, try c.a.print("{s} (at {s})", .{ dependency.name, p.ref orelse p.fragment orelse "its default branch" }));
-                continue;
-            };
-            const tagged = for (try advertised.tags(c.io, c.a, at.url)) |tag| {
-                if (std.mem.eql(u8, tag.name, pin.ref)) break tag.commit;
-            } else null;
-            if (tagged == null or !std.mem.eql(u8, tagged.?, pin.commit))
-                try wrong.append(c.a, try c.a.print("{s} ({s} is no tag at {s} on its repository)", .{ dependency.name, pin.ref, pin.commit[0..@min(12, pin.commit.len)] }));
+        .remote => |at| switch (try pinRule(c.a, dependency.name, at.url, at.hash)) {
+            .fixed => {},
+            .refused => |reason| try wrong.append(c.a, reason),
+            .git_tag => |pin| {
+                const tagged = for (try advertised.tags(c.io, c.a, at.url)) |tag| {
+                    if (std.mem.eql(u8, tag.name, pin.ref)) break tag.commit;
+                } else null;
+                if (tagged == null or !std.mem.eql(u8, tagged.?, pin.commit))
+                    try wrong.append(c.a, try c.a.print("{s} (a Zig package: {s} is no tag at {s} on its repository)", .{ dependency.name, pin.ref, pin.commit[0..@min(12, pin.commit.len)] }));
+            },
+            .archive_tag => |archive| if (!isRelease(try advertised.tags(c.io, c.a, try c.a.print("git+{s}", .{archive.repository})), archive.revision))
+                try wrong.append(c.a, try c.a.print("{s} ({s}, an archive of {s}, no version tag of its repository)", .{ dependency.name, if (archive.package) "a Zig package" else "no Zig package", archive.revision })),
         },
     };
-    if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned at no release: a release builds from what tags fix, so pin each at one (bay update) and release again", .{try listed(c.a, wrong.items)});
+    if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned at no release: a release builds from what is fixed, a Zig package at a version tag and an archive that is no package at its exact commit, never a branch or a ref that moves; pin each so (bay update) and release again", .{try listed(c.a, wrong.items)});
     try pinsHoldTheirHashes(c, parsed);
+}
+
+/// What a release asks of one remote pin. A Zig package (its archive holds a `build.zig.zon`,
+/// which Zig's hash records: an archive with none hashes as `N-V-…`) has versions, and is pinned
+/// at a version tag: its tag is read from its repository (`git_tag`, `archive_tag`). An archive
+/// that is no package (a grammar, a body of queries) has no version to tag, and its exact
+/// commit with its hash fixes it as a tag would (`fixed`). A branch, or any ref that moves, is
+/// refused for both, the reason saying which case it is. `pinsHoldTheirHashes` then proves the
+/// hash, and so the case, is what the URL holds.
+const PinRule = union(enum) {
+    fixed,
+    git_tag: struct { ref: []const u8, commit: []const u8 },
+    archive_tag: struct { repository: []const u8, revision: []const u8, package: bool },
+    refused: []const u8,
+};
+
+fn pinRule(a: std.mem.Allocator, name: []const u8, url: []const u8, hash: []const u8) !PinRule {
+    const package = !std.mem.startsWith(u8, hash, "N-V-");
+    if (std.mem.startsWith(u8, url, "git+")) {
+        const p = git_source.parts(url);
+        const at = p.ref orelse p.fragment orelse "its default branch";
+        if (package) {
+            const pin = git_source.releasePin(url) orelse return .{ .refused = try a.print("{s} (a Zig package at {s}: a package is released at a version tag)", .{ name, at }) };
+            return .{ .git_tag = .{ .ref = pin.ref, .commit = pin.commit } };
+        }
+        const exact = if (p.fragment) |fragment| git_source.isCommit(fragment) else false;
+        if (exact and (p.ref == null or git_source.releasePin(url) != null)) return .fixed;
+        return .{ .refused = try a.print("{s} (no Zig package, at {s}, which moves: pin its exact commit, which its hash fixes as a tag would)", .{ name, at }) };
+    }
+    // A forge's archive of one revision is that revision of its repository. A known forge's URL
+    // bay cannot read as one is refused; any other URL names no repository bay can read, and its
+    // hash fixes the bytes its host published.
+    switch (try forgeOf(a, url)) {
+        .elsewhere => return .fixed,
+        .unread => |host| return .{ .refused = try a.print("{s} (a URL on {s} that bay cannot read as an archive of one revision; pin a version tag: bay update)", .{ name, host }) },
+        .archive => |archive| {
+            if (!package and git_source.isCommit(archive.revision)) return .fixed;
+            if (isVersionName(archive.revision) or git_source.isCommit(archive.revision))
+                return .{ .archive_tag = .{ .repository = archive.repository, .revision = archive.revision, .package = package } };
+            return .{ .refused = if (package)
+                try a.print("{s} (a Zig package, an archive of {s}, a ref that moves: a package is released at a version tag)", .{ name, archive.revision })
+            else
+                try a.print("{s} (no Zig package, an archive of {s}, a ref that moves: pin its exact commit, which its hash fixes as a tag would)", .{ name, archive.revision }) };
+        },
+    }
+}
+
+/// Whether `revision` names a version tag by its form (`v1.2.3`, `1.2.3`, `refs/tags/v1.2.3`):
+/// the tag itself is read from the repository.
+fn isVersionName(revision: []const u8) bool {
+    const name = if (std.mem.startsWith(u8, revision, "refs/tags/")) revision["refs/tags/".len..] else revision;
+    _ = std.SemanticVersion.parse(if (std.mem.startsWith(u8, name, "v")) name[1..] else name) catch return false;
+    return true;
+}
+
+test "a Zig package is released at a version tag, an archive that is no package at its exact commit, and neither at a ref that moves" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const commit = "910fdf6f49e9dee7e7257c7d11a76b040fdfb9de";
+    const package = "aegis-0.2.4-rsxouoquDQApwYDuGdd2YyEeTeNp6CnJoOZKdVCfc3jt";
+    const plain = "N-V-__8AAAQzGwBRCPcFD0BBMJFUJrNVB3b7gywG4pZsbsgl";
+    // A Zig package: its version tag is read from its repository; a branch or a bare commit is refused, named a package.
+    const tagged = try pinRule(a, "aegis", "git+https://github.com/o/aegis?ref=v0.3.0#" ++ commit, package);
+    try std.testing.expectEqualStrings("v0.3.0", tagged.git_tag.ref);
+    try std.testing.expectEqual(.archive_tag, std.meta.activeTag(try pinRule(a, "aegis", "https://github.com/o/aegis/archive/v0.3.0.tar.gz", package)));
+    for ([_][]const u8{
+        "git+https://github.com/o/aegis?ref=main#" ++ commit,
+        "git+https://github.com/o/aegis#" ++ commit,
+        "https://github.com/o/aegis/archive/main.tar.gz",
+    }) |url| {
+        const rule = try pinRule(a, "aegis", url, package);
+        try std.testing.expect(std.mem.find(u8, rule.refused, "(a Zig package") != null);
+    }
+    // No package (no build.zig.zon): fixed by its exact commit, as an archive or a git pin.
+    try std.testing.expectEqual(.fixed, std.meta.activeTag(try pinRule(a, "grammar_c", "https://github.com/o/tree-sitter-c/archive/" ++ commit ++ ".tar.gz", plain)));
+    try std.testing.expectEqual(.fixed, std.meta.activeTag(try pinRule(a, "grammar_c", "git+https://github.com/o/tree-sitter-c#" ++ commit, plain)));
+    // No package at a ref that moves: refused, named no package.
+    for ([_][]const u8{
+        "https://github.com/o/tree-sitter-c/archive/master.tar.gz",
+        "git+https://github.com/o/tree-sitter-c?ref=master#" ++ commit,
+        "git+https://github.com/o/tree-sitter-c#master",
+    }) |url| {
+        const rule = try pinRule(a, "grammar_c", url, plain);
+        try std.testing.expect(std.mem.find(u8, rule.refused, "(no Zig package") != null);
+    }
 }
 
 /// Every remote pin's `.hash` is what its URL holds, fetched now as Zig records it. Zig takes

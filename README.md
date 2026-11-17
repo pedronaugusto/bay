@@ -132,6 +132,12 @@ A graph of releases alone fetches nothing for this.
 with plain `zig build` never runs bay's selection and takes each manifest's pins as
 written, so a released package pins what a version fixes, never commits only bay's
 ordering by history reconciles. Commit pins are for development between releases.
+What fixes a pin depends on what it pins. A Zig package (its archive holds a
+`build.zig.zon`, which Zig's hash records: an archive with none hashes as `N-V-…`) has
+versions, so a release pins it at a version tag at the commit the tag names. An archive
+that is no Zig package (a tree-sitter grammar, a body of queries) has no version to tag:
+its exact commit, with the hash bay proves its URL holds, fixes it as a tag would. A
+branch, or any ref that moves, is refused for both, and the refusal says which case it is.
 
 Zig then gets a graph in which each package appears once. A dependency whose own pins
 name other revisions is built from a copy with only those pins rewritten, which

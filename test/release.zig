@@ -340,19 +340,25 @@ test "each refusal names its cause and leaves the branch, the tags and the remot
     try w.change("lib", "- Loose.\n");
     try Expect.refusal(&w, "CHANGELOG.md:5: an entry under no group", try w.head("lib"), remote_main);
     try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
-    // A pin at no release: on a branch, and on a version tag that does not name the pinned
-    // commit; and one at a release whose hash its URL does not hold.
+    // A pin at no release: a Zig package on a branch, and on a version tag that does not name
+    // the pinned commit; one at a release whose hash its URL does not hold; an archive that is
+    // no package (an `N-V-` hash) on a branch; and a package that says it is none, at an exact
+    // commit, which the hash its URL holds gives away.
     try w.package("dep", "0.1.0", "");
-    const pins = [_]struct { []const u8, []const u8, []const u8 }{
-        .{ "main", try w.head("dep"), "dep (at main) pinned at no release" },
-        .{ "v0.1.0", start, "dep (v0.1.0 is no tag at " },
+    const package_hash = "dep-0.1.0-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const plain_hash = "N-V-__8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const pins = [_]struct { []const u8, []const u8, []const u8, []const u8 }{
+        .{ "?ref=main", try w.head("dep"), package_hash, "dep (a Zig package at main: a package is released at a version tag) pinned at no release" },
+        .{ "?ref=v0.1.0", start, package_hash, "dep (a Zig package: v0.1.0 is no tag at " },
         // At the tag, by a hash of other content: Zig would take what its cache held under it
         // (review-1029b m-d).
-        .{ "v0.1.0", try w.head("dep"), "dep (its .hash is dep-0.1.0-AAAA" },
+        .{ "?ref=v0.1.0", try w.head("dep"), package_hash, "dep (its .hash is dep-0.1.0-AAAA" },
+        .{ "?ref=main", try w.head("dep"), plain_hash, "dep (no Zig package, at main, which moves" },
+        .{ "", try w.head("dep"), plain_hash, "dep (its .hash is N-V-__8AAAA" },
     };
     for (pins) |pin| {
-        const ref, const commit, const said = pin;
-        const dev = try w.f.a.print("    .dependencies = .{{}},\n    .dev_dependencies = .{{ .dep = .{{ .url = \"{s}?ref={s}#{s}\", .hash = \"dep-0.1.0-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\" }} }},\n", .{ try w.pinUrl("dep"), ref, commit });
+        const ref, const commit, const hash, const said = pin;
+        const dev = try w.f.a.print("    .dependencies = .{{}},\n    .dev_dependencies = .{{ .dep = .{{ .url = \"{s}{s}#{s}\", .hash = \"{s}\" }} }},\n", .{ try w.pinUrl("dep"), ref, commit, hash });
         try w.f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, w.f.a, try w.read("lib", "build.zig.zon"), "    .dependencies = .{},\n", dev));
         try w.git("lib", &.{ "commit", "--quiet", "-am", "Pin dep" });
         try Expect.refusal(&w, said, try w.head("lib"), remote_main);
