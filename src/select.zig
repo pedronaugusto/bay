@@ -127,7 +127,7 @@ pub const Options = struct {
 };
 
 /// Reads every revision the roots and the mains' own pins reach, following the
-/// pins of each one read, then selects for each package the highest version
+/// pins of each one read (a dependency's own, never its development pins), then selects for each package the highest version
 /// among them, or among commit pins the newest commit (`newest`). A revision of a main module stands for nothing: the main module
 /// is built, and what its other revisions pin is never followed.
 /// `loader` reads the revision at a place: `loader.load(place)`, a fetch and a
@@ -154,7 +154,9 @@ pub fn select(a: Allocator, loader: anytype, roots: []const Pin, mains: []const 
         try graph.read.put(a, place.key(), revision);
         try graph.keys.put(a, place.key(), selection);
         if (graph.mains.contains(identity)) continue;
-        for (revision.pins) |pin| try frontier.append(a, pin.place);
+        // A dependency's development pins are in no build of it or of anything that
+        // depends on it, so what they reach never competes: only a main module's are read.
+        for (revision.pins) |pin| if (!pin.dev) try frontier.append(a, pin.place);
         // A package reached by path is part of what holds it, not a version that
         // competes: it is built wherever a built revision reaches its directory.
         if (place == .directory) continue;
@@ -524,6 +526,46 @@ test "commit pins on one line select the newest commit, whatever versions their 
         try std.testing.expectEqualStrings("k3", graph.resolve(hashed("k2")).?.place.key());
         try std.testing.expectEqual(1, table.asked);
     }
+}
+
+test "a commit that diverges only in a dependency's development pins is never read: one commit is selected" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // base <- left, base <- right; x pins c at left, y pins c at right among its development pins alone.
+    const left = at("c", "0.7.5", "left", "left", false, &.{});
+    const right = at("c", "0.7.5", "right", "right", false, &.{});
+    var dev_right = pinTo("c", "right");
+    dev_right.dev = true;
+    const x = rev("x", 1, "1.0.0", "x", &.{pinTo("c", "left")});
+    const y = rev("y", 2, "1.0.0", "y", &.{dev_right});
+    const history = [_]Table.Parents{ .{ "left", &.{"base"} }, .{ "right", &.{"base"} } };
+    var table: Table = .{ .revisions = &.{ left, right, x, y }, .parents = &history };
+    const graph = try select(a, &table, &.{ pinTo("x", "x"), pinTo("y", "y") }, &.{}, .{});
+    try std.testing.expectEqual(null, graph.problem);
+    try std.testing.expectEqualStrings("left", graph.resolve(hashed("left")).?.place.key());
+    try std.testing.expect(!graph.read.contains("right"));
+}
+
+test "two commits that say one version are two packages, each read with its own pins" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // c at left pins d1, c at right pins d2; both say 0.7.5. merged contains both.
+    const d1 = rev("d", 3, "1.0.0", "d1", &.{});
+    const d2 = rev("d", 3, "1.1.0", "d2", &.{});
+    const left = at("c", "0.7.5", "left", "left", false, &.{pinTo("d", "d1")});
+    const right = at("c", "0.7.5", "right", "right", false, &.{pinTo("d", "d2")});
+    const merged = at("c", "0.7.5", "merged", "merged", false, &.{pinTo("d", "d2")});
+    const x = rev("x", 1, "1.0.0", "x", &.{pinTo("c", "left")});
+    const y = rev("y", 2, "1.0.0", "y", &.{pinTo("c", "right")});
+    const history = [_]Table.Parents{ .{ "left", &.{"base"} }, .{ "right", &.{"base"} }, .{ "merged", &.{ "left", "right" } } };
+    var table: Table = .{ .revisions = &.{ d1, d2, left, right, merged, x, y }, .parents = &history };
+    const graph = try select(a, &table, &.{ pinTo("x", "x"), pinTo("y", "y"), pinTo("c", "merged") }, &.{}, .{});
+    try std.testing.expectEqual(null, graph.problem);
+    try std.testing.expectEqualStrings("d1", graph.read.get("left").?.pins[0].place.key());
+    try std.testing.expectEqualStrings("d2", graph.read.get("right").?.pins[0].place.key());
+    try std.testing.expectEqualStrings("merged", graph.resolve(hashed("left")).?.place.key());
 }
 
 test "commits that diverge are refused, each named, and none picked" {

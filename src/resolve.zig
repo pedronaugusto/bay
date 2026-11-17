@@ -423,6 +423,49 @@ fn pinners(a: std.mem.Allocator, graph: select.Graph, place: select.Place) ![]co
     return if (names.items.len == 0) "the package" else std.mem.join(a, ", ", names.items);
 }
 
+/// A revision as a path names it: its name and version, and its directory where it is
+/// read from one (a workspace member, a path pin), which no URL or commit names.
+fn label(a: std.mem.Allocator, revision: select.Revision) ![]const u8 {
+    return switch (revision.place) {
+        .directory => |directory| a.print("{s} {f} (at {s})", .{ revision.identity.name, revision.version, directory }),
+        .remote => a.print("{s} {f}", .{ revision.identity.name, revision.version }),
+    };
+}
+
+/// The shortest chain of pins from a main module to `place`, each revision named, as
+/// selection reads it: every pin of a main module, a dependency's own pins only (never
+/// its development ones). Empty where no chain reaches it.
+fn pathTo(a: std.mem.Allocator, graph: select.Graph, place: select.Place) ![]const u8 {
+    const Step = struct { revision: select.Revision, path: []const u8, main: bool };
+    var queue: std.ArrayList(Step) = .empty;
+    var seen: std.array_hash_map.String(void) = .empty;
+    for (graph.mains.values()) |main| {
+        try queue.append(a, .{ .revision = main, .path = try label(a, main), .main = true });
+        try seen.put(a, main.place.key(), {});
+    }
+    var at: usize = 0;
+    while (at < queue.items.len) : (at += 1) {
+        const step = queue.items[at];
+        for (step.revision.pins) |pin| {
+            if (pin.dev and !step.main) continue;
+            if (std.mem.eql(u8, pin.place.key(), place.key())) return step.path;
+            if (seen.contains(pin.place.key())) continue;
+            try seen.put(a, pin.place.key(), {});
+            const next = graph.read.get(pin.place.key()) orelse continue;
+            try queue.append(a, .{ .revision = next, .path = try a.print("{s} > {s}", .{ step.path, try label(a, next) }), .main = false });
+        }
+    }
+    return "";
+}
+
+/// Where a refusal says a place is pinned: by whom, and the chain that reaches it.
+fn pinnedBy(a: std.mem.Allocator, graph: select.Graph, place: select.Place) ![]const u8 {
+    const path = try pathTo(a, graph, place);
+    const by = try pinners(a, graph, place);
+    if (path.len == 0) return by;
+    return a.print("{s}; reached by {s}", .{ by, path });
+}
+
 /// A revision as a refusal names it: its commit and its URL, or its URL alone.
 fn described(a: std.mem.Allocator, revision: select.Revision) ![]const u8 {
     const url = switch (revision.place) {
@@ -438,17 +481,17 @@ fn described(a: std.mem.Allocator, revision: select.Revision) ![]const u8 {
 fn refuse(a: std.mem.Allocator, io: Io, graph: select.Graph, problem: select.Problem) !noreturn {
     switch (problem) {
         .same_version => |p| {
-            for ([_]select.Place{ p.first, p.second }) |place| try say.note(io, "{s} {f} at {s}, pinned by {s}", .{ p.name, p.version, place.key(), try pinners(a, graph, place) });
+            for ([_]select.Place{ p.first, p.second }) |place| try say.note(io, "{s} {f} at {s}, pinned by {s}", .{ p.name, p.version, place.key(), try pinnedBy(a, graph, place) });
             try say.fail(io, "{s} {f} is two contents: a version names one, so the one meant is not known. Pin the one meant in .dependencies or .overrides, develop {s} in a workspace, or give each change its own version", .{ p.name, p.version, p.name });
         },
         .incompatible => |p| try say.fail(io, "{s} asks for {s} {f}, but {s} {f} is selected, a different line (below 1.0, a new minor is a new line): move {s} to {s} {f}, or name {s} in .coexist", .{ p.by, p.name, p.wanted, p.name, p.selected, p.by, p.name, p.selected, p.name }),
         .cycle => |p| try say.fail(io, "{s} and what it depends on depend on each other: a ring of dependencies cannot be built", .{p.name}),
         .diverged => |p| {
-            for (p.heads) |head| try say.note(io, "{s} at {s}, pinned by {s}", .{ p.name, try described(a, head), try pinners(a, graph, head.place) });
+            for (p.heads) |head| try say.note(io, "{s} at {s}, pinned by {s}", .{ p.name, try described(a, head), try pinnedBy(a, graph, head.place) });
             try say.fail(io, "{s} is pinned at commits that diverge: none contains the others, so none is the newest. Pin a commit that contains both, or name the one meant in .overrides", .{p.name});
         },
         .unordered => |p| {
-            for ([_]select.Revision{ p.commit, p.other }) |revision| try say.note(io, "{s} at {s}, pinned by {s}", .{ p.name, try described(a, revision), try pinners(a, graph, revision.place) });
+            for ([_]select.Revision{ p.commit, p.other }) |revision| try say.note(io, "{s} at {s}, pinned by {s}", .{ p.name, try described(a, revision), try pinnedBy(a, graph, revision.place) });
             try say.fail(io, "{s} is pinned at a commit and by a URL that names no commit, which its history cannot order: pin it by git at both, or name the one meant in .overrides", .{p.name});
         },
     }

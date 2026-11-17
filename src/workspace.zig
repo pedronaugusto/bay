@@ -19,16 +19,27 @@ pub const file_name = "bay.work";
 /// directories; none outside a workspace. A member that is the package itself,
 /// at its own directory or checked out elsewhere (a landing's scratch worktree,
 /// a second clone), is left out: the package under development stands for it.
+/// A workspace holds only its members: a package below a `bay.work` that lists
+/// it neither by directory nor as a checkout of a member (a scratch clone of
+/// something else) is outside it, and builds with its own pins alone.
 pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []const u8 {
     const every = try all(io, a, package) orelse return &.{};
     const own = try identity(io, a, package);
+    var held = false;
     var list: std.ArrayList([]const u8) = .empty;
     for (every) |member| {
-        if (std.mem.eql(u8, member, package)) continue;
+        if (std.mem.eql(u8, member, package)) {
+            held = true;
+            continue;
+        }
         const theirs = try identity(io, a, member);
-        if (std.mem.eql(u8, theirs.name, own.name) and theirs.fingerprint == own.fingerprint) continue;
+        if (std.mem.eql(u8, theirs.name, own.name) and theirs.fingerprint == own.fingerprint) {
+            held = true;
+            continue;
+        }
         try list.append(a, member);
     }
+    if (!held) return &.{};
     return list.toOwnedSlice(a);
 }
 

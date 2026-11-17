@@ -1299,6 +1299,10 @@ test "commit pins of one package are ordered by its history: a fix's commit and 
     try std.testing.expect(std.mem.find(u8, diverged.stderr, "pinned by clearance 0.1.0") != null);
     try std.testing.expect(std.mem.find(u8, diverged.stderr, " (a release) (") != null);
     try std.testing.expect(std.mem.find(u8, diverged.stderr, "pinned by uplink 0.1.0") != null);
+    // And the chain from the root that reaches each.
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, "reached by app 0.1.0 (at ") != null);
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, "/app) > clearance 0.1.0") != null);
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, "/app) > uplink 0.1.0") != null);
     // strict contains both: it is selected, though its manifest says 0.23.0 as the tag's does and
     // a line above the fix's 0.22.2.
     try f.application("app", try std.mem.concat(f.a, u8, &.{ consumers, try gitPin(&f, "cloak", try f.a.print("{s}#strict", .{repository.url})) }), &.{ "clearance", "uplink" }, main);
@@ -1354,4 +1358,27 @@ test "a Zig killed before it exits is named with its signal, so no build fails w
         try std.testing.expect(std.mem.find(u8, ended.stderr, "was ended by signal 9 (KILL) before it exited") != null);
         try std.testing.expect(std.mem.find(u8, ended.stderr, killed) != null);
     }
+}
+
+test "a package a workspace does not list builds with its own pins, though the workspace's file is above it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("c1", "c", "0.1.0", "", &.{}, "pub const version = \"0.1.0\";");
+    try f.package("c2", "c", "0.1.1", "", &.{}, "pub const version = \"0.1.1\";");
+    // c2 is developed in a workspace whose file sits above a scratch clone of
+    // app, which the workspace does not list and is no member's checkout.
+    try f.write(".", "bay.work", ".{ .members = .{ \"c2\" } }\n");
+    try f.application("scratch/app", try f.pin("c", "c1"), &.{"c"}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"app sees c {s}\\n\", .{@import(\"c\").version}); }");
+    const built = try f.bay("scratch/app", &.{ "build", "run" });
+    try std.testing.expect(succeeded(built));
+    if (std.mem.find(u8, built.stderr, "app sees c 0.1.0") == null) std.debug.print("{s}\n", .{built.stderr});
+    try std.testing.expect(std.mem.find(u8, built.stderr, "app sees c 0.1.0") != null);
+    // A member, run from the workspace, still develops with it.
+    try f.application("member", try f.pin("c", "c1"), &.{"c"}, "const std = @import(\"std\"); pub fn main() void { std.debug.print(\"member sees c {s}\\n\", .{@import(\"c\").version}); }");
+    try f.write(".", "bay.work", ".{ .members = .{ \"c2\", \"member\" } }\n");
+    const developed = try f.bay("member", &.{ "build", "run" });
+    if (!succeeded(developed) or std.mem.find(u8, developed.stderr, "member sees c 0.1.1") == null) std.debug.print("{s}\n", .{developed.stderr});
+    try std.testing.expect(std.mem.find(u8, developed.stderr, "member sees c 0.1.1") != null);
 }
