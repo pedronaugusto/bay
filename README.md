@@ -418,6 +418,7 @@ every package below the graph, lazy ones included, for a bundle any host builds 
 | `bay install --update [name...]` | Reinstall each from its recorded branch or tag |
 | `bay uninstall <name>` | Remove exactly what its install put in place |
 | `bay completions <shell>` | The completion script for bash, zsh, fish or PowerShell |
+| `bay man [command]` | A manual page, bay's own or a command's, for `man -l -`; `--directory DIR` writes every page (`bay.1`, `bay-add.1`, ...) for a man path |
 
 `bay --help` and `bay <command> --help` say what each takes. `bay --locked <command>` refuses to write a manifest. `add`, `remove`, `update` and `upgrade`
 tidy after they write, once for all they pinned. `bay --workspace [--jobs <n>] <command>` runs the command in

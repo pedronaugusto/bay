@@ -59,6 +59,7 @@ pub const Cli = struct {
         release: Release,
         version,
         completions: Completions,
+        man: Man,
         step: ensign.External,
     } = null,
 
@@ -227,6 +228,18 @@ const Completions = struct {
     };
 };
 
+const Man = struct {
+    command: []const []const u8 = &.{},
+    directory: ?[]const u8 = null,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "A manual page, bay's own or a command's (bay man add), for man -l -; with --directory, every page, written there as bay.1, bay-add.1 and the rest",
+        .options = .{
+            .command = .{ .positional = true, .value_name = "COMMAND", .help = "The command's names, as typed after bay" },
+            .directory = .{ .value_name = "DIR", .hint = .directory, .help = "Write every page here, for a man path (share/man/man1)" },
+        },
+    };
+};
+
 const New = struct {
     name: []const u8,
     pub const spec: ensign.Spec(@This()) = .{
@@ -300,6 +313,7 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         // Before a package exists, a Zig that names no version makes it (`toolchain.unpinned`).
         .init => return initCommand(io, a, try toolchain.unpinned(io, a, environ)),
         .new => |n| return newCommand(io, a, try toolchain.unpinned(io, a, environ), n.name),
+        .man => |args| return manual(io, a, args),
         // Global: anywhere, as cargo install is.
         .install, .uninstall => {
             const here = try packageHere(io, a);
@@ -332,8 +346,46 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         .build => |args| zigBuild(env, .package, &.{}, args.args),
         .dev => |args| zigBuild(env, .development, &.{}, args.args),
         .step => |args| step(env, args.name, args.args),
-        .init, .new, .install, .uninstall, .version, .completions, .release => unreachable, // unreachable: answered above
+        .init, .new, .install, .uninstall, .man, .version, .completions, .release => unreachable, // unreachable: answered above
     };
+}
+
+/// bay's manual: the page of the command `args` names, written out, or every page into
+/// `args.directory`, one file each named as man finds it (`bay-add.1`).
+fn manual(io: Io, a: std.mem.Allocator, args: Man) !u8 {
+    const options: ensign.ManOptions = .{ .source = "bay " ++ own.version, .manual = "User Commands", .date = own.date };
+    var buffer: [4096]u8 = undefined;
+    const directory = args.directory orelse {
+        var w = Io.File.stdout().writer(io, &buffer);
+        var page = options;
+        page.command = args.command;
+        ensign.writeManPage(Cli, &w.interface, page) catch |err| switch (err) {
+            error.UnknownCommand => try say.fail(io, "bay has no command `{s}`; bay man takes a command as it is typed, as bay man add", .{try std.mem.join(a, " ", args.command)}),
+            error.WriteFailed => return w.err orelse err,
+        };
+        try w.interface.flush();
+        return 0;
+    };
+    if (args.command.len != 0) try say.fail(io, "bay man --directory writes every page, and takes no command", .{});
+    var out = try Io.Dir.cwd().createDirPathOpen(io, directory, .{});
+    defer out.close(io);
+    for (ensign.commands(Cli)) |names| {
+        var file_name: std.ArrayList(u8) = .empty;
+        try file_name.appendSlice(a, "bay");
+        for (names) |name| try file_name.print(a, "-{s}", .{name});
+        try file_name.appendSlice(a, ".1");
+        const file = try out.createFile(io, file_name.items, .{});
+        defer file.close(io);
+        var w = file.writer(io, &buffer);
+        var page = options;
+        page.command = names;
+        ensign.writeManPage(Cli, &w.interface, page) catch |err| switch (err) {
+            error.UnknownCommand => unreachable, // unreachable: `commands` lists the declaration's own
+            error.WriteFailed => return w.err orelse err,
+        };
+        try w.interface.flush();
+    }
+    return 0;
 }
 
 /// `bay release`, its train with `--workspace`, and a machine's side of either.

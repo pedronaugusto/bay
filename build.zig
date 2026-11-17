@@ -59,6 +59,7 @@ fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget,
     const warp = package.dependency("warp", .{ .target = target, .optimize = optimize }).module("warp");
     const own = b.addOptions();
     own.addOption([]const u8, "version", zon.version);
+    own.addOption([]const u8, "date", released(zon.version));
     return b.createModule(.{ .root_source_file = package.path("src/main.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "aegis", .module = aegis },
         .{ .name = "airlock", .module = airlock },
@@ -67,6 +68,16 @@ fn program(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget,
         .{ .name = "warp", .module = warp },
         .{ .name = "own", .module = own.createModule() },
     } });
+}
+
+/// The day `version` was released, as its CHANGELOG heading gives it (`## [0.2.2] - 2026-10-27`);
+/// empty for a version not yet released. The manual pages carry it.
+fn released(comptime version: []const u8) []const u8 {
+    const heading = "\n## [" ++ version ++ "] - ";
+    const changelog = @embedFile("CHANGELOG.md");
+    const at = std.mem.find(u8, changelog, heading) orelse return "";
+    const rest = changelog[at + heading.len ..];
+    return rest[0 .. std.mem.findScalar(u8, rest, '\n') orelse rest.len];
 }
 
 /// The unit tests, their properties on `shakedown`, and bay end to end over real packages,

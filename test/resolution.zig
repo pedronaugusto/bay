@@ -1134,6 +1134,29 @@ test "bay names its version, the one its manifest gives" {
     }
 }
 
+test "bay writes its manual: a command's page, or every page into a directory as man finds them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    const own = try f.bay(".", &.{"man"});
+    try std.testing.expect(succeeded(own));
+    try std.testing.expect(std.mem.startsWith(u8, own.stdout, ".TH \"BAY\" \"1\""));
+    try std.testing.expect(std.mem.find(u8, own.stdout, "bay " ++ options.version) != null);
+    const add = try f.bay(".", &.{ "man", "add" });
+    try std.testing.expect(succeeded(add));
+    try std.testing.expect(std.mem.startsWith(u8, add.stdout, ".TH \"BAY\\-ADD\" \"1\""));
+    const unknown = try f.bay(".", &.{ "man", "nothing" });
+    try std.testing.expect(refused(unknown));
+    try std.testing.expect(std.mem.find(u8, unknown.stderr, "bay has no command `nothing`") != null);
+    const pages = try f.bay(".", &.{ "man", "--directory", "pages" });
+    try std.testing.expect(succeeded(pages));
+    for ([_][]const u8{ "pages/bay.1", "pages/bay-add.1", "pages/bay-dev.1", "pages/bay-man.1" }) |path| {
+        const text = try f.tmp.dir.readFileAlloc(f.io, path, f.a, .limited(1 << 20));
+        try std.testing.expect(std.mem.startsWith(u8, text, ".TH \"BAY"));
+    }
+}
+
 test "a development build runs what it builds in the package's directory, wherever bay is run from" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
