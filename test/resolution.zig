@@ -1324,8 +1324,9 @@ test "commit pins of one package are ordered by its history: a fix's commit and 
     try std.testing.expect(std.mem.find(u8, diverged.stderr, "pinned by uplink 0.1.0") != null);
     // And the chain from the root that reaches each.
     try std.testing.expect(std.mem.find(u8, diverged.stderr, "reached by app 0.1.0 (at ") != null);
-    try std.testing.expect(std.mem.find(u8, diverged.stderr, "/app) > clearance 0.1.0") != null);
-    try std.testing.expect(std.mem.find(u8, diverged.stderr, "/app) > uplink 0.1.0") != null);
+    // The root's directory as the system spells it: `\` before `app` on Windows.
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, std.fs.path.sep_str ++ "app) > clearance 0.1.0") != null);
+    try std.testing.expect(std.mem.find(u8, diverged.stderr, std.fs.path.sep_str ++ "app) > uplink 0.1.0") != null);
     // strict contains both: it is selected, though its manifest says 0.23.0 as the tag's does and
     // a line above the fix's 0.22.2.
     try f.application("app", try std.mem.concat(f.a, u8, &.{ consumers, try gitPin(&f, "cloak", try f.a.print("{s}#strict", .{repository.url})) }), &.{ "clearance", "uplink" }, main);
