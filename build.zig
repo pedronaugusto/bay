@@ -94,6 +94,10 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
     const ssh = b.addExecutable(.{ .name = "ssh", .root_module = b.createModule(.{ .root_source_file = package.path("test/ssh.zig"), .target = target, .optimize = optimize }) });
     check.dependOn(&ssh.step);
     options.addOptionPath("ssh", ssh.getEmittedBin());
+    // A Zig killed before it exits, which bay must name where nothing else says a word.
+    const killed = b.addExecutable(.{ .name = "killed", .root_module = b.createModule(.{ .root_source_file = package.path("test/killed.zig"), .target = target, .optimize = optimize }) });
+    check.dependOn(&killed.step);
+    options.addOptionPath("killed", killed.getEmittedBin());
     const host = b.graph.host.result;
     for ([_][]const u8{ "test/resolution.zig", "test/release.zig", "test/prebuilt.zig" }) |root| {
         const end_to_end = b.addTest(.{ .root_module = b.createModule(.{

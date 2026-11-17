@@ -1334,3 +1334,24 @@ test "two commits that say one version are no longer two contents: the newer one
     const history = try f.dataDirPath(&.{ "history", try f.a.print("glint-{x}.git", .{fingerprint("glint")}) });
     try std.testing.expect(succeeded(try f.run(".", &.{ "git", "-C", history, "cat-file", "-e", try f.a.print("{s}^{{commit}}", .{older}) })));
 }
+
+test "a Zig killed before it exits is named with its signal, so no build fails without a sentence" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // no signals
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.package("p", "p", "0.1.0", "", &.{}, "pub const x = 1;");
+    const killed = try Io.Dir.cwd().realPathFileAlloc(f.io, options.killed, f.a);
+    try f.env.put("KILLED_ZIG", options.zig);
+    try f.env.put("ZIG", killed);
+    // The build bay runs (`bay build`, `bay dev`), and the listing a step is looked up in (`bay <step>`).
+    for ([_][]const []const u8{ &.{ "build", "install" }, &.{"check-imports"} }) |args| {
+        const ended = try f.bay("p", args);
+        try std.testing.expect(refused(ended));
+        try std.testing.expect(ended.term == .exited and ended.term.exited == 1);
+        if (std.mem.find(u8, ended.stderr, "was ended by signal 9 (KILL) before it exited") == null) std.debug.print("bay {s}:\n{s}\n", .{ args[0], ended.stderr });
+        try std.testing.expect(std.mem.find(u8, ended.stderr, "was ended by signal 9 (KILL) before it exited") != null);
+        try std.testing.expect(std.mem.find(u8, ended.stderr, killed) != null);
+    }
+}

@@ -436,10 +436,7 @@ fn built(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, wh
     const argv = try buildArgv(env, parsed, resolution, where, before, after);
     var child = std.process.spawn(env.io, .{ .argv = argv, .cwd = .{ .path = env.package }, .environ_map = env.environ }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
-    return switch (try child.wait(env.io)) {
-        .exited => |code| code,
-        else => 1,
-    };
+    return say.exited(env.io, env.zig, try child.wait(env.io));
 }
 
 /// What Zig logs, configuring a build, for each lazy package the configuration asks for,
@@ -480,13 +477,22 @@ fn bringPrebuilts(env: Env, parsed: manifest.Manifest, resolution: resolve.Resol
 
 /// Zig's listing of the steps of the package's build (`.package`) or its development
 /// build: `configured` false when the build does not configure, its error in `stderr`.
-const Listing = struct { configured: bool, stdout: []const u8, stderr: []const u8 };
+const Listing = struct { configured: bool, term: std.process.Child.Term, stdout: []const u8, stderr: []const u8 };
 
 fn stepsOf(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution, where: Where) !Listing {
     const argv = try buildArgv(env, parsed, resolution, where, &.{"-l"}, &.{});
     const listed = intake.run(env.a, env.io, .{ .argv = argv, .cwd = .{ .path = env.package }, .environ_map = env.environ, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
         try say.fail(env.io, "could not run {s}: {t}", .{ env.zig, err });
-    return .{ .configured = listed.term == .exited and listed.term.exited == 0, .stdout = listed.stdout.readForParse(), .stderr = listed.stderr.readForParse() };
+    return .{ .configured = listed.term == .exited and listed.term.exited == 0, .term = listed.term, .stdout = listed.stdout.readForParse(), .stderr = listed.stderr.readForParse() };
+}
+
+/// Why a build did not configure, said: what Zig wrote, and how it ended where it was ended
+/// without exiting or exited having written nothing, so the run never fails without a sentence.
+fn unconfigured(env: Env, listed: Listing) !u8 {
+    try say.relay(env.io, listed.stderr);
+    const code = try say.exited(env.io, env.zig, listed.term);
+    if (std.mem.trim(u8, listed.stderr, " \t\r\n").len == 0) try say.fail(env.io, "{s} build -l exited with code {d} and wrote nothing: the build did not configure", .{ env.zig, code });
+    return 1;
 }
 
 /// The zig build command line over a resolved graph: `before` ahead of the
@@ -706,10 +712,7 @@ fn step(env: Env, name: []const u8, args: []const []const u8) !u8 {
     const parsed = try manifest.parse(env.a, try env.readManifest());
     const resolution = try buildable(env, parsed);
     const listed = try stepsOf(env, parsed, resolution, .package);
-    if (!listed.configured) {
-        try say.relay(env.io, listed.stderr);
-        return 1;
-    }
+    if (!listed.configured) return unconfigured(env, listed);
     if (steps.listed(listed.stdout, name)) return built(env, parsed, resolution, .package, &.{name}, args);
     if (parsed.dev.len == 0) try say.fail(env.io, "the package has no step '{s}' and no dev dependencies", .{name});
     return built(env, parsed, resolution, .development, &.{name}, args);
@@ -739,10 +742,7 @@ fn configured(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolutio
     for ([_]Where{ .package, .development }) |where| {
         if (where == .development and parsed.dev.len == 0) continue;
         const listed = try stepsOf(env, parsed, resolution, where);
-        if (!listed.configured) {
-            try say.relay(env.io, listed.stderr);
-            return 1;
-        }
+        if (!listed.configured) return unconfigured(env, listed);
     }
     return 0;
 }
@@ -1098,10 +1098,8 @@ fn prepare(io: Io, a: std.mem.Allocator, zig: []const u8, path: []const u8) !u8 
     if (dir.access(io, "build.zig.zon", .{})) |_| {} else |missing| {
         if (missing != error.FileNotFound) return missing;
         var child = std.process.spawn(io, .{ .argv = &.{ zig, "init" }, .cwd = .{ .path = path } }) catch |err| try say.fail(io, "could not run {s}: {t}", .{ zig, err });
-        switch (try child.wait(io)) {
-            .exited => |code| if (code != 0) return code,
-            else => return 1,
-        }
+        const code = try say.exited(io, zig, try child.wait(io));
+        if (code != 0) return code;
     }
     const text = (try intake.readFile(io, dir, "build.zig.zon", a, .fromRaw(1 << 20))).readForParse();
     if (try manifest.ensureList(a, try a.dupeSentinel(u8, text, 0), .dev)) |edited| try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = edited });

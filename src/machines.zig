@@ -262,10 +262,7 @@ pub fn receive(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ
     try gate_environ.put("PREFLIGHT_PORTABLE", "elsewhere");
     var child = std.process.spawn(io, .{ .argv = &.{ bay, "gate" }, .cwd = .{ .path = try std.fs.path.join(a, &.{ directory, package }) }, .environ_map = &gate_environ }) catch |err|
         try say.fail(io, "could not run bay gate: {t}", .{err});
-    return switch (try child.wait(io)) {
-        .exited => |code| code,
-        else => 1,
-    };
+    return say.exited(io, "bay gate", try child.wait(io));
 }
 
 fn git(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, cwd: ?[]const u8, args: []const []const u8) !void {

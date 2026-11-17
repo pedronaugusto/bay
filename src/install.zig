@@ -182,10 +182,8 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
     const argv = try buildCommand(c, work, stage, try std.fs.path.join(c.a, &.{ data, "cache", name }));
     var child = std.process.spawn(c.io, .{ .argv = argv, .cwd = .{ .path = work } }) catch |err|
         try say.fail(c.io, "could not run {s}: {t}", .{ argv[0], err });
-    switch (try child.wait(c.io)) {
-        .exited => |code| if (code != 0) return code,
-        else => return 1,
-    }
+    const code = try say.exited(c.io, argv[0], try child.wait(c.io));
+    if (code != 0) return code;
     const files = try listTree(c, stage);
     if (files.len == 0) try say.fail(c.io, "{s} installs nothing", .{name});
     const previous = find(records.items, name);
