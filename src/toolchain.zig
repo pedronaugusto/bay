@@ -88,7 +88,7 @@ pub fn path(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
 /// Downloads `version`'s build for this host, verifies it, and unpacks it to
 /// `home` in one rename: a bay that finds `home` finds the whole toolchain.
 fn install(io: Io, a: std.mem.Allocator, client: *std.http.Client, version: []const u8, home: []const u8) !void {
-    const index = try download.getAlloc(client, a, index_url, 16 << 20);
+    const index = try download.getAlloc(client, a, index_url, .{ .limit = 16 << 20 });
     const build = lookup(a, index, version, host) catch |err| switch (err) {
         error.UnknownVersion => try say.fail(io, "ziglang.org has no Zig {s}; its index has {s}", .{ version, try known(a, index) }),
         error.NoBuildForHost => try say.fail(io, "Zig {s} has no build for {s} on ziglang.org", .{ version, host }),
@@ -98,7 +98,7 @@ fn install(io: Io, a: std.mem.Allocator, client: *std.http.Client, version: []co
     };
     const file = std.fs.path.basenamePosix(build.url);
     const signature_url = try a.print("{s}.minisig", .{build.url});
-    const signature_text = try download.getAlloc(client, a, signature_url, 4096);
+    const signature_text = try download.getAlloc(client, a, signature_url, .{ .limit = 4096 });
     const signature = minisign.Signature.parse(signature_text) catch |err|
         try say.fail(io, "{s} is not a minisign signature: {t}", .{ signature_url, err });
     var verifier = minisign.Verifier.init(signature, zig_key) catch |err|
@@ -195,7 +195,7 @@ fn fetch(io: Io, client: *std.http.Client, build: Build, archive: []const u8) !v
     defer file.close(io);
     var buffer: [64 * 1024]u8 = undefined;
     var writer = file.writer(io, &buffer);
-    const length = download.get(client, build.url, &writer.interface, build.size) catch |err| switch (err) {
+    const length = download.get(client, build.url, &writer.interface, .{ .limit = build.size }) catch |err| switch (err) {
         error.WriteFailed => return writer.err orelse err,
         else => |e| return e,
     };

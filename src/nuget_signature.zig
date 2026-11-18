@@ -1,5 +1,5 @@
-//! A NuGet package's author signature, checked by cloak's `cloak-nuget-check` (designs/bay.md
-//! §11): bay carries no CMS and no trust store of its own. The pin names its root by the root
+//! A NuGet package's author signature, checked by cloak's `cloak-nuget-check` (docs/design.md,
+//! Prebuilt pins): bay carries no CMS and no trust store of its own. The pin names its root by the root
 //! certificate's URL and SHA-256; the certificate is fetched and kept by its digest, as an
 //! archive is. The tool is built from the cloak bay pins, as bay pins Zig, with the Zig bay
 //! manages, once, and kept by the cloak it was built from; a project that lists cloak among its
@@ -96,7 +96,7 @@ fn rootFile(c: Context, client: *std.http.Client, root: manifest.NugetRoot, fres
         else => try say.note(io, "the kept root {s} could not be read ({t}): downloading it again", .{ path, err }),
     };
     try say.note(io, "downloading {s}", .{root.url});
-    const bytes = download.getAlloc(client, a, root.url, largest_root) catch |err| try say.fail(io, "could not download the root {s}: {t}", .{ root.url, err });
+    const bytes = download.getAlloc(client, a, root.url, .{ .limit = largest_root }) catch |err| try say.fail(io, "could not download the root {s}: {t}", .{ root.url, err });
     if (!holds(bytes, root.sha256)) try say.fail(io, "{s} is not the root its pin names: its SHA-256 differs", .{root.url});
     const partial = try a.print("{s}.partial", .{path});
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = partial, .data = bytes });

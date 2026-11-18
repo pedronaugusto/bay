@@ -34,7 +34,7 @@ pub const Dependency = struct {
     prebuilt: ?Prebuilt = null,
 };
 
-/// A prebuilt pin's fields beside Zig's (designs/bay.md §11): what bay checks of the
+/// A prebuilt pin's fields beside Zig's (docs/design.md, Prebuilt pins): what bay checks of the
 /// archive before it unpacks a byte, and where its licence is stated.
 pub const Prebuilt = struct {
     /// The archive's SHA-256.

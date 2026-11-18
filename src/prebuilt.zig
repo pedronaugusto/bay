@@ -1,4 +1,4 @@
-//! Prebuilt pins (designs/bay.md §11): an archive Zig's fetch refuses, behind a
+//! Prebuilt pins (docs/design.md, Prebuilt pins): an archive Zig's fetch refuses, behind a
 //! `bay+https://` URL, brought into Zig's cache by bay. The archive is downloaded no
 //! longer than its pin says, checked against its digest and its publisher before a
 //! byte of it is unpacked, and kept in bay's data directory by its digest, so a
@@ -220,7 +220,7 @@ fn fetchArchive(c: Context, https: []const u8, kept: []const u8, expected: ?arch
         var buffer: [64 * 1024]u8 = undefined;
         var writer = file.writer(io, &buffer);
         try say.note(io, "downloading {s}", .{https});
-        _ = download.get(&client, https, &writer.interface, if (expected) |pinned| pinned.size else largest) catch |err| switch (err) {
+        _ = download.get(&client, https, &writer.interface, .{ .limit = if (expected) |pinned| pinned.size else largest }) catch |err| switch (err) {
             error.WriteFailed => return writer.err orelse err,
             else => |e| return e,
         };
@@ -229,10 +229,10 @@ fn fetchArchive(c: Context, https: []const u8, kept: []const u8, expected: ?arch
     const checked = expected orelse try digestOf(c, partial);
     const vouched: archive.Publisher = switch (word) {
         .none => .none,
-        .minisign => |key| .{ .minisign = .{ .key = key, .signature = try download.getAlloc(&client, a, try a.print("{s}.minisig", .{https}), 4096), .file = fileName(https) } },
+        .minisign => |key| .{ .minisign = .{ .key = key, .signature = try download.getAlloc(&client, a, try a.print("{s}.minisig", .{https}), .{ .limit = 4096 }), .file = fileName(https) } },
         .openpgp => |key_file| .{ .openpgp = .{
             .keys = if (intake.readFile(io, Io.Dir.cwd(), key_file, a, .fromRaw(1 << 20))) |taken| taken.readForParse() else |err| try say.fail(io, "could not read {s}, the key {s}'s pin names: {t}", .{ key_file, https, err }),
-            .signature = try download.getAlloc(&client, a, try a.print("{s}.sig", .{https}), 64 * 1024),
+            .signature = try download.getAlloc(&client, a, try a.print("{s}.sig", .{https}), .{ .limit = 64 * 1024 }),
         } },
         .nuget => .{ .sha512 = try nugetHash(c, &client, https) },
     };
@@ -334,19 +334,19 @@ fn zigFetch(c: Context, tree: []const u8) ![]const u8 {
 
 /// The SHA-512 nuget.org's catalog holds for the package at `https`, which must be in the
 /// package base its service index names, as `<id>/<version>/<id>.<version>.nupkg`: nuget.org's
-/// word over TLS, read apart from the package (designs/bay.md §11).
+/// word over TLS, read apart from the package (docs/design.md, Prebuilt pins).
 fn nugetHash(c: Context, client: *std.http.Client, https: []const u8) ![Sha512.digest_length]u8 {
     const io = c.io;
     const a = c.a;
     const index = nuget_index;
-    const resources = nugetResources(a, try download.getAlloc(client, a, index, 1 << 20)) catch
+    const resources = nugetResources(a, try download.getAlloc(client, a, index, .{ .limit = 1 << 20 })) catch
         try say.fail(io, "{s} is not a NuGet service index bay can read", .{index});
     const package = nugetPackage(resources.base, https) orelse
         try say.fail(io, "{s} is not a package under {s}, the base {s} names, as <id>/<version>/<id>.<version>.nupkg", .{ https, resources.base, index });
     const registration_url = try a.print("{s}{s}/{s}.json", .{ resources.registrations, package.id, package.version });
-    const entry = catalogEntry(a, try download.getAlloc(client, a, registration_url, 1 << 20)) catch
+    const entry = catalogEntry(a, try download.getAlloc(client, a, registration_url, .{ .limit = 1 << 20 })) catch
         try say.fail(io, "{s} names no catalog entry", .{registration_url});
-    return packageHash(a, try download.getAlloc(client, a, entry, 1 << 20), package) catch |err| switch (err) {
+    return packageHash(a, try download.getAlloc(client, a, entry, .{ .limit = 1 << 20 }), package) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.OtherPackage => try say.fail(io, "{s} is the catalog entry of another package than {s} {s}", .{ entry, package.id, package.version }),
         error.NotSha512 => try say.fail(io, "{s} gives the package's hash by another algorithm than SHA-512", .{entry}),

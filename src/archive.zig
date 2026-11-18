@@ -1,4 +1,4 @@
-//! The archives bay unpacks itself: a prebuilt pin's (designs/bay.md §11), which
+//! The archives bay unpacks itself: a prebuilt pin's (docs/design.md, Prebuilt pins), which
 //! Zig's fetch refuses. Three formats, told by their first bytes, never by a name or
 //! what the server calls them: a tar compressed by gzip or by zstd, and a zip of
 //! stored or deflated entries (a NuGet package is one). xz and bzip2 are refused by

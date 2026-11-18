@@ -75,7 +75,7 @@ pub fn audit(r: resolve.Resolution, token: ?[]const u8) !bool {
         var headers: std.ArrayList(std.http.Header) = .empty;
         try headers.append(a, .{ .name = "accept", .value = "application/vnd.github+json" });
         if (token) |t| try headers.append(a, .{ .name = "authorization", .value = try a.print("Bearer {s}", .{t}) });
-        _ = try download.getWith(&client, api, &body.writer, 8 << 20, headers.items);
+        _ = try download.get(&client, api, &body.writer, .{ .limit = 8 << 20, .headers = headers.items });
         const advisories = std.json.parseFromSliceLeaky([]const Advisory, a, body.written(), .{ .ignore_unknown_fields = true }) catch
             try say.fail(io, "{s} answered advisories bay cannot read", .{api});
         for (advisories) |advisory| {

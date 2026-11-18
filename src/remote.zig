@@ -26,7 +26,7 @@ pub fn tags(io: Io, a: std.mem.Allocator, url: []const u8) ![]const Tag {
     const refs_url = try a.print("{s}/info/refs?service=git-upload-pack", .{repo});
     var client: std.http.Client = .{ .allocator = a, .io = io };
     defer client.deinit();
-    const body = try download.getAlloc(&client, a, refs_url, 64 << 20);
+    const body = try download.getAlloc(&client, a, refs_url, .{ .limit = 64 << 20 });
     return parse(a, body) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.InvalidAdvertisement => try say.fail(io, "{s} did not answer as a smart HTTP git server", .{repo}),

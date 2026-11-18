@@ -149,6 +149,11 @@ checked against what the publisher signs.
   through cloak's `cloak-nuget-check`, built from the cloak bay pins, so bay carries no CMS or trust store), or
   `.none`, written by hand so the choice shows. A `.nuget` pin outside nuget.org is refused until a pin can name its
   feed's index.
+- **OpenPGP is checked in bay; NuGet's author signature is not.** An `.openpgp` pin's check is one detached
+  signature against the one key the pin names, through std's own RSA, Ed25519 and SHA-2 (SHA-1 only for the v4
+  fingerprint), with no keyring and no trust store, so it stays in `openpgp.zig`. A NuGet author signature is CMS
+  chained to a root through a certificate store, which is cloak's, so it goes to cloak's tool. That keeps cloak out of
+  the toolchain's closure: bay does not depend on cloak, whose tool is built only for a `.nuget` pin that names a root.
 - **One pin, one archive.** A runtime that needs three archives is three pins, and the consumer's build that knows
   the layout puts them together.
 - **Formats are told by the bytes**, never the URL or Content-Type: zip (stored, deflate, zip64), and a tar alone or

@@ -4,16 +4,20 @@ const std = @import("std");
 const Io = std.Io;
 const say = @import("say.zig");
 
-/// Streams the body `url` answers into `sink` and returns its length. Any
-/// status but 200, and a body longer than `limit`, are refused by name.
-/// `error.WriteFailed` is the sink's: its own error says why.
-pub fn get(client: *std.http.Client, url: []const u8, sink: *Io.Writer, limit: u64) !u64 {
-    return getWith(client, url, sink, limit, &.{});
-}
+/// What a request asks: at most `limit` bytes of body, with `headers` sent
+/// beside bay's own (an API's media type, a token).
+pub const Get = struct {
+    limit: u64,
+    headers: []const std.http.Header = &.{},
+};
 
-/// `get`, sending `headers` too: an API's media type, a token.
-pub fn getWith(client: *std.http.Client, url: []const u8, sink: *Io.Writer, limit: u64, headers: []const std.http.Header) !u64 {
+/// Streams the body `url` answers into `sink` and returns its length. Any
+/// status but 200, and a body longer than `options.limit`, are refused by
+/// name. `error.WriteFailed` is the sink's: its own error says why.
+pub fn get(client: *std.http.Client, url: []const u8, sink: *Io.Writer, options: Get) !u64 {
     const io = client.io;
+    const limit = options.limit;
+    const headers = options.headers;
     const uri = std.Uri.parse(url) catch try say.fail(io, "{s} is not a URL", .{url});
     // The body is wanted as the server stores it: a signature or a digest covers those bytes.
     var request = client.request(.GET, uri, .{ .headers = .{ .accept_encoding = .{ .override = "identity" } }, .extra_headers = headers }) catch |err|
@@ -38,13 +42,52 @@ pub fn getWith(client: *std.http.Client, url: []const u8, sink: *Io.Writer, limi
     }
 }
 
-/// The body `url` answers, at most `limit` bytes, in memory.
-pub fn getAlloc(client: *std.http.Client, a: std.mem.Allocator, url: []const u8, limit: u64) ![]u8 {
+/// The body `url` answers, at most `options.limit` bytes, in memory.
+pub fn getAlloc(client: *std.http.Client, a: std.mem.Allocator, url: []const u8, options: Get) ![]u8 {
     var body: Io.Writer.Allocating = .init(a);
-    _ = get(client, url, &body.writer, limit) catch |err| switch (err) {
+    defer body.deinit();
+    _ = get(client, url, &body.writer, options) catch |err| switch (err) {
         // The only way an allocating writer fails.
         error.WriteFailed => return error.OutOfMemory,
         else => |e| return e,
     };
-    return body.written();
+    // Owned at the length written, so the caller frees it with `a` as it would any slice.
+    return body.toOwnedSlice();
+}
+
+test "a request sends the caller's headers beside bay's, and takes the body up to its limit" {
+    const io = std.testing.io;
+    const loopback: std.Io.net.IpAddress = try .parse("127.0.0.1", 0);
+    var server = try loopback.listen(io, .{});
+    defer server.deinit(io);
+    const Serve = struct {
+        fn run(s: *std.Io.net.Server, saw: *bool) void {
+            const stream = s.accept(std.testing.io) catch return;
+            defer stream.close(std.testing.io);
+            var in: [4096]u8 = undefined;
+            var reader = stream.reader(std.testing.io, &in);
+            var head: std.ArrayList(u8) = .empty;
+            defer head.deinit(std.testing.allocator);
+            while (!std.mem.endsWith(u8, head.items, "\r\n\r\n")) {
+                const byte = reader.interface.takeByte() catch return;
+                head.append(std.testing.allocator, byte) catch return;
+            }
+            saw.* = std.ascii.findIgnoreCase(head.items, "x-bay-test: asked") != null;
+            var out: [256]u8 = undefined;
+            var writer = stream.writer(std.testing.io, &out);
+            writer.interface.writeAll("HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok") catch return;
+            writer.interface.flush() catch return;
+        }
+    };
+    var saw = false;
+    const thread = try std.Thread.spawn(.{}, Serve.run, .{ &server, &saw });
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    defer client.deinit();
+    const url = try std.testing.allocator.print("http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+    const body = try getAlloc(&client, std.testing.allocator, url, .{ .limit = 2, .headers = &.{.{ .name = "x-bay-test", .value = "asked" }} });
+    defer std.testing.allocator.free(body);
+    thread.join();
+    try std.testing.expectEqualStrings("ok", body);
+    try std.testing.expect(saw);
 }
