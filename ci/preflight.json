@@ -1,4 +1,5 @@
 {
+  "policy": "family",
   "glint": {
     "rules": [
       {"id": "A001", "level": "gate"},
