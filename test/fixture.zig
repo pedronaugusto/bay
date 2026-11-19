@@ -40,6 +40,9 @@ pub const Fixture = struct {
         _ = env.swapRemove("SSH_AUTH_SOCK");
         // A release on a remote named as GitHub's reaches only the API a test serves.
         _ = env.swapRemove("GITHUB_TOKEN");
+        // gh's login is the person's, never a test's: gh reads its configuration from here, empty.
+        _ = env.swapRemove("GH_TOKEN");
+        try env.put("GH_CONFIG_DIR", try std.fs.path.join(a, &.{ root, "gh" }));
         _ = env.swapRemove("GITHUB_API_URL");
         // Windows keeps bay's data under LOCALAPPDATA: the fixture's too.
         try env.put("LOCALAPPDATA", try std.fs.path.join(a, &.{ root, "local" }));

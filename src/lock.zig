@@ -1,5 +1,6 @@
 //! One train per workspace and one gate per directory on a machine: each holds a lock that a
-//! second refuses by name, never runs beside. Two trains once gated one checkout at once, and
+//! second refuses by name, never runs beside. One hosted release run at a time on a machine:
+//! the release queue, which a second release waits for rather than refuses. Two trains once gated one checkout at once, and
 //! the second's build failed on a file the first was writing. The locks are files in bay's data
 //! directory, named for what they hold and its path, and the system lets them go when the
 //! process ends, however it ends. What holds a lock says so in a file beside it, which no lock
@@ -11,8 +12,9 @@ const Io = std.Io;
 const dirs = @import("dirs.zig");
 const say = @import("say.zig");
 
-/// What a lock holds a directory for.
-pub const Kind = enum { train, gate };
+/// What a lock holds a directory for; `release_queue` holds bay's data directory, for the
+/// hosted release run every release on the machine takes in turn.
+pub const Kind = enum { train, gate, release_queue };
 
 /// A held lock, let go by `release` or by the process ending.
 pub const Held = struct {
@@ -33,6 +35,22 @@ pub fn hold(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
         .held => |held| held,
         .busy => |busy| try say.fail(io, "a {t} holds {s} already{s}: one runs there at a time, so wait for it to end", .{ kind, busy.path, if (busy.holder.len == 0) "" else try a.print(" ({s})", .{busy.holder}) }),
     };
+}
+
+/// The lock of `kind` on `path`, once whatever holds it lets it go: asked again every `poll`,
+/// what holds it said once while it waits.
+pub fn wait(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, kind: Kind, relative: []const u8, poll: Io.Duration) !Held {
+    var told = false;
+    while (true) {
+        switch (try take(io, a, environ, kind, relative)) {
+            .held => |held| return held,
+            .busy => |busy| if (!told) {
+                told = true;
+                try say.note(io, "waiting: another release holds the {t}{s}", .{ kind, if (busy.holder.len == 0) "" else try a.print(" ({s})", .{busy.holder}) });
+            },
+        }
+        try io.sleep(poll, .awake);
+    }
 }
 
 /// A lock taken, or the path another holds and what it says of itself.

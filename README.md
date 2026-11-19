@@ -318,16 +318,30 @@ anything else the last number. An empty section releases nothing. The section be
 `## [X.Y.Z] - date` (its groups in order, a group written twice made one), the manifest's
 `.version` takes the version, and both are committed as `Release vX.Y.Z`. That commit is
 gated by the package's own `gate` step (preflight's, from its development build), and only
-when the gate is green do the branch and the tag `vX.Y.Z` go to the branch's upstream, in
-one atomic push over SSH, read back before the tag is made here. A branch with no upstream
-goes where `git push -u` would send it, under its own name on the remote git pushes to by
-default or the one remote there is, and keeps that as its upstream. A red gate leaves the
-branch where it was. `bay release --dry-run` prints the version, the section and the plan;
+when the gate is green do the branch and the tag `vX.Y.Z` go to the remote's default
+branch, in one atomic push over SSH, read back before the tag is made here. The tag is
+annotated, its message the version. A release goes only to the remote's default branch, so
+releases are one line; a branch with no upstream goes where `git push -u` would send it,
+under its own name on the remote git pushes to by default or the one remote there is, and
+keeps that as its upstream. A red gate leaves the branch where it was.
+
+On GitHub, where the package's `ci.yml` (preflight's) dispatches a `tier` with `release`
+among its options, the release tier passes the commit before its tag: bay pushes it to
+`release/vX.Y.Z`, never to main, dispatches the tier there with your own login
+(`GITHUB_TOKEN`, else `gh auth token`; bay keeps no token) and waits, saying each job as it
+ends. One such run at a time goes from a machine. Green, the push carries the candidate's
+deletion with the branch and the tag, whose `Gated-by:` line names the run; red, the
+candidate is deleted, the failing jobs are named and nothing is tagged. The GitHub Release
+follows the push, its notes the section and the run. `bay audit releases` checks each
+release tag of the repository so: annotated, its run green on its commit, its GitHub
+Release naming the run; the tags from before the first such release are named once, as
+history. `bay release --dry-run` prints the version, the section and the plan;
 `bay release --no-push` commits and gates, and holds the gated commit for a later `bay
 release`, someone else's it may be, to push without gating it again.
 
 It refuses a tree with changes, a branch behind its remote, a branch with no upstream that
-more than one remote could take, a remote that is not SSH, a package in a workspace with
+more than one remote could take, a branch that would go anywhere but the remote's default
+branch, a remote that is not SSH, a package in a workspace with
 other members (their trees would stand in for its pins in the gate; `bay --workspace
 release` releases them), a version already tagged, a manifest and a changelog at
 different releases, and a line under no group. A release stopped after its commit is finished by the next `bay
@@ -365,7 +379,14 @@ then released. A member whose only change is development pins is gated and pushe
 tag; a member that fails stops the members that depend on it. A development pin that would
 close a ring (a tool developed with a member that ships it) moves last, once the release it
 waits for is out. `--dry-run` prints the plan and changes nothing: each member's release and
-what makes it, its section or the pins that move, the train's own releases included.
+what makes it, its section or the pins that move, the train's own releases included. Each
+member says it is the family's, `"policy": "family"` in its `ci/preflight.json`, or the
+train is refused before anything moves, each member without it named.
+
+`bay pin <dependency> <version>` moves one package onto a dependency's release as the train
+moves a member: pinned at the tag, tidied, the re-pin named and committed, then released
+when `[Unreleased]` held entries before it, or gated and pushed with no tag when the re-pin
+is all there is, its entry waiting for the next release.
 
 ## The exact Zig
 
@@ -408,9 +429,11 @@ every package below the graph, lazy ones included, for a bundle any host builds 
 | `bay outdated` | Packages the builds use with a newer release on their remote, or at a version their newest release retracts |
 | `bay licenses [--dev]` | Each package a build contains, with the license its files state; `--dev` adds the development tools |
 | `bay audit` | Each package the builds select, checked against its repository's published security advisories (GitHub; `GITHUB_TOKEN` when set) and its own retractions; fails on any finding |
+| `bay audit releases` | Each release tag of the package's GitHub repository, checked as `bay release` makes it: annotated, its `Gated-by` run of the release tier green on its commit, its GitHub Release naming the run; fails on any tag that falls short |
 | `bay vendor` | Every package the graph reads and the builds take on this host, into `zig-pkg`; `--all-hosts`, every package any host's build may ask for |
-| `bay release [--dry-run] [--no-push]` | Release the package from its CHANGELOG's `[Unreleased]` section: commit, gate here and on the machines in `machines.zon`, push the branch and its tag at once over SSH |
+| `bay release [--dry-run] [--no-push]` | Release the package from its CHANGELOG's `[Unreleased]` section: commit, gate here, on the machines in `machines.zon` and, where its `ci.yml` runs a release tier, on GitHub; push the default branch and its tag at once over SSH |
 | `bay --workspace release` | Release every member that changed, in dependency order, each pinned at the releases before it |
+| `bay pin [--dry-run] <dependency> <version>` | Move the package onto a dependency's release: pinned, named in the CHANGELOG, committed, gated and pushed; released when `[Unreleased]` held entries before |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
 | `bay fetch` | Fetch what both builds take on this host, lazy dependencies their configuration asks for included |
 | `bay install [--prefix <dir>] [--name <name>] [--force] [<url or dir>]` | Build a package's programs (ReleaseSafe) into `<dir>/bin`, `~/.local/bin` by default; with no source, the package here |

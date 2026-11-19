@@ -150,7 +150,8 @@ fn request(api: Api, method: std.http.Method, url: []const u8, payload: ?[]const
         .location = .{ .url = url },
         .method = method,
         .payload = payload,
-        .headers = .{ .content_type = .{ .override = content_type }, .user_agent = .{ .override = "bay" }, .authorization = .{ .override = try a.print("Bearer {s}", .{api.token}) } },
+        // With no token, GitHub answers what it shows anyone: a public repository's runs and releases.
+        .headers = .{ .content_type = .{ .override = content_type }, .user_agent = .{ .override = "bay" }, .authorization = if (api.token.len == 0) .omit else .{ .override = try a.print("Bearer {s}", .{api.token}) } },
         .extra_headers = &headers,
         // A redirect is answered, not followed: the token goes only to the host asked.
         .redirect_behavior = .unhandled,
@@ -161,4 +162,104 @@ fn request(api: Api, method: std.http.Method, url: []const u8, payload: ?[]const
     };
     const written = body.written();
     return .{ .status = result.status, .body = written[0..@min(written.len, 1 << 20)] };
+}
+
+/// A workflow run as bay reads it: which commit it ran on, where it stands, and how it ended.
+pub const Run = struct {
+    id: u64,
+    head_sha: []const u8,
+    /// The branch it ran on: a release's candidate, `release/vX.Y.Z`.
+    head_branch: ?[]const u8 = null,
+    /// `queued`, `in_progress`, `completed` (and GitHub's waiting states).
+    status: []const u8,
+    /// Set once completed: `success`, `failure`, `cancelled`, `timed_out`, and the rest.
+    conclusion: ?[]const u8 = null,
+    html_url: []const u8 = "",
+    created_at: []const u8 = "",
+};
+
+/// One job of a run.
+pub const Job = struct {
+    name: []const u8,
+    status: []const u8,
+    conclusion: ?[]const u8 = null,
+};
+
+/// Starts `workflow` (its file name, `ci.yml`) on `ref` with `inputs` (a JSON object), as its
+/// `workflow_dispatch` takes them. GitHub answers no run: `newestRun` finds it.
+pub fn dispatch(api: Api, repository: []const u8, workflow: []const u8, ref: []const u8, inputs: []const u8, problem: *Problem) Error!void {
+    const a = api.a;
+    const url = try a.print("{s}/repos/{s}/actions/workflows/{s}/dispatches", .{ api.base, repository, workflow });
+    var ref_json: Io.Writer.Allocating = .init(a);
+    std.json.Stringify.value(ref, .{}, &ref_json.writer) catch return error.OutOfMemory;
+    const body = try a.print("{{\"ref\":{s},\"inputs\":{s}}}", .{ ref_json.written(), inputs });
+    const sent = try request(api, .POST, url, body, "application/json", problem);
+    if (sent.status != .no_content) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(sent.status), sent.body });
+}
+
+/// The newest run dispatched on `branch` at `head_sha` created at or after `since` (GitHub's
+/// `YYYY-MM-DDTHH:MM:SSZ`, which orders as text), or null while GitHub shows none yet.
+pub fn newestRun(api: Api, repository: []const u8, branch: []const u8, head_sha: []const u8, since: []const u8, problem: *Problem) Error!?Run {
+    const a = api.a;
+    var encoded: Io.Writer.Allocating = .init(a);
+    for (branch) |byte| switch (byte) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '-', '_', '~' => encoded.writer.writeByte(byte) catch return error.OutOfMemory,
+        else => encoded.writer.print("%{X:0>2}", .{byte}) catch return error.OutOfMemory,
+    };
+    const url = try a.print("{s}/repos/{s}/actions/runs?branch={s}&event=workflow_dispatch&per_page=20", .{ api.base, repository, encoded.written() });
+    const answer = try request(api, .GET, url, null, "application/json", problem);
+    if (answer.status != .ok) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(answer.status), answer.body });
+    const Listing = struct { workflow_runs: []const Run = &.{} };
+    const listing = std.json.parseFromSliceLeaky(Listing, a, answer.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return fail(a, problem, "{s} answered runs bay cannot read", .{url}),
+    };
+    var newest: ?Run = null;
+    for (listing.workflow_runs) |one| {
+        if (!std.mem.eql(u8, one.head_sha, head_sha)) continue;
+        if (std.mem.order(u8, one.created_at, since) == .lt) continue;
+        if (newest == null or one.id > newest.?.id) newest = one;
+    }
+    return newest;
+}
+
+/// The run `id` as it stands.
+pub fn run(api: Api, repository: []const u8, id: u64, problem: *Problem) Error!Run {
+    const a = api.a;
+    const url = try a.print("{s}/repos/{s}/actions/runs/{d}", .{ api.base, repository, id });
+    const answer = try request(api, .GET, url, null, "application/json", problem);
+    if (answer.status != .ok) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(answer.status), answer.body });
+    return std.json.parseFromSliceLeaky(Run, a, answer.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => fail(a, problem, "{s} answered a run bay cannot read", .{url}),
+    };
+}
+
+/// The jobs of run `id`, up to the first hundred: a release tier has a few dozen.
+pub fn jobs(api: Api, repository: []const u8, id: u64, problem: *Problem) Error![]const Job {
+    const a = api.a;
+    const url = try a.print("{s}/repos/{s}/actions/runs/{d}/jobs?per_page=100", .{ api.base, repository, id });
+    const answer = try request(api, .GET, url, null, "application/json", problem);
+    if (answer.status != .ok) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(answer.status), answer.body });
+    const Listing = struct { jobs: []const Job = &.{} };
+    const listing = std.json.parseFromSliceLeaky(Listing, a, answer.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return fail(a, problem, "{s} answered jobs bay cannot read", .{url}),
+    };
+    return listing.jobs;
+}
+
+/// The notes of the GitHub Release published at `tag`, or null where there is none.
+pub fn releaseNotes(api: Api, repository: []const u8, tag: []const u8, problem: *Problem) Error!?[]const u8 {
+    const a = api.a;
+    const url = try a.print("{s}/repos/{s}/releases/tags/{s}", .{ api.base, repository, tag });
+    const answer = try request(api, .GET, url, null, "application/json", problem);
+    if (answer.status == .not_found) return null;
+    if (answer.status != .ok) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(answer.status), answer.body });
+    const Held = struct { body: ?[]const u8 = null };
+    const held = std.json.parseFromSliceLeaky(Held, a, answer.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return fail(a, problem, "{s} answered a release bay cannot read", .{url}),
+    };
+    return held.body orelse "";
 }

@@ -6,11 +6,21 @@
 //! pins); only then do the branch and the tag go to the remote, in one atomic
 //! push over SSH, read back before the tag is made here.
 //!
+//! A package on GitHub whose workflow runs a release tier (preflight's ci.yml) is
+//! gated there too before its tag: the release commit goes to `release/vX.Y.Z` on
+//! the remote, never to main, the release tier is dispatched on it through
+//! GitHub's API with the person's own login (`gh auth token`, or GITHUB_TOKEN),
+//! and waited on, one hosted run at a time on the machine (the release queue).
+//! Only a green run lets the commit reach main, in the one atomic push that
+//! carries the tag, an annotated one whose `Gated-by:` names the run, and deletes
+//! the candidate branch. A release goes only to the remote's default branch.
+//!
 //! git is the record of a release under way: a red gate puts the branch back
 //! where it was; a run that stops leaves its release commit at HEAD, which the
 //! next run gates and pushes; a commit gated green whose push did not go is
-//! recorded in bay's data directory on this machine, so the next run pushes it
-//! without gating it again. No tag is ever made on a commit no gate passed.
+//! recorded in bay's data directory on this machine, with the hosted run that
+//! passed it, so the next run pushes it without gating it again. No tag is ever
+//! made on a commit no gate passed.
 const std = @import("std");
 const aegis = @import("aegis");
 const intake = @import("intake.zig");
@@ -47,6 +57,9 @@ pub const Options = struct {
     /// Commit and gate, and push nothing: the gated commit waits, recorded, for a later
     /// `bay release` (another person's, it may be) to push it without gating it again.
     no_push: bool = false,
+    /// With `push_unreleased`, push the commits with no tag whatever the section holds: a
+    /// re-pin by `bay pin` alone, its entry left for the next release.
+    no_tag: bool = false,
 };
 
 pub const Outcome = union(enum) {
@@ -181,18 +194,26 @@ fn gatedPath(a: std.mem.Allocator, data: []const u8, git_dir: []const u8, tag: [
     return std.fs.path.join(a, &.{ data, "gated", &std.fmt.bytesToHex(digest, .lower), tag });
 }
 
-/// The commit recorded at `path`, or null when there is none.
-fn recorded(io: Io, a: std.mem.Allocator, path: []const u8) !?[]const u8 {
-    const text = if (intake.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(256))) |taken| taken.readForParse() else |err| switch (err) {
+/// What a record holds: the commit gated green here, and the hosted run that passed it too,
+/// where it had one.
+const Recorded = struct { commit: []const u8, hosted: ?[]const u8 };
+
+/// The record at `path`, or null when there is none: the commit on its first line, the hosted
+/// run's page on a second.
+fn recorded(io: Io, a: std.mem.Allocator, path: []const u8) !?Recorded {
+    const text = if (intake.readFile(io, Io.Dir.cwd(), path, a, .fromRaw(4096))) |taken| taken.readForParse() else |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
-    return std.mem.trim(u8, text, " \r\n");
+    var lines = std.mem.tokenizeAny(u8, text, "\r\n");
+    const commit = lines.next() orelse return null;
+    return .{ .commit = commit, .hosted = lines.next() };
 }
 
-fn record(io: Io, path: []const u8, commit: []const u8) !void {
+fn record(io: Io, a: std.mem.Allocator, path: []const u8, commit: []const u8, hosted: ?[]const u8) !void {
     try Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?);
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = commit });
+    const text = if (hosted) |url| try a.print("{s}\n{s}\n", .{ commit, url }) else commit;
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
 }
 
 fn forget(io: Io, path: []const u8) !void {
@@ -242,25 +263,39 @@ const Plan = struct {
 /// trees in place of what the package pins, so the gate would pass on code no release
 /// holds: refused. A train's members are gated in their workspace, as it is made for.
 pub fn run(c: Context, options: Options) !Outcome {
-    const others = try workspace.members(c.io, c.a, c.package);
-    if (others.len != 0) {
-        const names = try c.a.alloc([]const u8, others.len);
-        for (names, others) |*name, member| name.* = std.fs.path.basename(member);
-        const file = (try workspace.fileOf(c.io, c.a, c.package)).?; // safe: a workspace has other members only when its file is found
-        try say.fail(c.io, "{s} holds this package with {s}: their trees would stand in for the pins, so the gate would not be the release's; release the workspace with bay --workspace release, or this package from a clone outside it", .{ file, try listed(c.a, names) });
-    }
+    try alone(c);
     return releaseOne(c, options);
 }
 
-/// The package released, its pins resolved as wherever it stands resolves them.
-fn releaseOne(c: Context, options: Options) !Outcome {
+fn alone(c: Context) !void {
+    const others = try workspace.members(c.io, c.a, c.package);
+    if (others.len == 0) return;
+    const names = try c.a.alloc([]const u8, others.len);
+    for (names, others) |*name, member| name.* = std.fs.path.basename(member);
+    const file = (try workspace.fileOf(c.io, c.a, c.package)).?; // safe: a workspace has other members only when its file is found
+    try say.fail(c.io, "{s} holds this package with {s}: their trees would stand in for the pins, so the gate would not be the release's; release the workspace with bay --workspace release, or this package from a clone outside it", .{ file, try listed(c.a, names) });
+}
+
+/// Where a release goes, once the refusals that come before anything is made have passed: the
+/// remote's default branch, from a clean tree that is not behind it; and whether the remote
+/// has the branch yet.
+fn releasable(c: Context) !struct { Upstream, bool } {
     const up = try upstream(c);
+    const default = try defaultBranch(c, up.remote);
+    if (!std.mem.eql(u8, up.merge, default))
+        try say.fail(c.io, "{s} would go to {s}, and a release goes only to {s}'s default branch, {s}: releases are one line, made from it", .{ up.branch, up.onto, up.remote, default["refs/heads/".len..] });
     if ((try must(c, &.{ "status", "--porcelain" })).len != 0) try say.fail(c.io, "the tree has changes: a release tags a commit as it is, so commit them or put them away first", .{});
     // The remote's tags are read from it (`ls-remote`), never fetched here: a refused release changes nothing.
     _ = try must(c, &.{ "fetch", "--quiet", "--no-tags", up.remote });
     const remote_has_branch = (try git(c, &.{ "rev-parse", "-q", "--verify", up.tracking })).ok;
     if (remote_has_branch and !(try git(c, &.{ "merge-base", "--is-ancestor", up.tracking, "HEAD" })).ok)
         try say.fail(c.io, "{s} is behind {s}: bring it up to date, then release", .{ up.branch, up.tracking["refs/remotes/".len..] });
+    return .{ up, remote_has_branch };
+}
+
+/// The package released, its pins resolved as wherever it stands resolves them.
+fn releaseOne(c: Context, options: Options) !Outcome {
+    const up, const remote_has_branch = try releasable(c);
     const head = try must(c, &.{ "rev-parse", "HEAD" });
     const manifest_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
     const parsed = manifest.parse(c.a, manifest_text) catch |err| switch (err) {
@@ -276,9 +311,10 @@ fn releaseOne(c: Context, options: Options) !Outcome {
     const current_tag = try tagName(c, current);
     const current_here = try localTag(c, current_tag);
     const current_there = tags.get(current_tag);
-    // A release the remote has at HEAD whose read-back this clone never saw.
+    // A release the remote has at HEAD whose read-back this clone never saw: its tag, the one
+    // the remote holds (annotated, with its Gated-by), fetched here.
     if (current_there) |sha| if (current_here == null and std.mem.eql(u8, sha, head)) {
-        _ = try must(c, &.{ "tag", current_tag, head });
+        _ = try must(c, &.{ "fetch", "--quiet", "--no-tags", up.remote, try c.a.print("refs/tags/{s}:refs/tags/{s}", .{ current_tag, current_tag }) });
         try say.note(c.io, "{s} is on {s} at {s}: tagged here too", .{ current_tag, up.remote, head[0..12] });
     };
     if (current_here != null and current_there == null)
@@ -295,13 +331,15 @@ fn releaseOne(c: Context, options: Options) !Outcome {
         }
         const unreleased = try section(c, log);
         const change = unreleased.change();
-        if (change == .none) {
+        if (change == .none or options.no_tag) {
             if (options.push_unreleased and remote_has_branch and !std.mem.eql(u8, head, try must(c, &.{ "rev-parse", up.tracking }))) {
                 return pushUnreleased(c, up, head, options);
             }
             // A release this clone pushed, or another's, at HEAD: its GitHub Release finished.
             if (newest != null and current_there != null and std.mem.eql(u8, current_there.?, head) and !options.dry_run) try publishRelease(c, up, current_tag, current, .resumed);
-            try say.note(c.io, "nothing to release: CHANGELOG.md's [Unreleased] lists nothing", .{});
+            if (change == .none) {
+                try say.note(c.io, "nothing to release: CHANGELOG.md's [Unreleased] lists nothing", .{});
+            } else try say.note(c.io, "nothing pushed: {s} holds every commit here, and [Unreleased] waits for the next release", .{up.onto});
             return .nothing;
         }
         // The first release is the version the manifest names: nothing came before it.
@@ -313,6 +351,8 @@ fn releaseOne(c: Context, options: Options) !Outcome {
         break :plan .{ .version = version, .tag = tag, .start = head, .cut = .{ .from = current, .section = unreleased, .text = log, .manifest = manifest_text } };
     };
     try pinsAreReleases(c, parsed);
+    // Where the release tier must pass on GitHub, a login to dispatch it is asked for first.
+    const hosted = if (options.dry_run or options.no_push) null else try hostedTarget(c, up);
     const gate_machines = try machines.load(c.io, c.a, c.environ);
     if (options.dry_run) {
         try dryRun(c, up, plan, gate_machines, options);
@@ -342,21 +382,342 @@ fn releaseOne(c: Context, options: Options) !Outcome {
     }
     const commit = try must(c, &.{ "rev-parse", "HEAD" });
     const gated = try gatedRecord(c, plan.tag);
-    if (std.mem.eql(u8, try recorded(c.io, c.a, gated) orelse "", commit)) {
-        try say.note(c.io, "{s} at {s} was gated green; pushing it", .{ plan.tag, commit[0..12] });
+    var gated_by: ?[]const u8 = null;
+    const held = try recorded(c.io, c.a, gated);
+    if (held != null and std.mem.eql(u8, held.?.commit, commit)) {
+        gated_by = held.?.hosted;
+        try say.note(c.io, "{s} at {s} was gated green{s}; pushing it", .{ plan.tag, commit[0..12], if (gated_by != null) ", here and on GitHub" else "" });
     } else if (try gateEverywhere(c, gate_machines)) |red| {
         _ = try must(c, &.{ "reset", "--quiet", "--keep", plan.start });
         try say.fail(c.io, "the gate is red {s}: nothing was tagged or pushed, and {s} is back at {s}", .{ red, up.branch, plan.start[0..12] });
-    } else try record(c.io, gated, commit);
+    } else try record(c.io, c.a, gated, commit, null);
     if (options.no_push) {
         try say.note(c.io, "{s} at {s} is gated green and held here: bay release pushes it, with no gate again", .{ plan.tag, commit[0..12] });
         return .{ .held = plan.version };
     }
-    try push(c, up, commit, plan.tag);
+    if (hosted != null and gated_by == null) {
+        gated_by = try hostedGate(c, up, hosted.?, commit, plan.tag, plan.start, gated);
+        try record(c.io, c.a, gated, commit, gated_by);
+    }
+    try push(c, up, commit, .{ .name = plan.tag, .gated_by = gated_by });
     try forget(c.io, gated);
     try say.note(c.io, "released {s} {s} at {s}: {s} and the tag {s} on {s}", .{ parsed.name, plan.tag, commit[0..12], up.onto, plan.tag, up.remote });
     try publishRelease(c, up, plan.tag, plan.version, .just_pushed);
     return .{ .released = plan.version };
+}
+
+/// The branch a remote's HEAD names, `refs/heads/main` where it names none (an empty one).
+fn defaultBranch(c: Context, remote: []const u8) ![]const u8 {
+    const listing = try git(c, &.{ "ls-remote", "--symref", remote, "HEAD" });
+    var lines = std.mem.tokenizeScalar(u8, listing.out, '\n');
+    while (lines.next()) |raw| {
+        const line_text = std.mem.trimEnd(u8, raw, "\r");
+        if (!std.mem.startsWith(u8, line_text, "ref: ")) continue;
+        const tab = std.mem.findScalar(u8, line_text, '\t') orelse continue;
+        const ref = line_text["ref: ".len..tab];
+        if (std.mem.startsWith(u8, ref, "refs/heads/")) return ref;
+    }
+    return "refs/heads/main";
+}
+
+/// GitHub access for a release: GITHUB_TOKEN where it is set, else the login `gh` keeps
+/// (`gh auth token`). bay stores no token of its own. Empty where there is neither.
+fn githubToken(c: Context) ![]const u8 {
+    if (c.environ.get("GITHUB_TOKEN")) |token| if (token.len != 0) return token;
+    const asked = intake.run(c.a, c.io, .{ .argv = &.{ "gh", "auth", "token" }, .environ_map = c.environ }) catch return "";
+    if (asked.term != .exited or asked.term.exited != 0) return "";
+    return std.mem.trim(u8, asked.stdout.readForParse(), " \r\n");
+}
+
+/// Where a release's hosted gate runs: its repository on GitHub and the API with the person's
+/// login. Null where the remote is not on github.com or the workflow runs no release tier.
+const Hosted = struct { repository: []const u8, token: []const u8, base: []const u8 };
+
+/// The workflow file a release tier is dispatched in, as preflight generates it.
+const workflow = "ci.yml";
+
+fn hostedTarget(c: Context, up: Upstream) !?Hosted {
+    const repository = github.slug(up.url) orelse return null;
+    const top = try must(c, &.{ "rev-parse", "--show-toplevel" });
+    var dir = try Io.Dir.cwd().openDir(c.io, top, .{});
+    defer dir.close(c.io);
+    const text = if (intake.readFile(c.io, dir, ".github/workflows/" ++ workflow, c.a, .fromRaw(4 << 20))) |taken| taken.readForParse() else |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    // A dispatch that takes the tier, and the release tier among its choices.
+    if (std.mem.find(u8, text, "workflow_dispatch:") == null or std.mem.find(u8, text, "options: [ci, release") == null) return null;
+    const token = try githubToken(c);
+    if (token.len == 0) try say.fail(c.io, "{s}'s workflow runs a release tier, which a release passes on GitHub before its tag: log in with gh auth login, or set GITHUB_TOKEN", .{repository});
+    const base = c.environ.get("GITHUB_API_URL") orelse "";
+    return .{ .repository = repository, .token = token, .base = if (base.len == 0) github.default_api else base };
+}
+
+/// The candidate branch a release's hosted gate runs on: `refs/heads/release/vX.Y.Z`.
+fn candidateRef(c: Context, tag: []const u8) ![]const u8 {
+    return c.a.print("refs/heads/release/{s}", .{tag});
+}
+
+/// How long the hosted gate waits between two looks at GitHub: BAY_POLL_SECONDS, else 30.
+fn pollInterval(c: Context) Io.Duration {
+    const given = c.environ.get("BAY_POLL_SECONDS") orelse "";
+    const seconds = std.fmt.parseInt(u32, given, 10) catch 30;
+    return aegis.units.Duration(.second, u32).fromRaw(seconds).toIoDuration();
+}
+
+/// A minute before now in GitHub's form, `YYYY-MM-DDTHH:MM:SSZ`: the earliest a run of this
+/// dispatch was made, a clock's skew allowed.
+fn dispatchedSince(c: Context) ![]const u8 {
+    const now = try aegis.units.Instant(.real, .second, i64).fromTimestamp(Io.Clock.real.now(c.io), .down);
+    const seconds: u64 = @intCast(@max(60, now.raw()) - 60); // safe: at least sixty before the subtraction
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = seconds };
+    const day = epoch.getEpochDay().calculateYearDay();
+    const month_day = day.calculateMonthDay();
+    const time = epoch.getDaySeconds();
+    return c.a.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, month_day.month.numeric(), month_day.day_index + 1, time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute() });
+}
+
+/// The hosted gate: the release commit on the candidate branch, the release tier dispatched on
+/// it and waited on, each job said as it ends, one run at a time on this machine. Green, the
+/// run's page, for the tag's `Gated-by`; red, the candidate deleted, the branch put back and the
+/// release refused, nothing reaching main or a tag.
+fn hostedGate(c: Context, up: Upstream, hosted: Hosted, commit: []const u8, tag: []const u8, start: []const u8, gated: []const u8) ![]const u8 {
+    const poll = pollInterval(c);
+    var queue = try lock.wait(c.io, c.a, c.environ, .release_queue, try dirs.data(c.io, c.a, c.environ), poll);
+    defer queue.release(c.io);
+    const candidate = try candidateRef(c, tag);
+    const branch = candidate["refs/heads/".len..];
+    // A candidate a stopped run left is this release's own: replaced, never pushed onto.
+    if ((try git(c, &.{ "ls-remote", "--exit-code", up.remote, candidate })).ok) _ = try must(c, &.{ "push", "--quiet", up.remote, try c.a.print(":{s}", .{candidate}) });
+    _ = try must(c, &.{ "push", "--quiet", up.remote, try c.a.print("{s}:{s}", .{ commit, candidate }) });
+    var client: std.http.Client = .{ .allocator = c.a, .io = c.io };
+    defer client.deinit();
+    const api: github.Api = .{ .client = &client, .a = c.a, .base = hosted.base, .token = hosted.token };
+    var problem: github.Problem = .{};
+    const since = try dispatchedSince(c);
+    github.dispatch(api, hosted.repository, workflow, branch, "{\"tier\":\"release\"}", &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
+    // GitHub makes the run a moment after the dispatch: looked for until it shows.
+    var looks: u32 = 0;
+    const found = while (true) : (looks += 1) {
+        if (github.newestRun(api, hosted.repository, branch, commit, since, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated)) |one| break one;
+        if (looks == 40) {
+            problem.what = try c.a.print("GitHub shows no run of {s} on {s} after {d} looks", .{ workflow, branch, looks });
+            try hostedFailed(c, up, error.GitHub, problem, candidate, start, gated);
+        }
+        try c.io.sleep(poll, .awake);
+    };
+    try say.note(c.io, "{s} at {s}: the release tier runs on GitHub, {s}", .{ tag, commit[0..12], found.html_url });
+    var said: std.StringHashMapUnmanaged(void) = .empty;
+    const ended = while (true) {
+        const now = github.run(api, hosted.repository, found.id, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
+        const job_list = github.jobs(api, hosted.repository, found.id, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
+        for (job_list) |job| if (job.conclusion) |conclusion| if (!said.contains(job.name)) {
+            try said.put(c.a, job.name, {});
+            try say.note(c.io, "hosted: {s}: {s}", .{ job.name, conclusion });
+        };
+        if (std.mem.eql(u8, now.status, "completed")) break .{ now, job_list };
+        try c.io.sleep(poll, .awake);
+    };
+    const finished = ended[0];
+    if (finished.conclusion != null and std.mem.eql(u8, finished.conclusion.?, "success")) {
+        try say.note(c.io, "hosted: green, {s}", .{finished.html_url});
+        return finished.html_url;
+    }
+    var red: std.ArrayList([]const u8) = .empty;
+    for (ended[1]) |job| if (job.conclusion) |conclusion| if (!std.mem.eql(u8, conclusion, "success") and !std.mem.eql(u8, conclusion, "skipped")) try red.append(c.a, job.name);
+    _ = try git(c, &.{ "push", "--quiet", up.remote, try c.a.print(":{s}", .{candidate}) });
+    _ = try must(c, &.{ "reset", "--quiet", "--keep", start });
+    try forget(c.io, gated);
+    try say.fail(c.io, "the release tier is {s} on GitHub ({s}): {s}; nothing was tagged or pushed to {s}, {s} is deleted, and {s} is back at {s}", .{ finished.conclusion orelse "unfinished", if (red.items.len == 0) "no job named" else try std.mem.join(c.a, ", ", red.items), finished.html_url, up.onto, branch, up.branch, start[0..12] });
+}
+
+/// A hosted gate GitHub would not run or answer: refused as a red one is, nothing reaching main.
+fn hostedFailed(c: Context, up: Upstream, err: github.Error, problem: github.Problem, candidate: []const u8, start: []const u8, gated: []const u8) !noreturn {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    _ = try git(c, &.{ "push", "--quiet", up.remote, try c.a.print(":{s}", .{candidate}) });
+    _ = try must(c, &.{ "reset", "--quiet", "--keep", start });
+    try forget(c.io, gated);
+    try say.fail(c.io, "the release tier could not run on GitHub: {s}; nothing was tagged or pushed to {s}, and {s} is back at {s}", .{ problem.what, up.onto, up.branch, start[0..12] });
+}
+
+/// The annotated tag object of a release, written into the repository and not yet named by any
+/// ref: the version as its message and, where the release tier passed it on GitHub, a
+/// `Gated-by:` line with the run. The tagger is the committer git names.
+fn annotate(c: Context, tag: Tag, commit: []const u8) ![]const u8 {
+    const tagger = try must(c, &.{ "var", "GIT_COMMITTER_IDENT" });
+    const message = if (tag.gated_by) |url| try c.a.print("{s}\n\nGated-by: {s}\n", .{ tag.name, url }) else try c.a.print("{s}\n", .{tag.name});
+    const cache = try std.fs.path.join(c.a, &.{ c.package, ".zig-cache", "bay", "release" });
+    try Io.Dir.cwd().createDirPath(c.io, cache);
+    const file = try std.fs.path.join(c.a, &.{ cache, try c.a.print("tag-{s}", .{tag.name}) });
+    try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = file, .data = try c.a.print("object {s}\ntype commit\ntag {s}\ntagger {s}\n\n{s}", .{ commit, tag.name, tagger, message }) });
+    return must(c, &.{ "hash-object", "-t", "tag", "-w", file });
+}
+
+/// The run a tag's message names on its `Gated-by:` line, or null.
+pub fn gatedBy(message: []const u8) ?[]const u8 {
+    var lines = std.mem.tokenizeAny(u8, message, "\r\n");
+    while (lines.next()) |line| if (std.mem.startsWith(u8, line, "Gated-by: ")) {
+        const page = std.mem.trim(u8, line["Gated-by: ".len..], " \t");
+        if (page.len != 0) return page;
+    };
+    return null;
+}
+
+test "a tag's Gated-by line names its run, and a tag without one names none" {
+    try std.testing.expectEqualStrings("https://github.com/o/r/actions/runs/5", gatedBy("v1.0.0\n\nGated-by: https://github.com/o/r/actions/runs/5\n").?);
+    try std.testing.expect(gatedBy("v1.0.0\n") == null);
+    try std.testing.expect(gatedBy("v1.0.0\n\nGated-by: \n") == null);
+    try std.testing.expect(gatedBy("") == null);
+}
+
+/// `bay audit releases`: whether each release tag of the package's repository on GitHub is one
+/// `bay release` made. A release made so is an annotated tag whose `Gated-by:` names a run of the
+/// release tier, green, on that tag's commit and candidate branch, and a GitHub Release whose
+/// notes name the same run. The tags before the first release gated on GitHub came before the
+/// rule: they are named once, as history. Each later tag that falls short is named with what
+/// it lacks. True when none does.
+pub fn audit(c: Context) !bool {
+    const remote = try auditedRemote(c);
+    const url = try must(c, &.{ "remote", "get-url", remote });
+    const repository = github.slug(url) orelse try say.fail(c.io, "{s} is {s}, no repository on github.com: the audit reads the runs and releases GitHub holds for its tags", .{ remote, url });
+    const releases = try releaseTags(c, remote);
+    var first: ?usize = null;
+    for (releases, 0..) |*one, n| {
+        if (one.annotated) one.gated_by = gatedBy(try tagMessage(c, remote, one.*));
+        if (first == null and one.gated_by != null) first = n;
+    }
+    const start = first orelse {
+        try say.out(c.io, "{s}: no release gated on GitHub yet, so its {d} release tag{s} history\n", .{ repository, releases.len, if (releases.len == 1) " is" else "s are" });
+        return true;
+    };
+    if (start != 0) {
+        const names = try c.a.alloc([]const u8, start);
+        for (names, releases[0..start]) |*name, one| name.* = one.name;
+        try say.out(c.io, "history: {s} came before the first release gated on GitHub, {s}\n", .{ try listed(c.a, names), releases[start].name });
+    }
+    var client: std.http.Client = .{ .allocator = c.a, .io = c.io };
+    defer client.deinit();
+    const base = c.environ.get("GITHUB_API_URL") orelse "";
+    const api: github.Api = .{ .client = &client, .a = c.a, .base = if (base.len == 0) github.default_api else base, .token = try githubToken(c) };
+    var short: usize = 0;
+    for (releases[start..]) |one| {
+        const lacks = try lacking(c, api, repository, one);
+        if (lacks.len == 0) continue;
+        short += 1;
+        try say.out(c.io, "{s}: {s}\n", .{ one.name, try std.mem.join(c.a, "; ", lacks) });
+    }
+    const under = releases.len - start;
+    if (short == 0)
+        try say.out(c.io, "{s}: {d} release{s} since, each an annotated tag gated green on GitHub, with the GitHub Release bay made\n", .{ repository, under, if (under == 1) "" else "s" })
+    else
+        try say.out(c.io, "{s}: {d} of {d} releases since are not as bay release makes them\n", .{ repository, short, under });
+    return short == 0;
+}
+
+/// The remote an audit reads: the branch's upstream, else the one remote, else origin.
+fn auditedRemote(c: Context) ![]const u8 {
+    const branch = (try git(c, &.{ "symbolic-ref", "--short", "-q", "HEAD" })).out;
+    if (branch.len != 0) {
+        const remote = (try git(c, &.{ "config", "--get", try c.a.print("branch.{s}.remote", .{branch}) })).out;
+        if (remote.len != 0 and !std.mem.eql(u8, remote, ".")) return remote;
+    }
+    const remotes = try must(c, &.{"remote"});
+    if (remotes.len == 0) try say.fail(c.io, "there is no remote: the audit reads the release tags of the package's repository", .{});
+    if (std.mem.findScalar(u8, remotes, '\n') == null) return remotes;
+    var names = std.mem.tokenizeAny(u8, remotes, "\r\n");
+    while (names.next()) |name| if (std.mem.eql(u8, name, "origin")) return name;
+    try say.fail(c.io, "more than one remote, and none is the branch's upstream or origin: check out a branch with an upstream", .{});
+}
+
+/// A release tag on the remote: `vX.Y.Z`, the object it names, and the commit under it.
+const ReleaseTag = struct {
+    name: []const u8,
+    version: std.SemanticVersion,
+    object: []const u8,
+    commit: []const u8,
+    annotated: bool = false,
+    gated_by: ?[]const u8 = null,
+
+    fn before(_: void, x: ReleaseTag, y: ReleaseTag) bool {
+        return x.version.order(y.version) == .lt;
+    }
+};
+
+/// The remote's release tags, oldest version first.
+fn releaseTags(c: Context, remote: []const u8) ![]ReleaseTag {
+    const listing = try must(c, &.{ "ls-remote", "--tags", remote });
+    var tags: std.ArrayList(ReleaseTag) = .empty;
+    var at: std.StringHashMapUnmanaged(usize) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, listing, '\n');
+    while (lines.next()) |raw| {
+        const line_text = std.mem.trimEnd(u8, raw, "\r");
+        const tab = std.mem.findScalar(u8, line_text, '\t') orelse continue;
+        const sha = line_text[0..tab];
+        var name = line_text[tab + 1 ..];
+        if (!std.mem.startsWith(u8, name, "refs/tags/v")) continue;
+        name = name["refs/tags/".len..];
+        const peeled = std.mem.endsWith(u8, name, "^{}");
+        if (peeled) name = name[0 .. name.len - "^{}".len];
+        const version = changelog.parseVersion(name[1..]) orelse continue;
+        if (at.get(name)) |n| {
+            // The peeled line names the commit under an annotated tag.
+            if (peeled) {
+                tags.items[n].commit = sha;
+                tags.items[n].annotated = true;
+            }
+            continue;
+        }
+        try at.put(c.a, name, tags.items.len);
+        try tags.append(c.a, .{ .name = name, .version = version, .object = sha, .commit = sha, .annotated = peeled });
+    }
+    std.mem.sort(ReleaseTag, tags.items, {}, ReleaseTag.before);
+    return tags.items;
+}
+
+/// An annotated tag's object as git prints it, fetched from the remote where this clone does
+/// not hold it; no ref here moves.
+fn tagMessage(c: Context, remote: []const u8, tag: ReleaseTag) ![]const u8 {
+    const held = try git(c, &.{ "cat-file", "tag", tag.object });
+    if (held.ok) return held.out;
+    _ = try must(c, &.{ "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, try c.a.print("refs/tags/{s}", .{tag.name}) });
+    return must(c, &.{ "cat-file", "tag", tag.object });
+}
+
+/// What a release tag under the rule lacks, each said; empty where it has all.
+fn lacking(c: Context, api: github.Api, repository: []const u8, tag: ReleaseTag) ![]const []const u8 {
+    var lacks: std.ArrayList([]const u8) = .empty;
+    var problem: github.Problem = .{};
+    if (!tag.annotated) {
+        try lacks.append(c.a, "a lightweight tag, which names no run");
+    } else if (tag.gated_by == null) try lacks.append(c.a, "no Gated-by line: no run of the release tier passed it");
+    if (tag.gated_by) |page| {
+        const runs = try c.a.print("https://github.com/{s}/actions/runs/", .{repository});
+        const id = if (std.mem.startsWith(u8, page, runs)) std.fmt.parseInt(u64, page[runs.len..], 10) catch null else null;
+        if (id) |run_id| {
+            if (github.run(api, repository, run_id, &problem)) |ran| {
+                const candidate = try c.a.print("release/{s}", .{tag.name});
+                if (ran.conclusion == null or !std.mem.eql(u8, ran.conclusion.?, "success"))
+                    try lacks.append(c.a, try c.a.print("its run {s} ended {s}, not green", .{ page, ran.conclusion orelse ran.status }));
+                if (!std.mem.eql(u8, ran.head_sha, tag.commit))
+                    try lacks.append(c.a, try c.a.print("its run {s} ran on {s}, not on the tagged {s}", .{ page, ran.head_sha[0..@min(12, ran.head_sha.len)], tag.commit[0..12] }));
+                if (ran.head_branch == null or !std.mem.eql(u8, ran.head_branch.?, candidate))
+                    try lacks.append(c.a, try c.a.print("its run {s} ran on {s}, not on {s}", .{ page, ran.head_branch orelse "no branch", candidate }));
+            } else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.GitHub => try lacks.append(c.a, try c.a.print("its run {s} could not be read: {s}", .{ page, problem.what })),
+            }
+        } else try lacks.append(c.a, try c.a.print("its Gated-by names {s}, no run of {s}", .{ page, repository }));
+    }
+    if (github.releaseNotes(api, repository, tag.name, &problem)) |found| {
+        if (found == null) {
+            try lacks.append(c.a, "no GitHub Release");
+        } else if (tag.gated_by) |page| if (std.mem.find(u8, found.?, page) == null)
+            try lacks.append(c.a, "a GitHub Release whose notes name no Gated-by run, which bay release did not make");
+    } else |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.GitHub => try lacks.append(c.a, try c.a.print("its GitHub Release could not be read: {s}", .{problem.what})),
+    }
+    return lacks.items;
 }
 
 /// The GitHub Release of a version's tag: the section the CHANGELOG released it with as its
@@ -366,13 +727,15 @@ fn releaseOne(c: Context, options: Options) !Outcome {
 /// at the tag.
 fn publishRelease(c: Context, up: Upstream, tag: []const u8, version: std.SemanticVersion, when: enum { just_pushed, resumed }) !void {
     const repository = github.slug(up.url) orelse return;
-    const token = c.environ.get("GITHUB_TOKEN") orelse "";
+    const token = try githubToken(c);
     if (token.len == 0) {
-        if (when == .just_pushed) try say.note(c.io, "{s} has no GitHub Release: GITHUB_TOKEN is not set, and bay release at {s} with it publishes one", .{ tag, tag });
+        if (when == .just_pushed) try say.note(c.io, "{s} has no GitHub Release: GITHUB_TOKEN is not set and gh has no login, and bay release at {s} with either publishes one", .{ tag, tag });
         return;
     }
     const log = try read(c, "CHANGELOG.md") orelse "";
-    const notes = changelog.released(log, version) orelse try say.fail(c.io, "CHANGELOG.md has no section for {s}: the GitHub Release takes its notes from it", .{tag});
+    const section_notes = changelog.released(log, version) orelse try say.fail(c.io, "CHANGELOG.md has no section for {s}: the GitHub Release takes its notes from it", .{tag});
+    const message = (try git(c, &.{ "for-each-ref", "--format=%(contents)", try c.a.print("refs/tags/{s}", .{tag}) })).out;
+    const notes = if (gatedBy(message)) |run_page| try c.a.print("{s}\n\nGated by the release tier on GitHub: {s}", .{ section_notes, run_page }) else section_notes;
     const assets = try programs(c, tag);
     var client: std.http.Client = .{ .allocator = c.a, .io = c.io };
     defer client.deinit();
@@ -785,16 +1148,26 @@ fn gateThere(c: Context, machine: machines.Machine, request: machines.Request, o
     };
 }
 
-/// The branch and, given one, the tag, onto the remote in one atomic push, then
-/// read back; the tag is made here only once the remote holds both.
-fn push(c: Context, up: Upstream, commit: []const u8, tag: ?[]const u8) !void {
+/// A release's tag as the push makes it: an annotated tag, its message the version and, where
+/// the release tier ran on GitHub, a `Gated-by:` line naming the run.
+const Tag = struct { name: []const u8, gated_by: ?[]const u8 };
+
+/// The branch and, given one, the tag, onto the remote in one atomic push, which also deletes
+/// the release's candidate branch where the hosted gate made one, then read back; the tag is
+/// made here only once the remote holds both.
+fn push(c: Context, up: Upstream, commit: []const u8, tag: ?Tag) !void {
     const branch_spec = try c.a.print("{s}:{s}", .{ commit, up.merge });
-    const pushed = if (tag) |t|
-        try git(c, &.{ "push", "--quiet", "--atomic", up.remote, branch_spec, try c.a.print("{s}:refs/tags/{s}", .{ commit, t }) })
-    else
-        try git(c, &.{ "push", "--quiet", up.remote, branch_spec });
+    var object: []const u8 = commit;
+    const pushed = if (tag) |t| pushed: {
+        object = try annotate(c, t, commit);
+        var args: std.ArrayList([]const u8) = .empty;
+        try args.appendSlice(c.a, &.{ "push", "--quiet", "--atomic", up.remote, branch_spec, try c.a.print("{s}:refs/tags/{s}", .{ object, t.name }) });
+        const candidate = try candidateRef(c, t.name);
+        if ((try git(c, &.{ "ls-remote", "--exit-code", up.remote, candidate })).ok) try args.append(c.a, try c.a.print(":{s}", .{candidate}));
+        break :pushed try git(c, args.items);
+    } else try git(c, &.{ "push", "--quiet", up.remote, branch_spec });
     if (!pushed.ok) try say.fail(c.io, "the push to {s} failed, and nothing moved there: {s}; bay release again pushes the gated commit", .{ up.remote, pushed.err });
-    const tag_ref = if (tag) |t| try c.a.print("refs/tags/{s}", .{t}) else up.merge;
+    const tag_ref = if (tag) |t| try c.a.print("refs/tags/{s}", .{t.name}) else up.merge;
     const listing = try must(c, &.{ "ls-remote", up.remote, up.merge, tag_ref });
     var branch_ok = false;
     var tag_ok = tag == null;
@@ -802,12 +1175,12 @@ fn push(c: Context, up: Upstream, commit: []const u8, tag: ?[]const u8) !void {
     while (lines.next()) |raw| {
         const line_text = std.mem.trimEnd(u8, raw, "\r");
         const tab = std.mem.findScalar(u8, line_text, '\t') orelse continue;
-        if (!std.mem.eql(u8, line_text[0..tab], commit)) continue;
-        if (std.mem.eql(u8, line_text[tab + 1 ..], up.merge)) branch_ok = true;
-        if (tag != null and std.mem.eql(u8, line_text[tab + 1 ..], tag_ref)) tag_ok = true;
+        const sha = line_text[0..tab];
+        if (std.mem.eql(u8, line_text[tab + 1 ..], up.merge) and std.mem.eql(u8, sha, commit)) branch_ok = true;
+        if (tag != null and std.mem.eql(u8, line_text[tab + 1 ..], tag_ref) and std.mem.eql(u8, sha, object)) tag_ok = true;
     }
     if (!branch_ok or !tag_ok) try say.fail(c.io, "{s} took the push, but reading it back shows {s}{s} elsewhere than {s}", .{ up.remote, if (branch_ok) "" else up.merge, if (tag_ok) "" else " and the tag", commit[0..12] });
-    if (tag) |t| _ = try must(c, &.{ "tag", t, commit });
+    if (tag) |t| _ = try must(c, &.{ "update-ref", try c.a.print("refs/tags/{s}", .{t.name}), object });
     _ = try must(c, &.{ "update-ref", up.tracking, commit });
     if (up.set) {
         _ = try must(c, &.{ "config", try c.a.print("branch.{s}.remote", .{up.branch}), up.remote });
@@ -841,10 +1214,13 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
     for (gate_machines) |machine| try say.out(c.io, ", on {s}", .{machine.name});
     if (options.no_push) {
         try say.out(c.io, "\nhold it here, gated, for a later bay release to push\n", .{});
-    } else try say.out(c.io, "\npush it to {s} and the tag {s} on {s} at once ({s}){s}\n", .{ up.onto, plan.tag, up.remote, up.url, if (up.set) ", which becomes the branch's upstream" else "" });
+    } else {
+        if (try hostedTarget(c, up)) |hosted| try say.out(c.io, "\nrun its release tier on GitHub ({s}) at {s}, waiting for it green, one hosted run at a time", .{ hosted.repository, (try candidateRef(c, plan.tag))["refs/heads/".len..] });
+        try say.out(c.io, "\npush it to {s} and the tag {s} on {s} at once ({s}){s}\n", .{ up.onto, plan.tag, up.remote, up.url, if (up.set) ", which becomes the branch's upstream" else "" });
+    }
     if (!options.no_push) if (github.slug(up.url)) |repository| {
-        const unset = if (c.environ.get("GITHUB_TOKEN")) |t| t.len == 0 else true;
-        const left: []const u8 = if (unset) " (GITHUB_TOKEN is not set: it would be left for a later run)" else "";
+        const unset = (try githubToken(c)).len == 0;
+        const left: []const u8 = if (unset) " (GITHUB_TOKEN is not set and gh has no login: it would be left for a later run)" else "";
         try say.out(c.io, "publish its GitHub Release on {s}: the section as its notes, and the dist step's programs and their SHA256SUMS where the build has one{s}\n", .{ repository, left });
     };
 }
@@ -854,10 +1230,12 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
 /// of the members it depends on (`bay tidy`, §8), its normal dependencies'
 /// re-pins named under `### Changed` and committed; then it is released when
 /// its section has entries, or, with development pins alone, gated and pushed
-/// with no tag. A member that fails stops the members that depend on it.
+/// with no tag. A member that fails stops the members that depend on it. Every member says
+/// it is the family's (`"policy": "family"` in its ci/preflight.json), or nothing rides.
 pub fn train(c: Context, options: Options) !u8 {
     const directories = try workspace.all(c.io, c.a, c.package) orelse try say.fail(c.io, "no {s} here or in any directory above", .{workspace.file_name});
     const cars = try each.train(c.io, c.a, directories);
+    try familyPolicy(c, cars);
     if (options.dry_run) return trainPlan(c, cars);
     // One train in a workspace at a time: a second would gate the same members at once.
     var held = try lock.hold(c.io, c.a, c.environ, .train, (try workspace.fileOf(c.io, c.a, c.package)).?); // safe: `all` found it above
@@ -887,6 +1265,43 @@ pub fn train(c: Context, options: Options) !u8 {
         if (outcome == .failed or outcome == .skipped) failed = true;
     }
     return if (failed) 1 else 0;
+}
+
+/// A train's members are the family's packages, and each says so itself: `"policy": "family"`
+/// in its `ci/preflight.json`, the one key preflight's configuration and build both read. A
+/// member without it would be gated with a stranger's defaults, unseen, so the train is refused
+/// first, each such member named. bay never writes the key.
+fn familyPolicy(c: Context, cars: []const each.Car) !void {
+    var missing: std.ArrayList([]const u8) = .empty;
+    var wrong: std.ArrayList([]const u8) = .empty;
+    for (cars) |car| switch (try policyOf(c, car.directory)) {
+        .family => {},
+        .none => try missing.append(c.a, car.name),
+        .other => |said| try wrong.append(c.a, try c.a.print("{s} (\"{s}\")", .{ car.name, said })),
+        .unreadable => try wrong.append(c.a, try c.a.print("{s} (ci/preflight.json is no JSON bay can read)", .{car.name})),
+    };
+    if (wrong.items.len != 0)
+        try say.fail(c.io, "the train releases the family's packages, and the one policy is \"family\": {s} name{s} another in ci/preflight.json", .{ try listed(c.a, wrong.items), if (wrong.items.len == 1) "s" else "" });
+    if (missing.items.len != 0)
+        try say.fail(c.io, "the train releases the family's packages, and {s} {s} no \"policy\": \"family\" in ci/preflight.json: add it to each, so preflight gates {s} as the family's", .{ try listed(c.a, missing.items), if (missing.items.len == 1) "has" else "have", if (missing.items.len == 1) "it" else "them" });
+}
+
+const Policy = union(enum) { family, none, other: []const u8, unreadable };
+
+fn policyOf(c: Context, directory: []const u8) !Policy {
+    var dir = try Io.Dir.cwd().openDir(c.io, directory, .{});
+    defer dir.close(c.io);
+    const text = if (intake.readFile(c.io, dir, "ci/preflight.json", c.a, .fromRaw(1 << 20))) |taken| taken.readForParse() else |err| switch (err) {
+        error.FileNotFound => return .none,
+        else => return err,
+    };
+    const Config = struct { policy: ?[]const u8 = null };
+    const config = std.json.parseFromSliceLeaky(Config, c.a, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .unreadable,
+    };
+    const policy = config.policy orelse return .none;
+    return if (std.mem.eql(u8, policy, "family")) .family else .{ .other = policy };
 }
 
 const Done = enum { released, pushed, nothing, failed, skipped };
@@ -924,6 +1339,12 @@ fn ride(c: Context, car: each.Car, when: enum { always, when_repinned }, version
 fn repinned(c: Context) !bool {
     const before_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
     try bayIn(c, &.{"tidy"});
+    return committed(c, before_text);
+}
+
+/// What moved since the manifest was `before_text`, its normal dependencies' re-pins named in
+/// the CHANGELOG, committed; whether anything moved.
+fn committed(c: Context, before_text: [:0]const u8) !bool {
     const after_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
     // The tree was clean (a release refuses one that is not): what changed is the tidy's.
     if ((try must(c, &.{ "status", "--porcelain" })).len == 0) return false;
@@ -944,6 +1365,57 @@ fn repinned(c: Context) !bool {
     const message = if (all.len == 0) "What the build makes from the pins, made again" else try c.a.print("Pin {s}", .{try listed(c.a, all)});
     _ = try must(c, &.{ "commit", "--quiet", "-m", message });
     return true;
+}
+
+/// `bay pin <dependency> <version>`: one package moved onto a release of one of its
+/// dependencies, as the train moves a member: pinned at the tag `v<version>` and tidied, the
+/// re-pin named under `### Changed` and committed, then gated and pushed. It is released when
+/// its [Unreleased] section held entries before the re-pin; a re-pin alone is pushed with no
+/// tag, its entry waiting for the next release. The refusals of a release come first, before
+/// anything is written.
+pub fn pinAtRelease(c: Context, name: []const u8, version_text: []const u8, options: Options) !Outcome {
+    try alone(c);
+    _ = try releasable(c);
+    const bare = if (std.mem.startsWith(u8, version_text, "v")) version_text[1..] else version_text;
+    const version = changelog.parseVersion(bare) orelse try say.fail(c.io, "{s} is no version: a pin moves to a release, major.minor.patch", .{version_text});
+    const tag = try tagName(c, version);
+    const before_text = try read(c, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{c.package});
+    const parsed = manifest.parse(c.a, before_text) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidManifest => try say.fail(c.io, "build.zig.zon is not a manifest bay can read", .{}),
+    };
+    const dependency = found: for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev }) |list| {
+        for (list) |one| if (std.mem.eql(u8, one.name, name)) break :found one;
+    } else try say.fail(c.io, "{s} is not a dependency of {s}", .{ name, parsed.name });
+    const url = switch (dependency.source) {
+        .remote => |remote| remote.url,
+        .path => |path| try say.fail(c.io, "{s} is the directory {s}, which has no releases to pin", .{ name, path }),
+    };
+    if (dependency.prebuilt != null) try say.fail(c.io, "{s} is a prebuilt: bay update {s} <url> moves it to another archive", .{ name, name });
+    const log = try read(c, "CHANGELOG.md") orelse try say.fail(c.io, "no CHANGELOG.md: a re-pin is named in it", .{});
+    const held_entries = !(try section(c, log)).empty();
+    if (options.dry_run) {
+        try say.out(c.io, "pin {s} at {s} and tidy; name the re-pin under ### Changed and commit it; then {s}\n", .{ name, tag, if (held_entries) "release it, as bay release does" else "gate it and push it with no tag, the entry waiting for the next release" });
+        return .nothing;
+    }
+    const source = try c.a.print("{s}#{s}", .{ url[0 .. std.mem.findAny(u8, url, "?#") orelse url.len], tag });
+    // A pin bay could not move leaves the tree as it was.
+    const changed = pinAt(c, name, source, before_text) catch |err| {
+        _ = try git(c, &.{ "checkout", "--quiet", "--", "." });
+        _ = try git(c, &.{ "clean", "--quiet", "-fd" });
+        return err;
+    };
+    if (!changed) {
+        try say.note(c.io, "{s} is pinned at {s} already: nothing moved", .{ name, tag });
+        return .nothing;
+    }
+    return releaseOne(c, .{ .push_unreleased = true, .no_tag = !held_entries });
+}
+
+fn pinAt(c: Context, name: []const u8, source: []const u8, before_text: [:0]const u8) !bool {
+    try bayIn(c, &.{ "add", "--no-tidy", "--name", name, source });
+    try bayIn(c, &.{"tidy"});
+    return committed(c, before_text);
 }
 
 /// What `bay <args>` writes to its output, run in the package; a failure says so.
@@ -1111,12 +1583,16 @@ test "a gated commit is recorded per repository and tag in bay's data directory,
     const there = try gatedPath(a, data, "/work/two/.git", "v0.2.0");
     try std.testing.expect(!std.mem.eql(u8, here, there));
     try std.testing.expect(std.mem.startsWith(u8, here, data));
-    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, here));
-    try record(std.testing.io, here, "0123456789abcdef0123456789abcdef01234567");
-    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", (try recorded(std.testing.io, a, here)).?);
+    try std.testing.expect(try recorded(std.testing.io, a, here) == null);
+    try record(std.testing.io, a, here, "0123456789abcdef0123456789abcdef01234567", null);
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", (try recorded(std.testing.io, a, here)).?.commit);
+    try std.testing.expect((try recorded(std.testing.io, a, here)).?.hosted == null);
+    // The hosted run that passed it is kept beside it.
+    try record(std.testing.io, a, here, "0123456789abcdef0123456789abcdef01234567", "https://github.com/o/r/actions/runs/7");
+    try std.testing.expectEqualStrings("https://github.com/o/r/actions/runs/7", (try recorded(std.testing.io, a, here)).?.hosted.?);
     // Another repository's gate says nothing of this one.
-    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, there));
+    try std.testing.expect(try recorded(std.testing.io, a, there) == null);
     try forget(std.testing.io, here);
     try forget(std.testing.io, here);
-    try std.testing.expectEqual(@as(?[]const u8, null), try recorded(std.testing.io, a, here));
+    try std.testing.expect(try recorded(std.testing.io, a, here) == null);
 }

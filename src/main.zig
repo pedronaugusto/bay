@@ -47,7 +47,7 @@ pub const Cli = struct {
         tree: Tree,
         outdated,
         licenses: Developed,
-        audit,
+        audit: Audit,
         vendor: Vendor,
         list,
         locate: Developed,
@@ -57,6 +57,7 @@ pub const Cli = struct {
         install: install.Args,
         uninstall: install.Uninstall,
         release: Release,
+        pin: Pin,
         version,
         completions: Completions,
         man: Man,
@@ -83,7 +84,6 @@ pub const Cli = struct {
             .tidy = .{ .help = "Pin each package at the version selection picks: the highest any manifest in the graph asks for (Go's MVS); in a workspace, each member at its release" },
             .outdated = .{ .help = "Packages the builds use with a newer release, or at a version their newest release retracts" },
             .vendor = .{ .help = "Every package the graph reads and the builds take on this host, into zig-pkg, for building offline; with --all-hosts, every package any host's build may ask for" },
-            .audit = .{ .help = "Each package the builds select checked against its repository's published security advisories and its own retractions; fails on any finding. GITHUB_TOKEN, when set, is sent to GitHub" },
             .list = .{ .help = "Both lists, with their pins" },
             .fetch = .{ .help = "Fetch what both builds take on this host: their dependencies, and the lazy ones their configuration asks for" },
             .init = .{ .help = "Make the package here one bay develops, adding only what is missing; zig init first where there is no package" },
@@ -153,12 +153,36 @@ const Release = struct {
     gate_bundle: ?[]const u8 = null,
     package: []const u8 = ".",
     pub const spec: ensign.Spec(@This()) = .{
-        .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed, gated here and on the machines in bay's machines.zon, then the branch and its tag pushed at once over SSH; on GitHub, its release published with the section as its notes and, where the build has a dist step, the programs it makes and their SHA256SUMS. GITHUB_TOKEN authorizes the release",
+        .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed, gated here and on the machines in bay's machines.zon and, where its ci.yml runs a release tier, on GitHub at release/vX.Y.Z, then the default branch and its annotated tag pushed at once over SSH; on GitHub, its release published with the section as its notes and, where the build has a dist step, the programs it makes and their SHA256SUMS. GITHUB_TOKEN, else gh's login, authorizes GitHub",
         .options = .{
             .dry_run = .{ .help = "Print the version, the section as it will be written and the plan; change nothing" },
             .no_push = .{ .help = "Commit and gate, and push nothing: the gated commit is held here for a later bay release to push without gating it again" },
             .gate_bundle = .{ .hidden = true, .value_name = "DIRECTORY", .help = "A machine's side of a release: the commit on stdin, gated in a repository at DIRECTORY" },
             .package = .{ .hidden = true, .help = "With --gate-bundle, the package's directory in the repository" },
+        },
+    };
+};
+
+const Pin = struct {
+    dry_run: bool = false,
+    name: []const u8,
+    version: []const u8,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "Move the package onto a release of one of its dependencies, as a workspace's train moves a member: pinned at the tag and tidied, the re-pin named under ### Changed in the CHANGELOG and committed, then gated and pushed. Released when its [Unreleased] section already held entries; a re-pin alone is pushed with no tag, its entry waiting for the next release",
+        .options = .{
+            .dry_run = .{ .help = "Say what would be done; change nothing" },
+            .name = .{ .positional = true, .value_name = "DEPENDENCY", .help = "The dependency to move" },
+            .version = .{ .positional = true, .value_name = "VERSION", .help = "The release to pin it at, 1.2.0 or v1.2.0" },
+        },
+    };
+};
+
+const Audit = struct {
+    command: ?union(enum) { releases } = null,
+    pub const spec: ensign.Spec(@This()) = .{
+        .about = "Each package the builds select checked against its repository's published security advisories and its own retractions; fails on any finding. GITHUB_TOKEN, when set, is sent to GitHub",
+        .commands = .{
+            .releases = .{ .help = "Each release tag of the package's repository on GitHub checked as bay release makes it: an annotated tag whose Gated-by run of the release tier was green on its commit, and the GitHub Release that names that run; fails on any tag that falls short. The tags before the first such release are named once, as history" },
         },
     };
 };
@@ -295,6 +319,14 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
     const command = cli.command.?; // safe: main answered a command line without one
     if (cli.jobs != null and !cli.workspace) try say.fail(io, "--jobs is for --workspace", .{});
     if (command == .release) return releaseCommand(io, a, environ, cli, command.release);
+    if (command == .pin) {
+        if (cli.workspace) try say.fail(io, "bay pin moves one package: a workspace's members move onto each other's releases with bay --workspace release", .{});
+        // Gated with the Zig the manifest names, as a release is.
+        _ = environ.swapRemove("ZIG");
+        const args = command.pin;
+        _ = try release.pinAtRelease(.{ .io = io, .a = a, .environ = environ, .package = try findPackage(io, a) }, args.name, args.version, .{ .dry_run = args.dry_run });
+        return 0;
+    }
     // Each member runs this bay with the same command, --locked kept.
     if (cli.workspace) {
         var member = cli;
@@ -325,6 +357,11 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
                 else => unreachable, // unreachable: the outer arm took only these two
             };
         },
+        // Read from git and GitHub alone: no Zig is installed for it.
+        .audit => |args| if (args.command != null) {
+            const ok = try release.audit(.{ .io = io, .a = a, .environ = environ, .package = try findPackage(io, a) });
+            return if (ok) 0 else 1;
+        },
         else => {},
     }
     const package = try findPackage(io, a);
@@ -341,12 +378,12 @@ fn dispatch(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Map, cli
         .outdated => graphCommand(env, .outdated),
         .licenses => |args| licensesCommand(env, args.dev),
         .vendor => |args| vendorCommand(env, args.all_hosts),
-        .audit => auditCommand(env),
+        .audit => auditCommand(env), // `bay audit releases` was answered above
         .fetch => fetchAll(env),
         .build => |args| zigBuild(env, .package, &.{}, args.args),
         .dev => |args| zigBuild(env, .development, &.{}, args.args),
         .step => |args| step(env, args.name, args.args),
-        .init, .new, .install, .uninstall, .man, .version, .completions, .release => unreachable, // unreachable: answered above
+        .init, .new, .install, .uninstall, .man, .version, .completions, .release, .pin => unreachable, // unreachable: answered above
     };
 }
 
@@ -1196,6 +1233,9 @@ test "bay's command lines read as they did by hand, and --workspace hands each m
         .{ .given = &.{ "add", "--dev", "--name", "tool", "../tool" }, .member = &.{ "add", "--dev", "--name=tool", "../tool" } },
         .{ .given = &.{ "remove", "shakedown" }, .member = &.{ "remove", "shakedown" } },
         .{ .given = &.{ "install", "--update" }, .member = &.{ "install", "--update" } },
+        .{ .given = &.{"audit"}, .member = &.{"audit"} },
+        .{ .given = &.{ "--workspace", "audit", "releases" }, .member = &.{ "audit", "releases" } },
+        .{ .given = &.{ "pin", "--dry-run", "dep", "1.2.0" }, .member = &.{ "pin", "--dry-run", "dep", "1.2.0" } },
     };
     for (cases) |case| {
         var cli = switch (try ensign.parse(Cli, a, case.given, .{})) {
