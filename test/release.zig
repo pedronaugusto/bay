@@ -392,6 +392,35 @@ test "each refusal names its cause and leaves the branch, the tags and the remot
         try Expect.refusal(&w, said, try w.head("lib"), remote_main);
         try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
     }
+    // Until shakedown 0.7.0 is released, a development pin at an exact commit passes the rule,
+    // named, and goes on to the hash proof (a hash of other content here, refused there); a
+    // runtime pin at the same commit is refused, and so is the development pin once 0.7.0 is out.
+    try w.package("shakedown", "0.6.0", "");
+    const shakedown_commit = try w.head("shakedown");
+    const shakedown_hash = "shakedown-0.6.0-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    for ([_]struct { []const u8, []const u8, []const u8 }{
+        .{ "dev_dependencies", "development pins at a commit, allowed until shakedown 0.7.0 is released: shakedown at ", "shakedown (its .hash is shakedown-0.6.0-AAAA" },
+        .{ "dependencies", "shakedown (a Zig package at main: a package is released at a version tag) pinned at no release", "" },
+    }) |case| {
+        const key, const named, const then = case;
+        const entry = try w.f.a.print(".{{ .shakedown = .{{ .url = \"{s}?ref=main#{s}\", .hash = \"{s}\" }} }}", .{ try w.pinUrl("shakedown"), shakedown_commit, shakedown_hash });
+        const zon = try w.f.a.print("    .dependencies = {s},\n    .dev_dependencies = {s},\n", .{
+            if (std.mem.eql(u8, key, "dependencies")) entry else ".{}",
+            if (std.mem.eql(u8, key, "dev_dependencies")) entry else ".{}",
+        });
+        try w.f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, w.f.a, try w.read("lib", "build.zig.zon"), "    .dependencies = .{},\n", zon));
+        try w.git("lib", &.{ "commit", "--quiet", "-am", "Pin shakedown at a commit" });
+        try Expect.refusal(&w, named, try w.head("lib"), remote_main);
+        if (then.len != 0) try Expect.refusal(&w, then, try w.head("lib"), remote_main);
+        try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
+    }
+    try w.git("shakedown", &.{ "tag", "v0.7.0" });
+    try w.git("shakedown", &.{ "push", "--quiet", "origin", "v0.7.0" });
+    const released = try w.f.a.print("    .dependencies = .{{}},\n    .dev_dependencies = .{{ .shakedown = .{{ .url = \"{s}?ref=main#{s}\", .hash = \"{s}\" }} }},\n", .{ try w.pinUrl("shakedown"), shakedown_commit, shakedown_hash });
+    try w.f.write("lib", "build.zig.zon", try std.mem.replaceOwned(u8, w.f.a, try w.read("lib", "build.zig.zon"), "    .dependencies = .{},\n", released));
+    try w.git("lib", &.{ "commit", "--quiet", "-am", "Pin shakedown at a commit" });
+    try Expect.refusal(&w, "shakedown (a Zig package at main: a package is released at a version tag) pinned at no release", try w.head("lib"), remote_main);
+    try w.git("lib", &.{ "reset", "--quiet", "--hard", start });
     // The version to come tagged already, on the remote.
     try w.git(".", &.{ "clone", "--quiet", try w.path("remotes/lib.git"), "other" });
     try w.git("other", &.{ "tag", "v0.1.1" });
