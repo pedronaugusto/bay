@@ -327,13 +327,9 @@ fn stripped(root: []const u8, name: []const u8) ?[]const u8 {
     return name[root.len + 1 ..];
 }
 
-fn closeFile(file: *Io.File, io: Io) void {
-    file.close(io);
-}
-
 /// A tar's entries, read by hold's tar reader through warp's decompressor.
 const Tar = struct {
-    file: aegis.own.OwnedIo(Io.File, closeFile),
+    file: aegis.own.File,
     reader: Io.File.Reader,
     buffer: [64 * 1024]u8,
     /// The decompressor the tar is read through; its buffer is the window.
@@ -415,7 +411,7 @@ const Tar = struct {
 /// (what Zig's fetch reads), never encrypted, each exactly as long as the directory says and
 /// its CRC-32 checked.
 const Zip = struct {
-    file: aegis.own.OwnedIo(Io.File, closeFile),
+    file: aegis.own.File,
     reader: Io.File.Reader,
     buffer: [64 * 1024]u8,
     archive: hold.zip.Archive,

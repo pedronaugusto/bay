@@ -18,16 +18,12 @@ pub const Kind = enum { train, gate, release_queue };
 
 /// A held lock, let go by `release` or by the process ending.
 pub const Held = struct {
-    file: aegis.own.OwnedIo(Io.File, closeFile),
+    file: aegis.own.File,
 
     pub fn release(held: *Held, io: Io) void {
         held.file.deinit(io);
     }
 };
-
-fn closeFile(file: *Io.File, io: Io) void {
-    file.close(io);
-}
 
 /// The lock of `kind` on `path`, as an absolute path names it, or a refusal naming what holds it.
 pub fn hold(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, kind: Kind, relative: []const u8) !Held {

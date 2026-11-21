@@ -443,11 +443,7 @@ fn releaseCommand(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Ma
 }
 
 /// An open directory, which its one owner closes.
-const OpenDir = aegis.own.OwnedIo(Io.Dir, closeDir);
-
-fn closeDir(dir: *Io.Dir, io: Io) void {
-    dir.close(io);
-}
+const OpenDir = aegis.own.Dir;
 
 const Env = struct {
     io: Io,

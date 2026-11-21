@@ -81,7 +81,7 @@ pub const Terminal = aegis.BlockingGuarded(struct {
 /// machine's), and the gate's log, whole, where a red gate's output is read after.
 pub const Output = struct {
     name: ?[]const u8,
-    log: aegis.own.OwnedIo(Io.File, closeFile),
+    log: aegis.own.File,
     terminal: *Terminal,
 };
 
@@ -166,7 +166,7 @@ pub fn gate(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Ma
 /// The bundle written to the machine's stdin, which then closes.
 const Feed = struct {
     io: Io,
-    file: aegis.own.OwnedIo(Io.File, closeFile),
+    file: aegis.own.File,
     bytes: []const u8,
     failed: ?Io.File.Writer.Error = null,
 
@@ -177,10 +177,6 @@ const Feed = struct {
         };
     }
 };
-
-fn closeFile(file: *Io.File, io: Io) void {
-    file.close(io);
-}
 
 /// Each line `file` gives, to `output`, until it ends.
 fn relay(io: Io, file: Io.File, output: *Output) void {
