@@ -1,3 +1,9 @@
 {
-  "hardened": true
+  "hardened": true,
+  "shards": {
+    "macos": 2,
+    "windows": 2,
+    "windows_arm": 2,
+    "riscv64": 1
+  }
 }
