@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `bay --workspace release --dry-run` shows the version the run tags: a member's first release (nothing released in CHANGELOG.md, no tag of its version here or on the remote) is the version its manifest names, where the plan showed the next one, and so did the pins of the members after it. One rule decides a release's version, and the plan and the run both follow it.
+- `bay --workspace release --dry-run` refuses a member's pins the run refuses, a package that is no member pinned at a commit or a branch, or by a hash its URL does not hold, naming the member, where the plan showed it clean and the run then refused it at once. The pins the train moves to its own releases before that member are checked by the run once moved, as before.
+- `bay release` and a train, its dry run too, refuse a release whose graph, as Zig fetches it with no fork, holds one package (its name and fingerprint) at one version under two hashes, naming each hash and what pins it. Zig refuses such a graph ("contradictory hash", Zig master since 0.18.0-dev), and so would any build of the release with Zig alone; bay's forks joined them only in bay's own builds (glint 0.7.5 and ensign 0.3.1 in ladar's Zig master job).
+- `bay --workspace release` builds each member on the pins it moved it to (`bay dev check`, a compile here) before anything of it is gated or pushed, and stops that member on a compile error, its re-pin undone, where the error first showed in the hosted run of its release (bay 0.3.0's first run, on ensign 0.4.0's `terminalWidth`). The dry run names the step.
+- A file a GitHub release publishes (`https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`) is a release pin, fixed by its hash as a tarball on any other host is, where `bay release` refused it as a URL it cannot read as an archive of one revision: what the rule protects is bytes a hash fixes, and a file replaced since fails the fetch. An archive of a branch (`archive/refs/heads/...`) is still refused.
+
 ## [0.3.0] - 2026-11-22
 
 ### Breaking

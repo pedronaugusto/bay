@@ -32,6 +32,9 @@ const say = @import("say.zig");
 const workspace = @import("workspace.zig");
 const each = @import("each.zig");
 const tidying = @import("tidy.zig");
+const select = @import("select.zig");
+const store = @import("store.zig");
+const nuget_signature = @import("nuget_signature.zig");
 const toolchain = @import("toolchain.zig");
 const fetch = @import("fetch.zig");
 const lock = @import("lock.zig");
@@ -175,6 +178,32 @@ fn remoteTags(c: Context, remote: []const u8) !RemoteTags {
     return tags;
 }
 
+/// What a package has released before: CHANGELOG.md's newest release, and the commit the
+/// tag of its manifest's version names here and on the remote.
+const History = struct {
+    newest: ?std.SemanticVersion,
+    here: ?[]const u8,
+    there: ?[]const u8,
+
+    /// Nothing released and nothing tagged: the release to come is the first.
+    fn first(h: History) bool {
+        return h.newest == null and h.here == null and h.there == null;
+    }
+};
+
+/// `History` read as a release and a train's plan both read it, from the package in `c`.
+fn historyOf(c: Context, log: []const u8, current: std.SemanticVersion, tags: RemoteTags) !History {
+    const tag = try tagName(c, current);
+    return .{ .newest = changelog.newestReleased(log), .here = try localTag(c, tag), .there = tags.get(tag) };
+}
+
+/// The version a release takes, the one rule `bay release` and a train's dry run both follow:
+/// the first release is the version the manifest names, as nothing came before it; any other
+/// is the next one `change` asks for.
+fn nextVersion(current: std.SemanticVersion, change: changelog.Change, history: History) std.SemanticVersion {
+    return if (history.first()) current else changelog.next(current, change);
+}
+
 fn tagName(c: Context, version: std.SemanticVersion) ![]const u8 {
     return c.a.print("v{f}", .{version});
 }
@@ -305,12 +334,13 @@ fn releaseOne(c: Context, options: Options) !Outcome {
     const current = changelog.parseVersion(parsed.version) orelse try say.fail(c.io, "build.zig.zon's .version \"{s}\" is not major.minor.patch", .{parsed.version});
     const log = try read(c, "CHANGELOG.md") orelse try say.fail(c.io, "no CHANGELOG.md: a release is written from its `## [Unreleased]` section", .{});
     const tags = try remoteTags(c, up.remote);
-    const newest = changelog.newestReleased(log);
+    const history = try historyOf(c, log, current, tags);
+    const newest = history.newest;
     if (newest) |n| if (n.order(current) != .eq)
         try say.fail(c.io, "build.zig.zon's .version is {f} and CHANGELOG.md's newest release is {f}: a tag names the one the manifest declares, so set them to one release", .{ current, n });
     const current_tag = try tagName(c, current);
-    const current_here = try localTag(c, current_tag);
-    const current_there = tags.get(current_tag);
+    const current_here = history.here;
+    const current_there = history.there;
     // A release the remote has at HEAD whose read-back this clone never saw: its tag, the one
     // the remote holds (annotated, with its Gated-by), fetched here.
     if (current_there) |sha| if (current_here == null and std.mem.eql(u8, sha, head)) {
@@ -342,15 +372,13 @@ fn releaseOne(c: Context, options: Options) !Outcome {
             } else try say.note(c.io, "nothing pushed: {s} holds every commit here, and [Unreleased] waits for the next release", .{up.onto});
             return .nothing;
         }
-        // The first release is the version the manifest names: nothing came before it.
-        const first = newest == null and current_there == null and current_here == null;
-        const version = if (first) current else changelog.next(current, change);
+        const version = nextVersion(current, change, history);
         const tag = try tagName(c, version);
         if (tags.get(tag)) |sha| try say.fail(c.io, "{s} is on {s} already, at {s}: a tag never moves; build.zig.zon's .version is behind the releases", .{ tag, up.remote, sha[0..12] });
         if (try localTag(c, tag)) |sha| try say.fail(c.io, "{s} is tagged here already, at {s}: a tag never moves; build.zig.zon's .version is behind the releases", .{ tag, sha[0..12] });
         break :plan .{ .version = version, .tag = tag, .start = head, .cut = .{ .from = current, .section = unreleased, .text = log, .manifest = manifest_text } };
     };
-    try pinsAreReleases(c, parsed);
+    try pinsAreReleases(c, parsed, &.{});
     // Where the release tier must pass on GitHub, a login to dispatch it is asked for first.
     const hosted = if (options.dry_run or options.no_push) null else try hostedTarget(c, up);
     const gate_machines = try machines.load(c.io, c.a, c.environ);
@@ -794,8 +822,9 @@ test "a build's listing names a step by the first word of its line, never inside
 /// release pinned on a branch or any ref that moves builds from code nothing fixes, and its
 /// consumers would take it. Until the development tools in `commit_pins_until` are released, a
 /// development pin may also be an exact commit (`devCommit`), named in the output; a runtime
-/// pin never.
-fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
+/// pin never. `before` names the members a train pins at their releases before this one: a
+/// train's plan reads the manifest before they move, and the run checks them once moved.
+fn pinsAreReleases(c: Context, parsed: manifest.Manifest, before: []const Released) !void {
     var wrong: std.ArrayList([]const u8) = .empty;
     var at_commits: std.ArrayList([]const u8) = .empty;
     const unreleased = try unreleasedTools(c, parsed);
@@ -803,7 +832,7 @@ fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
         .{ .list = parsed.normal, .dev = false },
         .{ .list = parsed.dev, .dev = true },
         .{ .list = parsed.overrides, .dev = false },
-    }) |kind| for (kind.list) |dependency| switch (dependency.source) {
+    }) |kind| for (kind.list) |dependency| if (releasedAs(before, dependency.name) == null) switch (dependency.source) {
         .path => {},
         .remote => |at| if (kind.dev and unreleased.len != 0 and devCommit(at.url) != null) {
             const commit = devCommit(at.url).?;
@@ -825,7 +854,76 @@ fn pinsAreReleases(c: Context, parsed: manifest.Manifest) !void {
     if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned at no release: a release builds from what is fixed, a Zig package at a version tag and an archive that is no package at its exact commit, never a branch or a ref that moves; pin each so (bay update) and release again", .{try listed(c.a, wrong.items)});
     if (at_commits.items.len != 0)
         try say.note(c.io, "development pins at a commit, allowed until {s} {s} released: {s}", .{ try listed(c.a, unreleased), if (unreleased.len == 1) "is" else "are", try listed(c.a, at_commits.items) });
-    try pinsHoldTheirHashes(c, parsed);
+    try pinsHoldTheirHashes(c, parsed, before);
+    try oneHashEach(c, parsed, before);
+}
+
+/// The graph Zig fetches from the manifest holds each package (its name and fingerprint) at a
+/// version under one hash. Zig refuses a graph with two ("contradictory hash for package with
+/// fingerprint ... and version ...", Zig master since 0.18.0-dev), and so would every build of
+/// the release with Zig alone: bay's forks join them only in bay's own builds. Walked as Zig
+/// fetches it, with no fork: the manifest's pins and development pins, then each pinned
+/// package's own pins as its manifest at that hash has them, never its development ones. In a
+/// train's plan, a pin that this member or a member in `before` makes of a member in `before`
+/// is that member's release, read in its tree, as the train re-pins it before the run reads
+/// it; a pin any other package makes stays what it is, as no train moves it.
+fn oneHashEach(c: Context, parsed: manifest.Manifest, before: []const Released) !void {
+    const package = try std.fs.path.resolveAlloc(c.a, &.{c.package});
+    const zig = try toolchain.forPackage(c.io, c.a, c.environ, package);
+    const packages = try store.Store.init(c.io, c.a, c.environ, zig, package, try nuget_signature.chosen(c.a, parsed, package));
+    const Hashes = struct { hashes: std.ArrayList([]const u8) = .empty, by: std.ArrayList([]const u8) = .empty };
+    var versions: std.array_hash_map.String(Hashes) = .empty;
+    var followed: std.array_hash_map.String(void) = .empty;
+    const Next = struct { pin: select.Pin, by: []const u8, by_member: bool };
+    var queue: std.ArrayList(Next) = .empty;
+    const root = try store.revisionOf(c.io, c.a, package, .{ .directory = package }, parsed, true);
+    for (root.pins) |pin| try queue.append(c.a, .{ .pin = pin, .by = parsed.name, .by_member = true });
+    var next: usize = 0;
+    while (next < queue.items.len) : (next += 1) {
+        const at = queue.items[next];
+        // The release the train pins it at: a member's pin of it, or a pin of that very tag.
+        const release: ?Released = if (releasedAs(before, at.pin.key)) |r| switch (at.pin.place) {
+            .directory => null,
+            .remote => |remote| if (at.by_member) r else if (git_source.releasePin(remote.url)) |tagged| (if (tagged.version.order(r.version) == .eq) r else null) else null,
+        } else null;
+        const revision = if (release) |r| try store.developedAt(c.io, c.a, r.directory) else switch (at.pin.place) {
+            .remote => |remote| if (store.unnamed(remote.hash)) continue else try packages.load(at.pin.place),
+            .directory => try packages.load(at.pin.place),
+        };
+        if (at.pin.place == .remote) {
+            const version = if (release) |r| r.version else revision.version;
+            const hash = if (release) |r| try c.a.print("its release {f} in the train", .{r.version}) else at.pin.place.remote.hash;
+            const entry = try versions.getOrPut(c.a, try c.a.print("{s} {f} (fingerprint 0x{x})", .{ revision.identity.name, version, revision.identity.fingerprint }));
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            if (!among(entry.value_ptr.hashes.items, hash)) {
+                try entry.value_ptr.hashes.append(c.a, hash);
+                try entry.value_ptr.by.append(c.a, at.by);
+            }
+        }
+        if ((try followed.getOrPut(c.a, if (release) |r| r.directory else at.pin.place.key())).found_existing) continue;
+        for (revision.pins) |pin| if (!pin.dev) try queue.append(c.a, .{ .pin = pin, .by = revision.identity.name, .by_member = release != null });
+    }
+    var wrong: std.ArrayList([]const u8) = .empty;
+    for (versions.keys(), versions.values()) |name, found| if (found.hashes.items.len > 1) {
+        var each_hash: std.ArrayList([]const u8) = .empty;
+        for (found.hashes.items, found.by.items) |hash, by| try each_hash.append(c.a, try c.a.print("{s} (pinned by {s})", .{ hash, by }));
+        try wrong.append(c.a, try c.a.print("{s} under {s}", .{ name, try listed(c.a, each_hash.items) }));
+    };
+    if (wrong.items.len != 0) try say.fail(c.io, "{s}: the graph Zig fetches holds one package at one version under two hashes, which Zig refuses (\"contradictory hash\"), as would any build of the release with Zig alone; bay's forks join them only in bay's builds. Pin each at one release everywhere it is pinned (bay update), and release again", .{try listed(c.a, wrong.items)});
+}
+
+/// A member a train pins at a release before this one: its name, its directory, and the
+/// version of the release, made by the train or there already.
+const Released = struct { name: []const u8, directory: []const u8, version: std.SemanticVersion };
+
+fn releasedAs(before: []const Released, name: []const u8) ?Released {
+    for (before) |member| if (std.mem.eql(u8, member.name, name)) return member;
+    return null;
+}
+
+fn among(names: []const []const u8, name: []const u8) bool {
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
 }
 
 /// The development tools whose releases end the allowance of development pins at a commit
@@ -862,7 +960,7 @@ fn repositoryOf(a: std.mem.Allocator, url: []const u8) !?[]const u8 {
     if (std.mem.startsWith(u8, url, "git+")) return url;
     return switch (try forgeOf(a, url)) {
         .archive => |archive| try a.print("git+{s}", .{archive.repository}),
-        .unread, .elsewhere => null,
+        .unread, .elsewhere, .published => null,
     };
 }
 
@@ -915,7 +1013,7 @@ fn pinRule(a: std.mem.Allocator, name: []const u8, url: []const u8, hash: []cons
     // bay cannot read as one is refused; any other URL names no repository bay can read, and its
     // hash fixes the bytes its host published.
     switch (try forgeOf(a, url)) {
-        .elsewhere => return .fixed,
+        .elsewhere, .published => return .fixed,
         .unread => |host| return .{ .refused = try a.print("{s} (a URL on {s} that bay cannot read as an archive of one revision; pin a version tag: bay update)", .{ name, host }) },
         .archive => |archive| {
             if (!package and git_source.isCommit(archive.revision)) return .fixed;
@@ -962,23 +1060,27 @@ test "a Zig package is released at a version tag, an archive that is no package 
     // No package at a ref that moves: refused, named no package.
     for ([_][]const u8{
         "https://github.com/o/tree-sitter-c/archive/master.tar.gz",
+        "https://github.com/o/tree-sitter-c/archive/refs/heads/master.tar.gz",
         "git+https://github.com/o/tree-sitter-c?ref=master#" ++ commit,
         "git+https://github.com/o/tree-sitter-c#master",
     }) |url| {
         const rule = try pinRule(a, "grammar_c", url, plain);
         try std.testing.expect(std.mem.find(u8, rule.refused, "(no Zig package") != null);
     }
+    // A file a GitHub release publishes, as curl.se publishes its: fixed by its hash, which a
+    // replaced file fails.
+    try std.testing.expectEqual(.fixed, std.meta.activeTag(try pinRule(a, "held_git_nghttp2", "https://github.com/nghttp2/nghttp2/releases/download/v1.71.0/nghttp2-1.71.0.tar.gz", plain)));
 }
 
 /// Every remote pin's `.hash` is what its URL holds, fetched now as Zig records it. Zig takes
 /// a package its cache holds by the hash alone, without the URL: a hash of other content
 /// builds here, and fails or builds other code for anyone who fetches the release.
-fn pinsHoldTheirHashes(c: Context, parsed: manifest.Manifest) !void {
+fn pinsHoldTheirHashes(c: Context, parsed: manifest.Manifest, before: []const Released) !void {
     const zig = try toolchain.forPackage(c.io, c.a, c.environ, c.package);
     // In the package's cache, which each fetch clears for itself.
     const scratch = try std.fs.path.join(c.a, &.{ c.package, ".zig-cache", "bay", "release-fetch" });
     var wrong: std.ArrayList([]const u8) = .empty;
-    for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev, parsed.overrides }) |list| for (list) |dependency| switch (dependency.source) {
+    for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev, parsed.overrides }) |list| for (list) |dependency| if (releasedAs(before, dependency.name) == null) switch (dependency.source) {
         .path => {},
         .remote => |at| {
             const fetched = try fetch.fetch(c.io, c.a, zig, scratch, at.url, dependency.name) orelse {
@@ -1013,6 +1115,9 @@ const Forge = union(enum) {
     archive: struct { repository: []const u8, revision: []const u8 },
     unread: []const u8,
     elsewhere,
+    /// A file a forge's release publishes (GitHub's `/owner/repo/releases/download/<tag>/<file>`):
+    /// as `elsewhere`, its hash fixes the bytes; a file replaced since fails the fetch.
+    published,
 };
 
 /// The forges whose URLs bay reads. On any of them, a URL that is no archive form bay knows
@@ -1036,9 +1141,26 @@ fn forgeOf(a: std.mem.Allocator, url: []const u8) !Forge {
     const known = for (known_forges) |forge| {
         if (std.mem.eql(u8, host, forge)) break true;
     } else false;
+    if (releaseFile(host, url[0..separator], url[host_end..])) return .published;
     const archive_at = try archiveAt(a, host, url[0..separator], url[host_end..]);
     if (archive_at) |archive| return .{ .archive = .{ .repository = archive.repository, .revision = archive.revision } };
     return if (known) .{ .unread = host } else .elsewhere;
+}
+
+/// Whether the URL is a file a GitHub release publishes: `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`,
+/// no segment empty, no query or fragment.
+fn releaseFile(host: []const u8, scheme: []const u8, rest: []const u8) bool {
+    if (!std.mem.eql(u8, host, "github.com") or !std.mem.eql(u8, scheme, "https") or std.mem.findAny(u8, rest, "?#") != null) return false;
+    if (rest.len < 2 or rest[0] != '/') return false;
+    var segments: [6][]const u8 = undefined;
+    var count: usize = 0;
+    var parts = std.mem.splitScalar(u8, rest[1..], '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or count == segments.len) return false;
+        segments[count] = part;
+        count += 1;
+    }
+    return count == 6 and std.mem.eql(u8, segments[2], "releases") and std.mem.eql(u8, segments[3], "download");
 }
 
 const Archive = struct { repository: []const u8, revision: []const u8 };
@@ -1133,7 +1255,8 @@ test "a forge's archive names its repository and revision; a known forge's URL b
         "https://github.com//o/r/archive/" ++ commit ++ ".tar.gz",
         "https://github.com/o/r.git?ref=main#" ++ commit,
         "https://github.com/o/r/archive/.tar.gz",
-        "https://github.com/o/r/releases/download/v1.2.0/r.tar.gz",
+        "https://github.com/o/r/releases/download/v1.2.0/",
+        "https://github.com/o/r/releases/download/v1.2.0/r.tar.gz?x=1",
         "http://github.com/o/r/archive/v1.2.0.tar.gz",
         "https://api.github.com/repos/o/r/tarball",
         "https://gitlab.com/o/-/archive/v1.2.0/r.tar.gz",
@@ -1144,6 +1267,11 @@ test "a forge's archive names its repository and revision; a known forge's URL b
         "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/riscv64/alpine-minirootfs-3.24.2-riscv64.tar.gz",
         "https://example.org/lib-1.0.tar.gz",
     }) |url| try std.testing.expect(try forgeOf(a, url) == .elsewhere);
+    // A file a GitHub release publishes: its hash fixes the bytes, as another host's.
+    for ([_][]const u8{
+        "https://github.com/o/r/releases/download/v1.2.0/r-1.2.0.tar.gz",
+        "https://GitHub.com/o/r/releases/download/v1.2.0/r-1.2.0.tar.gz",
+    }) |url| try std.testing.expect(try forgeOf(a, url) == .published);
 }
 
 test "a revision is a release at a version tag, by name or by the commit it names" {
@@ -1386,6 +1514,16 @@ fn ride(c: Context, car: each.Car, when: enum { always, when_repinned }, version
     };
     if (when == .when_repinned and !pins_moved) return .nothing;
     try say.note(c.io, "{s}: {s}", .{ car.name, car.directory });
+    // Built on the pins it moved to, here, before anything of it is gated or pushed: a compile
+    // error the re-pin brings would otherwise first show in the hosted run of its release.
+    if (pins_moved) bayIn(member, &.{ "dev", "check" }) catch |err| switch (err) {
+        error.Reported => {
+            _ = try must(member, &.{ "reset", "--quiet", "--hard", "HEAD^" });
+            try say.note(c.io, "{s}: does not build on the pins the train moved it to (bay dev check): its re-pin is undone, and nothing of it is gated or pushed", .{car.name});
+            return .failed;
+        },
+        else => return err,
+    };
     return switch (releaseOne(member, .{ .push_unreleased = true }) catch |err| switch (err) {
         error.Reported => return .failed,
         else => return err,
@@ -1515,6 +1653,8 @@ fn bayIn(c: Context, args: []const []const u8) !void {
 fn trainPlan(c: Context, cars: []const each.Car) !u8 {
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
     @memset(versions, null);
+    // The version each member stands at before the train: its release, when it makes none.
+    const currents = try c.a.alloc(std.SemanticVersion, cars.len);
     // Where each car is gated, as `ride` gates it.
     var gated: std.Io.Writer.Allocating = .init(c.a);
     try gated.writer.writeAll("here");
@@ -1546,10 +1686,13 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         const unreleased = try section(member, log);
         const change = if (shipped.items.len != 0) unreleased.change().max(.fix) else unreleased.change();
         const current = changelog.parseVersion(before.version) orelse try say.fail(c.io, "{s}: .version \"{s}\" is not major.minor.patch", .{ car.name, before.version });
+        currents[number - 1] = current;
+        // The version the run would tag, by the rule the run follows, from what it reads.
+        const history = try historyOf(member, log, current, try remoteTags(member, (try upstream(member)).remote));
         try say.out(c.io, "{d}. {s} {f}", .{ number, car.name, current });
         if (change != .none) {
-            version.* = changelog.next(current, change);
-            try say.out(c.io, " -> {f} ({t}):", .{ version.*.?, change });
+            version.* = nextVersion(current, change, history);
+            try say.out(c.io, " -> {f} ({t}{s}):", .{ version.*.?, change, if (history.first()) ", its first release" else "" });
             if (!unreleased.empty()) try say.out(c.io, " its [Unreleased] section", .{});
             if (shipped.items.len != 0) try say.out(c.io, "{s} pins {s}", .{ if (unreleased.empty()) "" else ", and", try listed(c.a, shipped.items) });
         } else try say.out(c.io, ": nothing to release", .{});
@@ -1561,10 +1704,21 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
             error.Reported => try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name}),
             else => return err,
         };
+        // The pins the run refuses, as it reads them: tidied, and every member before this one
+        // at its release, the train's or the one there already, wherever a member's tree pins
+        // it: the run reads those trees after their re-pins.
+        if (version.* != null) {
+            const earlier_ones = try c.a.alloc(Released, number - 1);
+            for (earlier_ones, cars[0 .. number - 1], versions[0 .. number - 1], currents[0 .. number - 1]) |*at, earlier, released, standing| at.* = .{ .name = earlier.name, .directory = earlier.directory, .version = released orelse standing };
+            pinsAreReleases(member, after, earlier_ones) catch |err| switch (err) {
+                error.Reported => try say.fail(c.io, "{s}: the train would stop at it, at its pins, before it releases", .{car.name}),
+                else => return err,
+            };
+        }
         if (version.*) |v| {
-            try say.out(c.io, "   then: the re-pin committed, if a pin moves; v{f} written from its section and committed; gated {s}; the branch and the tag pushed\n", .{ v, gated.written() });
+            try say.out(c.io, "   then: the re-pin committed and built here (bay dev check), if a pin moves; v{f} written from its section and committed; gated {s}; the branch and the tag pushed\n", .{ v, gated.written() });
         } else if (developed.items.len != 0) {
-            try say.out(c.io, "   then: the re-pin committed; gated {s}; the branch pushed, with no tag\n", .{gated.written()});
+            try say.out(c.io, "   then: the re-pin committed and built here (bay dev check); gated {s}; the branch pushed, with no tag\n", .{gated.written()});
         } else try say.out(c.io, "   then: nothing\n", .{});
     }
     // The closing pass: a development pin left out of the order, on a member after it.

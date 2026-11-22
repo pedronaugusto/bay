@@ -45,9 +45,15 @@ const gate_program =
 ;
 
 /// The package's build: its gate, and a file made from its pins (`generate`), as
-/// preflight makes a caller naming the preflight a package pins.
+/// preflight makes a caller naming the preflight a package pins; its development's `check`
+/// compiles `check.zig`.
 const gate_build =
     \\const std = @import("std");
+    \\pub fn dev(b: *std.Build, _: type) void {
+    \\    const p = b.dependency(@tagName(@import("build.zig.zon").name), .{}).builder;
+    \\    const object = b.addObject(.{ .name = "check", .root_module = b.createModule(.{ .root_source_file = p.path("check.zig"), .target = b.graph.host }) });
+    \\    b.step("check", "Compile the package").dependOn(&object.step);
+    \\}
     \\pub fn build(b: *std.Build) void {
     \\    const exe = b.addExecutable(.{ .name = "gate", .root_module = b.createModule(.{ .root_source_file = b.path("gate.zig"), .target = b.graph.host }) });
     \\    const run = b.addRunArtifact(exe);
@@ -110,18 +116,31 @@ const World = struct {
     /// A package `name` at `version`, released and tagged, its remote a bare
     /// repository pushed to over SSH; `dependencies` its manifest's entries.
     fn package(w: *World, dir: []const u8, version: []const u8, dependencies: []const u8) !void {
+        return w.made(dir, version, dependencies, .released);
+    }
+
+    /// As `package`, never released: no tag, and its first entry waiting in [Unreleased].
+    fn unreleased(w: *World, dir: []const u8, version: []const u8) !void {
+        return w.made(dir, version, "", .unreleased);
+    }
+
+    fn made(w: *World, dir: []const u8, version: []const u8, dependencies: []const u8, history: enum { released, unreleased }) !void {
         const f = &w.f;
         try f.tmp.dir.createDirPath(f.io, dir);
         try f.write(dir, "build.zig.zon", try f.a.print(".{{\n    .name = .{s},\n    .version = \"{s}\",\n    .fingerprint = 0x{x},\n    .minimum_zig_version = \"0.17.0\",\n    .paths = .{{\"\"}},\n    .dependencies = .{{{s}}},\n}}\n", .{ dir, version, fixture.fingerprint(dir), dependencies }));
         try f.write(dir, "build.zig", gate_build);
         try f.write(dir, "gate.zig", gate_program);
+        try f.write(dir, "check.zig", "comptime {}\n");
         try f.write(dir, ".gitignore", ".zig-cache/\nzig-out/\nzig-pkg/\n");
         try f.write(dir, ".gitattributes", "CHANGELOG.md merge=union\n");
-        try f.write(dir, "CHANGELOG.md", try f.a.print("# Changelog\n\n## [Unreleased]\n\n## [{s}] - 2026-01-01\n\n### Added\n\n- First.\n", .{version}));
+        try f.write(dir, "CHANGELOG.md", switch (history) {
+            .released => try f.a.print("# Changelog\n\n## [Unreleased]\n\n## [{s}] - 2026-01-01\n\n### Added\n\n- First.\n", .{version}),
+            .unreleased => "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- First.\n",
+        });
         try w.git(dir, &.{ "init", "--quiet", "--initial-branch=main" });
         try w.git(dir, &.{ "add", "." });
         try w.git(dir, &.{ "commit", "--quiet", "-m", "First" });
-        try w.git(dir, &.{ "tag", try f.a.print("v{s}", .{version}) });
+        if (history == .released) try w.git(dir, &.{ "tag", try f.a.print("v{s}", .{version}) });
         try w.git(".", &.{ "init", "--quiet", "--bare", "--initial-branch=main", try w.path(try f.a.print("remotes/{s}.git", .{dir})) });
         try w.git(dir, &.{ "remote", "add", "origin", try w.sshUrl(dir) });
         try w.git(dir, &.{ "push", "--quiet", "--set-upstream", "origin", "main", "--tags" });
@@ -723,7 +742,7 @@ test "a workspace's train releases its members in order, each pinned at the rele
         "3. c 0.1.0 -> 0.1.1 (fix): pins b 0.1.1\n",
         "then a develops with c 0.1.1, gated and pushed with no tag\n",
         // Each car's steps, after its tidy run as a dry run.
-        "   then: the re-pin committed, if a pin moves; v0.1.1 written from its section and committed; gated here; the branch and the tag pushed\n",
+        "   then: the re-pin committed and built here (bay dev check), if a pin moves; v0.1.1 written from its section and committed; gated here; the branch and the tag pushed\n",
     }) |line| if (!contains(plan.stdout, line)) {
         std.debug.print("expected the line:\n{s}in the plan:\n{s}\n", .{ line, plan.stdout });
         return error.TestUnexpectedResult;
@@ -762,6 +781,232 @@ test "a workspace's train releases its members in order, each pinned at the rele
     try std.testing.expectEqualStrings("", try w.remoteAt("a", "refs/tags/v0.1.2"));
     try std.testing.expectEqual(1, std.mem.count(u8, try w.read("a", "build.zig.zon"), "?ref=v0.1.1#"));
     try std.testing.expectEqual(1, try w.gated(try w.head("a")));
+}
+
+test "a train's plan is what its run tags: a first release the manifest's version, a later one its change's" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // new has never been released; old has, and has a change since.
+    try w.unreleased("new", "0.1.0");
+    try w.package("old", "0.1.0", "");
+    try w.change("old", "### Added\n\n- More.\n");
+    for ([_][]const u8{ "new", "old" }) |dir| try familyPolicy(&w, dir, "family");
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"new\", \"old\" } }\n");
+    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    try std.testing.expect(succeeded(plan));
+    for ([_][]const u8{ "new 0.1.0 -> 0.1.0 (feature, its first release): its [Unreleased] section\n", "old 0.1.0 -> 0.1.1 (feature): its [Unreleased] section\n" }) |line| if (!contains(plan.stdout, line)) {
+        std.debug.print("expected the line:\n{s}in the plan:\n{s}\n", .{ line, plan.stdout });
+        return error.TestUnexpectedResult;
+    };
+    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
+    // What the plan said is what the run tagged, and no other version.
+    try std.testing.expectEqualStrings(try w.head("new"), try w.remoteAt("new", "refs/tags/v0.1.0"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("new", "refs/tags/v0.1.1"));
+    try std.testing.expectEqualStrings(try w.head("old"), try w.remoteAt("old", "refs/tags/v0.1.1"));
+}
+
+test "a train's plan refuses the pins its run refuses: a package no member, pinned at a commit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // user ships ext, released and no member of the workspace, pinned at a commit: the train
+    // moves no pin of ext.
+    try w.package("ext", "0.1.0", "");
+    try w.package("user", "0.1.0", "");
+    try std.testing.expect(succeeded(try w.f.bay("user", &.{ "add", try w.f.a.print("{s}#{s}", .{ try w.pinUrl("ext"), try w.head("ext") }) })));
+    try w.git("user", &.{ "add", "." });
+    try w.git("user", &.{ "commit", "--quiet", "-m", "Pin ext at a commit" });
+    try w.git("user", &.{ "push", "--quiet", "origin", "main" });
+    try familyPolicy(&w, "user", "family");
+    try w.change("user", "### Fixed\n\n- A fix.\n");
+    try w.f.write(".", "bay.work", ".{ .members = .{\"user\"} }\n");
+    const head = try w.head("user");
+    for ([_][]const []const u8{ &.{ "--workspace", "release", "--dry-run" }, &.{ "--workspace", "release" } }) |args| {
+        const refusal = try w.f.bay(".", args);
+        try std.testing.expect(refused(refusal));
+        try std.testing.expect(contains(refusal.stderr, "ext (a Zig package at "));
+        try std.testing.expect(contains(refusal.stderr, ") pinned at no release"));
+        try std.testing.expectEqualStrings(head, try w.head("user"));
+        try std.testing.expectEqualStrings("", try w.remoteAt("user", "refs/tags/v0.1.1"));
+    }
+    try std.testing.expect(contains((try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" })).stderr, "user: the train would stop at it, at its pins, before it releases"));
+    // At its release, the plan and the run both go through.
+    try std.testing.expect(succeeded(try w.f.bay("user", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("ext")}) })));
+    try w.git("user", &.{ "add", "." });
+    try w.git("user", &.{ "commit", "--quiet", "-m", "Pin ext at its release" });
+    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" })));
+    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
+    try std.testing.expectEqualStrings(try w.head("user"), try w.remoteAt("user", "refs/tags/v0.1.1"));
+}
+
+test "a release's graph holds each package at a version under one hash, in the plan and the run" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // dep 0.1.0, and a copy of it published elsewhere whose v0.1.0 is other content: one
+    // package, one version, two hashes.
+    try w.package("dep", "0.1.0", "");
+    try w.git(".", &.{ "clone", "--quiet", try w.path("remotes/dep.git"), "copy" });
+    try w.f.write("copy", "lib.zig", "// other content\n");
+    try w.git("copy", &.{ "add", "." });
+    try w.git("copy", &.{ "commit", "--quiet", "-m", "Other content" });
+    try w.git("copy", &.{ "tag", "--force", "v0.1.0" });
+    try w.git(".", &.{ "init", "--quiet", "--bare", "--initial-branch=main", try w.path("remotes/copy.git") });
+    try w.git("copy", &.{ "push", "--quiet", try w.path("remotes/copy.git"), "main", "--tags" });
+    // mid ships dep, released; top ships mid and the copy's dep, each pin a release.
+    try w.package("mid", "0.1.0", "");
+    try std.testing.expect(succeeded(try w.f.bay("mid", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("dep")}) })));
+    try w.git("mid", &.{ "add", "." });
+    try w.git("mid", &.{ "commit", "--quiet", "-m", "Pin dep" });
+    try w.git("mid", &.{ "push", "--quiet", "origin", "main" });
+    try w.change("mid", "### Changed\n\n- Pins dep 0.1.0.\n");
+    try std.testing.expect(succeeded(try w.releaseIn("mid", &.{})));
+    try w.package("top", "0.1.0", "");
+    for ([_][]const u8{ try w.f.a.print("{s}#v0.1.1", .{try w.pinUrl("mid")}), try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("copy")}) }) |pin|
+        try std.testing.expect(succeeded(try w.f.bay("top", &.{ "add", pin })));
+    try w.git("top", &.{ "add", "." });
+    try w.git("top", &.{ "commit", "--quiet", "-m", "Pin mid and the copy" });
+    try w.git("top", &.{ "push", "--quiet", "origin", "main" });
+    try familyPolicy(&w, "top", "family");
+    try w.change("top", "### Fixed\n\n- A fix.\n");
+    try w.f.write(".", "bay.work", ".{ .members = .{\"top\"} }\n");
+    const head = try w.head("top");
+    for ([_][]const []const u8{ &.{ "--workspace", "release", "--dry-run" }, &.{ "--workspace", "release" } }) |args| {
+        const refusal = try w.f.bay(".", args);
+        try std.testing.expect(refused(refusal));
+        try std.testing.expect(contains(refusal.stderr, "dep 0.1.0 (fingerprint 0x"));
+        try std.testing.expect(contains(refusal.stderr, "(pinned by mid)"));
+        try std.testing.expect(contains(refusal.stderr, "(pinned by top)"));
+        try std.testing.expect(contains(refusal.stderr, "the graph Zig fetches holds one package at one version under two hashes"));
+        try std.testing.expectEqualStrings(head, try w.head("top"));
+        try std.testing.expectEqualStrings("", try w.remoteAt("top", "refs/tags/v0.1.1"));
+    }
+    // Pinned where mid pins it, one hash: the plan and the run both go through.
+    try std.testing.expect(succeeded(try w.f.bay("top", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("dep")}) })));
+    try w.git("top", &.{ "add", "." });
+    try w.git("top", &.{ "commit", "--quiet", "-m", "Pin dep where mid does" });
+    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" })));
+    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
+    try std.testing.expectEqualStrings(try w.head("top"), try w.remoteAt("top", "refs/tags/v0.1.1"));
+}
+
+test "a train's plan moves a member it releases in every tree it reaches, as the run does" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // x 0.1.0, and a commit after it that still says 0.1.0: two contents of one version.
+    try w.package("x", "0.1.0", "");
+    try w.change("x", "### Fixed\n\n- A fix.\n");
+    try w.git("x", &.{ "push", "--quiet", "origin", "main" });
+    // y pins that commit and u the release; z pins y and u, and x only through them.
+    for ([_][]const u8{ "y", "u" }, [_][]const u8{ try w.head("x"), "v0.1.0" }) |dir, at| {
+        try w.package(dir, "0.1.0", "");
+        try std.testing.expect(succeeded(try w.f.bay(dir, &.{ "add", try w.f.a.print("{s}#{s}", .{ try w.pinUrl("x"), at }) })));
+        try w.git(dir, &.{ "add", "." });
+        try w.git(dir, &.{ "commit", "--quiet", "-m", "Pin x" });
+        try w.git(dir, &.{ "push", "--quiet", "origin", "main" });
+    }
+    try w.package("z", "0.1.0", "");
+    for ([_][]const u8{ "y", "u" }) |dependency| try std.testing.expect(succeeded(try w.f.bay("z", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl(dependency)}) })));
+    try w.git("z", &.{ "add", "." });
+    try w.git("z", &.{ "commit", "--quiet", "-m", "Pin y and u" });
+    try w.git("z", &.{ "push", "--quiet", "origin", "main" });
+    for ([_][]const u8{ "y", "u", "z" }) |dir| try w.change(dir, "### Fixed\n\n- A fix.\n");
+    for ([_][]const u8{ "x", "y", "u", "z" }) |dir| try familyPolicy(&w, dir, "family");
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"x\", \"y\", \"u\", \"z\" } }\n");
+    // The train releases x first and pins y and u at it: z's graph holds x once, in the plan
+    // as in the run.
+    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    if (!succeeded(plan)) {
+        std.debug.print("the plan refused what the run releases:\n{s}\n", .{plan.stderr});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(contains(plan.stdout, "z 0.1.0 -> 0.1.1 (fix): its [Unreleased] section, and pins "));
+    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
+    for ([_][]const u8{ "x", "y", "u", "z" }) |dir| try std.testing.expectEqualStrings(try w.head(dir), try w.remoteAt(dir, "refs/tags/v0.1.1"));
+}
+
+test "a train's plan pins a member with nothing to release at its release, in every member's tree, as the run does" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // l before its first release: two commits that both say 0.0.0, a pinning one and b the
+    // other. Then l is released as 0.1.0, and has nothing more to release.
+    try w.unreleased("l", "0.0.0");
+    const first = try w.head("l");
+    try w.f.write("l", "lib.zig", "// second\n");
+    try w.git("l", &.{ "add", "." });
+    try w.git("l", &.{ "commit", "--quiet", "-m", "Second" });
+    try w.git("l", &.{ "push", "--quiet", "origin", "main" });
+    for ([_][]const u8{ "a", "b" }, [_][]const u8{ first, try w.head("l") }) |dir, at| {
+        try w.package(dir, "0.1.0", "");
+        try std.testing.expect(succeeded(try w.f.bay(dir, &.{ "add", try w.f.a.print("{s}#{s}", .{ try w.pinUrl("l"), at }) })));
+        try w.git(dir, &.{ "add", "." });
+        try w.git(dir, &.{ "commit", "--quiet", "-m", "Pin l" });
+        try w.git(dir, &.{ "push", "--quiet", "origin", "main" });
+    }
+    try w.f.write("l", "build.zig.zon", try std.mem.replaceOwned(u8, w.f.a, try w.read("l", "build.zig.zon"), "\"0.0.0\"", "\"0.1.0\""));
+    try w.git("l", &.{ "commit", "--quiet", "-am", "Version 0.1.0" });
+    try w.git("l", &.{ "push", "--quiet", "origin", "main" });
+    try std.testing.expect(succeeded(try w.releaseIn("l", &.{})));
+    // z pins a and b, and l only through them.
+    try w.package("z", "0.1.0", "");
+    for ([_][]const u8{ "a", "b" }) |dependency| try std.testing.expect(succeeded(try w.f.bay("z", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl(dependency)}) })));
+    try w.git("z", &.{ "add", "." });
+    try w.git("z", &.{ "commit", "--quiet", "-m", "Pin a and b" });
+    try w.git("z", &.{ "push", "--quiet", "origin", "main" });
+    for ([_][]const u8{ "a", "b", "z" }) |dir| try w.change(dir, "### Fixed\n\n- A fix.\n");
+    for ([_][]const u8{ "l", "a", "b", "z" }) |dir| try familyPolicy(&w, dir, "family");
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"l\", \"a\", \"b\", \"z\" } }\n");
+    // The train pins a and b at l 0.1.0 before z: z's graph holds l once, in the plan as in
+    // the run.
+    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    if (!succeeded(plan)) {
+        std.debug.print("the plan refused what the run releases:\n{s}\n", .{plan.stderr});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(contains(plan.stdout, "1. l 0.1.0: nothing to release\n"));
+    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
+    for ([_][]const u8{ "a", "b", "z" }) |dir| try std.testing.expectEqualStrings(try w.head(dir), try w.remoteAt(dir, "refs/tags/v0.1.1"));
+}
+
+test "a train builds each member on the pins it moved it to, and one that does not build goes no further" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // y ships x 0.1.0, and does not compile against x 0.1.1, the release the train makes.
+    try w.package("x", "0.1.0", "");
+    try w.package("y", "0.1.0", "");
+    try std.testing.expect(succeeded(try w.f.bay("y", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("x")}) })));
+    try w.f.write("y", "check.zig", "comptime {\n    if (@import(\"std\").mem.find(u8, @embedFile(\"build.zig.zon\"), \"?ref=v0.1.1#\") != null) @compileError(\"x 0.1.1 changed what y calls\");\n}\n");
+    try w.git("y", &.{ "add", "." });
+    try w.git("y", &.{ "commit", "--quiet", "-m", "Pin x" });
+    try w.git("y", &.{ "push", "--quiet", "origin", "main" });
+    for ([_][]const u8{ "x", "y" }) |dir| {
+        try w.change(dir, "### Fixed\n\n- A fix.\n");
+        try familyPolicy(&w, dir, "family");
+    }
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"x\", \"y\" } }\n");
+    const head = try w.head("y");
+    const remote_main = try w.remoteAt("y", "refs/heads/main");
+    const train = try w.f.bay(".", &.{ "--workspace", "release" });
+    try std.testing.expect(refused(train));
+    try std.testing.expect(contains(train.stderr, "y: does not build on the pins the train moved it to (bay dev check)"));
+    try std.testing.expect(contains(train.stderr, "x 0.1.1 changed what y calls"));
+    // x went out; y is as it was, here and on its remote, and was never gated.
+    try std.testing.expectEqualStrings(try w.head("x"), try w.remoteAt("x", "refs/tags/v0.1.1"));
+    try std.testing.expectEqualStrings(head, try w.head("y"));
+    try std.testing.expectEqualStrings("", try w.out("y", &.{ "status", "--porcelain" }));
+    try std.testing.expectEqualStrings(remote_main, try w.remoteAt("y", "refs/heads/main"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("y", "refs/tags/v0.1.1"));
+    try std.testing.expectEqual(0, try w.gated(head));
 }
 
 /// GitHub's API as a test scripts it: a server on the loopback that answers each request in
