@@ -279,7 +279,7 @@ pub fn main(init: std.process.Init) !void {
     const command = cli.command orelse {
         var buffer: [4096]u8 = undefined;
         var w = Io.File.stdout().writer(io, &buffer);
-        try ensign.writeHelp(Cli, &w.interface, "bay", ensign.terminalWidth(io, .stdout(), init.environ_map) orelse 80);
+        try ensign.writeHelp(Cli, &w.interface, "bay", (try ensign.terminalWidth(io, .stdout(), init.environ_map)) orelse 80);
         return w.interface.flush();
     };
     switch (command) {
