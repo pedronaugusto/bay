@@ -820,24 +820,17 @@ test "a build's listing names a step by the first word of its line, never inside
 /// Every remote pin of the manifest is fixed as a release must be (`pinRule`): a Zig package at
 /// a version tag on its repository, an archive that is no package at its exact commit. A
 /// release pinned on a branch or any ref that moves builds from code nothing fixes, and its
-/// consumers would take it. Until the development tools in `commit_pins_until` are released, a
-/// development pin may also be an exact commit (`devCommit`), named in the output; a runtime
-/// pin never. `before` names the members a train pins at their releases before this one: a
+/// consumers would take it. A development pin is held to this as a runtime pin is. `before` names the members a train pins at their releases before this one: a
 /// train's plan reads the manifest before they move, and the run checks them once moved.
 fn pinsAreReleases(c: Context, parsed: manifest.Manifest, before: []const Released) !void {
     var wrong: std.ArrayList([]const u8) = .empty;
-    var at_commits: std.ArrayList([]const u8) = .empty;
-    const unreleased = try unreleasedTools(c, parsed);
     for ([_]struct { list: []const manifest.Dependency, dev: bool }{
         .{ .list = parsed.normal, .dev = false },
         .{ .list = parsed.dev, .dev = true },
         .{ .list = parsed.overrides, .dev = false },
     }) |kind| for (kind.list) |dependency| if (releasedAs(before, dependency.name) == null) switch (dependency.source) {
         .path => {},
-        .remote => |at| if (kind.dev and unreleased.len != 0 and devCommit(at.url) != null) {
-            const commit = devCommit(at.url).?;
-            try at_commits.append(c.a, try c.a.print("{s} at {s}", .{ dependency.name, commit[0..12] }));
-        } else switch (try pinRule(c.a, dependency.name, at.url, at.hash)) {
+        .remote => |at| switch (try pinRule(c.a, dependency.name, at.url, at.hash)) {
             .fixed => {},
             .refused => |reason| try wrong.append(c.a, reason),
             .git_tag => |pin| {
@@ -852,8 +845,6 @@ fn pinsAreReleases(c: Context, parsed: manifest.Manifest, before: []const Releas
         },
     };
     if (wrong.items.len != 0) try say.fail(c.io, "{s} pinned at no release: a release builds from what is fixed, a Zig package at a version tag and an archive that is no package at its exact commit, never a branch or a ref that moves; pin each so (bay update) and release again", .{try listed(c.a, wrong.items)});
-    if (at_commits.items.len != 0)
-        try say.note(c.io, "development pins at a commit, allowed until {s} {s} released: {s}", .{ try listed(c.a, unreleased), if (unreleased.len == 1) "is" else "are", try listed(c.a, at_commits.items) });
     try pinsHoldTheirHashes(c, parsed, before);
     try oneHashEach(c, parsed, before);
 }
@@ -924,62 +915,6 @@ fn releasedAs(before: []const Released, name: []const u8) ?Released {
 fn among(names: []const []const u8, name: []const u8) bool {
     for (names) |n| if (std.mem.eql(u8, n, name)) return true;
     return false;
-}
-
-/// The development tools whose releases end the allowance of development pins at a commit
-/// (one way to release, step 1): until both are out, a family package is developed against
-/// their unreleased heads.
-const commit_pins_until = [_]struct { name: []const u8, tag: []const u8 }{
-    .{ .name = "preflight", .tag = "v0.19.0" },
-    .{ .name = "shakedown", .tag = "v0.7.0" },
-};
-
-/// The tools of `commit_pins_until` this manifest pins whose release tag their repository does
-/// not advertise yet, each named with its release (`preflight 0.19.0`). A tool the manifest does
-/// not pin keeps nothing open for it: the allowance is for the pins these tools bring.
-fn unreleasedTools(c: Context, parsed: manifest.Manifest) ![]const []const u8 {
-    var open: std.ArrayList([]const u8) = .empty;
-    for (commit_pins_until) |tool| {
-        const url = for ([_][]const manifest.Dependency{ parsed.dev, parsed.normal }) |list| {
-            const found = for (list) |dependency| switch (dependency.source) {
-                .path => {},
-                .remote => |at| if (std.mem.eql(u8, dependency.name, tool.name)) break repositoryOf(c.a, at.url) catch null,
-            } else null;
-            if (found) |u| break u;
-        } else null;
-        const repository = url orelse continue;
-        if (!isRelease(try advertised.tags(c.io, c.a, repository), tool.tag))
-            try open.append(c.a, try c.a.print("{s} {s}", .{ tool.name, tool.tag[1..] }));
-    }
-    return open.items;
-}
-
-/// The repository a pin's URL is of, as `advertised.tags` reads it: a git pin's URL, a forge
-/// archive's repository; null for a URL of no repository bay can read.
-fn repositoryOf(a: std.mem.Allocator, url: []const u8) !?[]const u8 {
-    if (std.mem.startsWith(u8, url, "git+")) return url;
-    return switch (try forgeOf(a, url)) {
-        .archive => |archive| try a.print("git+{s}", .{archive.repository}),
-        .unread, .elsewhere, .published => null,
-    };
-}
-
-/// The exact commit a development pin is at, where that is all that fixes it: a git pin whose
-/// fragment is a full commit (with or without the ref it was fetched from, which the hash makes
-/// irrelevant to what is built). Null for anything else, a branch or tag alone above all.
-fn devCommit(url: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, url, "git+")) return null;
-    const fragment = git_source.parts(url).fragment orelse return null;
-    return if (git_source.isCommit(fragment)) fragment else null;
-}
-
-test "a development pin is at a commit where its fragment is one, never at a branch alone" {
-    const commit = "38334d1c00a26644e51bd57be38f9c5649c7e9f9";
-    try std.testing.expectEqualStrings(commit, devCommit("git+https://github.com/o/preflight?ref=main#" ++ commit).?);
-    try std.testing.expectEqualStrings(commit, devCommit("git+https://github.com/o/shakedown#" ++ commit).?);
-    try std.testing.expect(devCommit("git+https://github.com/o/shakedown#main") == null);
-    try std.testing.expect(devCommit("git+https://github.com/o/shakedown?ref=main") == null);
-    try std.testing.expect(devCommit("https://github.com/o/shakedown/archive/" ++ commit ++ ".tar.gz") == null);
 }
 
 /// What a release asks of one remote pin. A Zig package (its archive holds a `build.zig.zon`,

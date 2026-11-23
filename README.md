@@ -138,10 +138,7 @@ versions, so a release pins it at a version tag at the commit the tag names. An 
 that is no Zig package (a tree-sitter grammar, a body of queries) has no version to tag:
 its exact commit, with the hash bay proves its URL holds, fixes it as a tag would. A
 branch, or any ref that moves, is refused for both, and the refusal says which case it is.
-Until preflight 0.19.0 and shakedown 0.7.0 are released (read from the repositories of
-the package's own pins on them), a development pin may also be at an exact commit, its
-hash proved as every pin's is; `bay release` names each such pin in its output. A runtime
-pin is held to a version tag throughout.
+A development pin is held to this as a runtime pin is.
 
 Zig then gets a graph in which each package appears once. A dependency whose own pins
 name other revisions is built from a copy with only those pins rewritten, which

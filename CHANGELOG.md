@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `bay release` holds a development pin to a version tag, or for an archive that is no Zig package its exact commit, as it holds a runtime pin, now that preflight 0.19.0 and shakedown 0.7.0 are released. A development pin at a commit was allowed until those releases, and named in the output.
+
 ### Fixed
 
 - `bay --workspace release --dry-run` shows the version the run tags: a member's first release (nothing released in CHANGELOG.md, no tag of its version here or on the remote) is the version its manifest names, where the plan showed the next one, and so did the pins of the members after it. One rule decides a release's version, and the plan and the run both follow it.
