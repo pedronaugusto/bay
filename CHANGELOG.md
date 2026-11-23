@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A NuGet pin's signature is checked by `cloak-nuget-check` built from cloak 0.24.0, where bay pinned a cloak commit before that release.
+
 ### Fixed
 
 - `bay --workspace release --dry-run` shows the version the run tags: a member's first release (nothing released in CHANGELOG.md, no tag of its version here or on the remote) is the version its manifest names, where the plan showed the next one, and so did the pins of the members after it. One rule decides a release's version, and the plan and the run both follow it.

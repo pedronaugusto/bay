@@ -32,11 +32,10 @@ pub const Cloak = union(enum) {
     path: []const u8,
 };
 
-/// The cloak bay pins, as it pins Zig: a commit until cloak releases one with `cms`, then
-/// its tag (bay's release refuses a pin that is not a tag).
+/// The cloak bay pins, as it pins Zig.
 pub const pinned = .{
-    .url = "git+https://github.com/pedronaugusto/cloak#7ba3b839adbac5e6ad0e2db0ae5540b6be47a5f5",
-    .hash = "cloak-0.23.1-9onwcc4aWwQVFDKedS3qXp41Vwq0EeRPaUwNHgHcL2BE",
+    .url = "git+https://github.com/pedronaugusto/cloak#cd72aa75da922623af276d5fcec15230acc9640f",
+    .hash = "cloak-0.23.1-9onwcfoCgAB07a_3FNPNWnAXBEAwp_ECMMxs-fdPVtG8",
     .zig = "0.17.0",
 };
 
