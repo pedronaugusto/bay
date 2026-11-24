@@ -17,8 +17,8 @@ const refused = fixture.refused;
 const succeeded = fixture.succeeded;
 
 /// The package's gate: it records the commit it gated (a file named for it under
-/// GATE_LOG, holding where it was told the portable jobs run) and fails when the
-/// package holds a file `red`.
+/// GATE_LOG, holding where it was told the portable jobs run, and on a second line the
+/// members a train told it to build at its pins) and fails when the package holds a file `red`.
 const gate_program =
     \\const std = @import("std");
     \\pub fn main(init: std.process.Init) !void {
@@ -39,6 +39,8 @@ const gate_program =
     \\    };
     \\    defer file.close(io);
     \\    try file.writeStreamingAll(io, init.environ_map.get("PREFLIGHT_PORTABLE") orelse "unset");
+    \\    try file.writeStreamingAll(io, "\n");
+    \\    try file.writeStreamingAll(io, init.environ_map.get("BAY_TRAIN_PINNED") orelse "");
     \\    if (std.Io.Dir.cwd().access(io, "red", .{})) |_| return error.Red else |_| {}
     \\}
     \\
@@ -188,9 +190,29 @@ const World = struct {
         var entries = dir.iterate();
         while (try entries.next(w.f.io)) |entry| {
             if (!std.mem.startsWith(u8, entry.name, commit)) continue;
-            if (std.mem.eql(u8, try dir.readFileAlloc(w.f.io, entry.name, w.f.a, .limited(64)), portable)) return true;
+            const record = try dir.readFileAlloc(w.f.io, entry.name, w.f.a, .limited(1 << 16));
+            if (std.mem.eql(u8, record[0 .. std.mem.findScalar(u8, record, '\n') orelse record.len], portable)) return true;
         }
         return false;
+    }
+
+    /// The members a gate of `commit` was told to build at its pins (a train's), as one list.
+    fn gatedPinned(w: *World, commit: []const u8) ![]const u8 {
+        var dir = try w.f.tmp.dir.openDir(w.f.io, "gates", .{ .iterate = true });
+        defer dir.close(w.f.io);
+        var entries = dir.iterate();
+        while (try entries.next(w.f.io)) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, commit)) continue;
+            const record = try dir.readFileAlloc(w.f.io, entry.name, w.f.a, .limited(1 << 16));
+            const line = std.mem.findScalar(u8, record, '\n') orelse return "";
+            return record[line + 1 ..];
+        }
+        return error.NotGated;
+    }
+
+    /// The directory of `dir` as the file system names it, as a workspace names its members.
+    fn real(w: *World, dir: []const u8) ![]const u8 {
+        return Io.Dir.cwd().realPathFileAlloc(w.f.io, try w.path(dir), w.f.a);
     }
 
     /// The commit the remote of `dir` holds at `ref`, an annotated tag peeled, or "" for nothing.
@@ -774,6 +796,16 @@ test "a workspace's train releases its members in order, each pinned at the rele
         try std.testing.expectEqualStrings("Release v0.1.1", try w.out(dir, &.{ "log", "-1", "--format=%s" }));
         try std.testing.expectEqualStrings(try w.f.a.print("Pin {s} 0.1.1", .{dependency}), try w.out(dir, &.{ "log", "-1", "--format=%s", "HEAD^" }));
     }
+    // Each gated on what its release publishes. a went first, developed with c, which ships b,
+    // which ships a: its release was gated with c and b at its pins (c v0.1.0), not their trees.
+    const a_release = try w.remoteAt("a", "refs/tags/v0.1.1");
+    for ([_][]const u8{ "b", "c" }) |dir| try std.testing.expect(contains(try w.gatedPinned(a_release), try w.real(dir)));
+    // b ships a, released before it: gated on a's new tag, its tree, and c, not yet released, at its pin.
+    const b_pinned = try w.gatedPinned(try w.remoteAt("b", "refs/tags/v0.1.1"));
+    try std.testing.expect(!contains(b_pinned, try w.real("a")));
+    try std.testing.expect(contains(b_pinned, try w.real("c")));
+    // c, last, on both releases.
+    try std.testing.expectEqualStrings("", try w.gatedPinned(try w.remoteAt("c", "refs/tags/v0.1.1")));
     // a's development pin moved after c's tag: gated and pushed, a release of nothing.
     try std.testing.expectEqualStrings("Pin c 0.1.1", try w.out("a", &.{ "log", "-1", "--format=%s" }));
     try std.testing.expectEqualStrings(try w.head("a"), try w.remoteAt("a", "refs/heads/main"));
@@ -781,6 +813,41 @@ test "a workspace's train releases its members in order, each pinned at the rele
     try std.testing.expectEqualStrings("", try w.remoteAt("a", "refs/tags/v0.1.2"));
     try std.testing.expectEqual(1, std.mem.count(u8, try w.read("a", "build.zig.zon"), "?ref=v0.1.1#"));
     try std.testing.expectEqual(1, try w.gated(try w.head("a")));
+    try std.testing.expectEqualStrings("", try w.gatedPinned(try w.head("a")));
+}
+
+test "a train refuses a development pin on a member it builds at the pin, at a commit the member's origin does not hold" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // tool releases nothing in the train, so user's gate builds it at user's pin: a commit pushed
+    // once to a branch since deleted, which the hosted gate could not fetch.
+    try w.package("tool", "0.1.0", "");
+    try w.git("tool", &.{ "checkout", "--quiet", "-b", "aside" });
+    try w.f.write("tool", "aside.txt", "aside\n");
+    try w.git("tool", &.{ "add", "aside.txt" });
+    try w.git("tool", &.{ "commit", "--quiet", "-m", "Aside" });
+    const aside = try w.head("tool");
+    try w.git("tool", &.{ "push", "--quiet", "origin", "aside" });
+    try w.git("tool", &.{ "checkout", "--quiet", "main" });
+    try w.package("user", "0.1.0", "");
+    try std.testing.expect(succeeded(try w.f.bay("user", &.{ "add", "--dev", try w.f.a.print("{s}#{s}", .{ try w.pinUrl("tool"), aside }) })));
+    try w.git("tool", &.{ "push", "--quiet", "origin", "--delete", "aside" });
+    try w.git("user", &.{ "add", "." });
+    try w.git("user", &.{ "commit", "--quiet", "-m", "Develop with tool aside" });
+    try w.git("user", &.{ "push", "--quiet", "origin", "main" });
+    for ([_][]const u8{ "tool", "user" }) |dir| try familyPolicy(&w, dir, "family");
+    try w.change("user", "### Fixed\n\n- A fix.\n");
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"tool\", \"user\" } }\n");
+    const head = try w.head("user");
+    for ([_][]const []const u8{ &.{ "--workspace", "release", "--dry-run" }, &.{ "--workspace", "release" } }) |args| {
+        const refusal = try w.f.bay(".", args);
+        try std.testing.expect(refused(refusal));
+        try std.testing.expect(contains(refusal.stderr, try w.f.a.print("user develops with tool at {s}, which no branch or tag of {s}'s origin holds", .{ aside[0..12], try w.real("tool") })));
+        try std.testing.expectEqualStrings(head, try w.head("user"));
+        try std.testing.expectEqualStrings("", try w.remoteAt("user", "refs/tags/v0.1.1"));
+    }
 }
 
 test "a train's plan is what its run tags: a first release the manifest's version, a later one its change's" {

@@ -91,6 +91,29 @@ test "a root pinned below the selection is refused until tidy raises it, and --l
     try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
 }
 
+test "a dry run refuses a build that does not configure with the pins tidy would write, saying what Zig said" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // Pinned below the selection, so tidy would raise c, and the dry run configures the copy
+    // with the raise; the build stops as it configures, whatever its pins, as glint's did on a
+    // panic in preflight's build helper.
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b"), try f.pin("c", "c1") }), &.{ "a", "b", "c" }, main_ab);
+    const build = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig", f.a, .limited(1 << 20));
+    try f.write("app", "build.zig", try std.mem.replaceOwned(u8, f.a, build, "pub fn build(b: *std.Build) void {\n", "pub fn build(b: *std.Build) void {\n    if (b.args == null) @panic(\"the build stops as it configures\");\n"));
+    const before = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const planned = try f.bay("app", &.{ "tidy", "--dry-run" });
+    try std.testing.expect(refused(planned));
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "c would be raised to") != null);
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "the build stops as it configures") != null);
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "the package build does not configure with the pins tidy would write") != null);
+    // Nothing written, and the copy it configured is gone.
+    try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20)));
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, "app/.zig-cache/bay/tidied", .{}));
+}
+
 test "a tidy gives a nested manifest the package's pins of what both pin, and leaves the rest as it is" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

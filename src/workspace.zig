@@ -15,6 +15,11 @@ const manifest = @import("manifest.zig");
 
 pub const file_name = "bay.work";
 
+/// The members a train builds at the pins of the member it gates, not from their trees, as
+/// that member's release builds them: the members it has not released, named by bay for its
+/// own children, as absolute directories split by the path list separator. Never a person's.
+pub const pinned_variable = "BAY_TRAIN_PINNED";
+
 /// The other members of the workspace holding `package`, as absolute
 /// directories; none outside a workspace. A member that is the package itself,
 /// at its own directory or checked out elsewhere (a landing's scratch worktree,
@@ -23,6 +28,16 @@ pub const file_name = "bay.work";
 /// it neither by directory nor as a checkout of a member (a scratch clone of
 /// something else) is outside it, and builds with its own pins alone.
 pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []const u8 {
+    return membersBut(io, a, package, "");
+}
+
+/// The members that build from their trees: `members`, but those a train names in
+/// `pinned_variable`, which build at the package's pins.
+pub fn building(io: Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, package: []const u8) ![]const []const u8 {
+    return membersBut(io, a, package, environ.get(pinned_variable) orelse "");
+}
+
+fn membersBut(io: Io, a: std.mem.Allocator, package: []const u8, pinned: []const u8) ![]const []const u8 {
     const every = try all(io, a, package) orelse return &.{};
     const own = try identity(io, a, package);
     var held = false;
@@ -32,6 +47,7 @@ pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []con
             held = true;
             continue;
         }
+        if (named(pinned, member)) continue;
         const theirs = try identity(io, a, member);
         if (std.mem.eql(u8, theirs.name, own.name) and theirs.fingerprint == own.fingerprint) {
             held = true;
@@ -41,6 +57,21 @@ pub fn members(io: Io, a: std.mem.Allocator, package: []const u8) ![]const []con
     }
     if (!held) return &.{};
     return list.toOwnedSlice(a);
+}
+
+/// Whether `list`, directories split by the path list separator, names `directory`.
+fn named(list: []const u8, directory: []const u8) bool {
+    var each = std.mem.splitScalar(u8, list, std.fs.path.delimiter);
+    while (each.next()) |entry| if (std.mem.eql(u8, entry, directory)) return true;
+    return false;
+}
+
+test "a train's list of members built at their pins names each directory whole" {
+    const list = "/w/aegis" ++ [_]u8{std.fs.path.delimiter} ++ "/w/preflight";
+    try std.testing.expect(named(list, "/w/preflight"));
+    try std.testing.expect(named(list, "/w/aegis"));
+    try std.testing.expect(!named(list, "/w/aegi"));
+    try std.testing.expect(!named("", "/w/aegis"));
 }
 
 const Identity = struct { name: []const u8, fingerprint: u64 };
