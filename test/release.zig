@@ -769,8 +769,9 @@ test "a workspace's train releases its members in order, each pinned at the rele
         std.debug.print("expected the line:\n{s}in the plan:\n{s}\n", .{ line, plan.stdout });
         return error.TestUnexpectedResult;
     };
-    // Each member's tidy, run as the train runs it, says the generate step that would follow.
-    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, plan.stderr, "then the package build's `generate` step would run"));
+    // Each member's tidy, run as the train runs it, runs the generate step that would follow,
+    // and a's again for its closing re-pin.
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, plan.stderr, "then the package build's `generate` step would run, and runs clean with those pins"));
     for ([_][]const u8{ "a", "b", "c" }, heads) |dir, head| {
         try std.testing.expectEqualStrings(head, try w.head(dir));
         try std.testing.expectEqualStrings("", try w.out(dir, &.{ "status", "--porcelain" }));
@@ -802,7 +803,7 @@ test "a workspace's train releases its members in order, each pinned at the rele
     for ([_][]const u8{ "b", "c" }) |dir| try std.testing.expect(contains(try w.gatedPinned(a_release), try w.real(dir)));
     // b ships a, released before it: gated on a's new tag, its tree, and c, not yet released, at its pin.
     const b_pinned = try w.gatedPinned(try w.remoteAt("b", "refs/tags/v0.1.1"));
-    try std.testing.expect(!contains(b_pinned, try w.real("a")));
+    try std.testing.expect(std.mem.find(u8, b_pinned, try w.real("a")) == null);
     try std.testing.expect(contains(b_pinned, try w.real("c")));
     // c, last, on both releases.
     try std.testing.expectEqualStrings("", try w.gatedPinned(try w.remoteAt("c", "refs/tags/v0.1.1")));
@@ -1411,7 +1412,7 @@ test "a release tier whose jobs GitHub gave no runner runs them again, three tim
     try std.testing.expect(refused(starved));
     try std.testing.expectEqual(replies.items.len, fake.seen.items.len);
     try std.testing.expect(contains(starved.stderr, "re-running its jobs, 3 of 3"));
-    try std.testing.expect(!contains(starved.stderr, "4 of 3"));
+    try std.testing.expect(std.mem.find(u8, starved.stderr, "4 of 3") == null);
     try std.testing.expect(contains(starved.stderr, try a.print("GitHub gave macos no runner, re-run 3 times ({s}): they never ran, so the release tier neither passed nor failed; nothing was tagged or pushed to origin/main, release/v1.1.1 is deleted", .{page})));
     try std.testing.expectEqualStrings(before, try w.head("h"));
     try std.testing.expectEqualStrings(commit, try w.remoteAt("h", "refs/heads/main"));
@@ -1427,7 +1428,7 @@ test "a release tier whose jobs GitHub gave no runner runs them again, three tim
     });
     try std.testing.expect(refused(cancelled));
     try std.testing.expectEqual(4, fake.seen.items.len);
-    try std.testing.expect(!contains(cancelled.stderr, "re-running"));
+    try std.testing.expect(std.mem.find(u8, cancelled.stderr, "re-running") == null);
     try std.testing.expect(contains(cancelled.stderr, try a.print("the release tier is cancelled on GitHub (macos): {s}; nothing was tagged", .{page})));
 }
 
@@ -1556,4 +1557,110 @@ test "bay pin moves a package onto a dependency's release: pushed with no tag al
     const log = try w.read("lib", "CHANGELOG.md");
     try std.testing.expect(contains(log, "- Pins dep 0.1.2.\n"));
     try std.testing.expect(contains(log, "### Fixed\n\n- A fix.\n"));
+}
+
+/// A tool's build as preflight's is: the package's gate, and `addGenerate`, which a member
+/// developed with it calls from its development build, running the tool's own generator over
+/// the member's config, as preflight's `generate` reads ci/preflight.json.
+const tool_build = gate_build ++
+    \\pub fn addGenerate(b: *std.Build, package: *std.Build) void {
+    \\    const own = b.dependencyFromBuildZig(@This(), .{}).builder;
+    \\    const exe = b.addExecutable(.{ .name = "generate", .root_module = b.createModule(.{ .root_source_file = own.path("generate.zig"), .target = b.graph.host }) });
+    \\    const run = b.addRunArtifact(exe);
+    \\    run.setCwd(package.path("."));
+    \\    run.has_side_effects = true;
+    \\    b.step("generate", "Make what follows from the pins").dependOn(&run.step);
+    \\}
+    \\
+;
+
+/// The tool's generator, refusing every key of ci/preflight.json it does not know.
+fn toolGenerator(a: std.mem.Allocator, known: []const u8) ![]const u8 {
+    return a.print(
+        \\const std = @import("std");
+        \\pub fn main(init: std.process.Init) !void {{
+        \\    const text = try std.Io.Dir.cwd().readFileAlloc(init.io, "ci/preflight.json", init.arena.allocator(), .limited(1 << 16));
+        \\    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, init.arena.allocator(), text, .{{}});
+        \\    for (parsed.object.keys()) |key| {{
+        \\        for ([_][]const u8{{ {s} }}) |name| {{
+        \\            if (std.mem.eql(u8, key, name)) break;
+        \\        }} else {{
+        \\            std.debug.print("generate: unknown key \"{{s}}\" in ci/preflight.json\n", .{{key}});
+        \\            std.process.exit(1);
+        \\        }}
+        \\    }}
+        \\}}
+        \\
+    , .{known});
+}
+
+test "a train's dry run runs each closing re-pin's generate against the trees being released, and refuses with what it says" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // tool ships rider; rider develops with tool, as preflight ships aegis and aegis develops
+    // with preflight: that pin closes a ring, so rider goes first and re-pins tool's release
+    // in the closing pass.
+    try w.package("rider", "0.1.0", "");
+    try w.package("tool", "0.1.0", "");
+    for ([_][]const u8{ "rider", "tool" }) |dir| try familyPolicy(&w, dir, "family");
+    // The tool's generator at the release rider develops with knows "compile_once".
+    try w.f.write("tool", "build.zig", tool_build);
+    try w.f.write("tool", "generate.zig", try toolGenerator(w.f.a, "\"policy\", \"glint\", \"compile_once\""));
+    try w.git("tool", &.{ "add", "." });
+    try w.git("tool", &.{ "commit", "--quiet", "-m", "Generate" });
+    // Its release, v0.1.0, is that commit: the fixture's first tag moves to it.
+    try w.git("tool", &.{ "tag", "--force", "v0.1.0" });
+    try w.git("tool", &.{ "push", "--quiet", "--force", "origin", "main", "v0.1.0" });
+    try std.testing.expect(succeeded(try w.f.bay("tool", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("rider")}) })));
+    try w.git("tool", &.{ "add", "." });
+    try w.git("tool", &.{ "commit", "--quiet", "-m", "Pin rider" });
+    try w.git("tool", &.{ "push", "--quiet", "origin", "main" });
+    // rider's development build generates through the tool, its config carrying the key.
+    try w.f.write("rider", "build.zig",
+        \\const std = @import("std");
+        \\pub fn dev(b: *std.Build, tools: type) void {
+        \\    tools.tool.addGenerate(b, b.dependency("rider", .{}).builder);
+        \\}
+        \\pub fn build(b: *std.Build) void {
+        \\    const exe = b.addExecutable(.{ .name = "gate", .root_module = b.createModule(.{ .root_source_file = b.path("gate.zig"), .target = b.graph.host }) });
+        \\    const run = b.addRunArtifact(exe);
+        \\    run.setCwd(b.path("."));
+        \\    run.has_side_effects = true;
+        \\    b.step("gate", "Gate the package").dependOn(&run.step);
+        \\}
+        \\
+    );
+    try w.f.write("rider", "ci/preflight.json", "{\n  \"policy\": \"family\",\n  \"glint\": {},\n  \"compile_once\": true\n}\n");
+    try std.testing.expect(succeeded(try w.f.bay("rider", &.{ "add", "--dev", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("tool")}) })));
+    try w.git("rider", &.{ "add", "." });
+    try w.git("rider", &.{ "commit", "--quiet", "-m", "Develop with tool" });
+    try w.git("rider", &.{ "push", "--quiet", "origin", "main" });
+    // The tool's tree, which its next release is made from, no longer knows the key.
+    try w.f.write("tool", "generate.zig", try toolGenerator(w.f.a, "\"policy\", \"glint\""));
+    try w.git("tool", &.{ "add", "." });
+    try w.git("tool", &.{ "commit", "--quiet", "-m", "Refuse compile_once" });
+    try w.git("tool", &.{ "push", "--quiet", "origin", "main" });
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"tool\", \"rider\" } }\n");
+    try w.change("rider", "### Fixed\n\n- A fix.\n");
+    const heads = [_][]const u8{ try w.head("rider"), try w.head("tool") };
+
+    // rider's own turn generates with the tool at its pin, and passes; the closing pass, with
+    // the tool's tree, is refused before anything moves, with the generator's own words.
+    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    try std.testing.expect(refused(plan));
+    try std.testing.expect(contains(plan.stdout, "then rider develops with tool 0.1.1, gated and pushed with no tag\n"));
+    try std.testing.expect(contains(plan.stderr, "generate: unknown key \"compile_once\" in ci/preflight.json"));
+    try std.testing.expect(contains(plan.stderr, "rider: its closing re-pin would stop the train there, once the releases before it are tagged and pushed"));
+    for ([_][]const u8{ "rider", "tool" }, heads) |dir, head| {
+        try std.testing.expectEqualStrings(head, try w.head(dir));
+        try std.testing.expectEqualStrings("", try w.out(dir, &.{ "status", "--porcelain" }));
+    }
+
+    // Without the key, the plan passes, the closing pass's generate among it.
+    try familyPolicy(&w, "rider", "family");
+    const clean = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    if (!succeeded(clean)) std.debug.print("{s}\n{s}\n", .{ clean.stdout, clean.stderr });
+    try std.testing.expect(succeeded(clean));
 }
