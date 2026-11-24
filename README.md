@@ -387,7 +387,10 @@ development pins is gated and pushed with no tag; a member that fails stops the 
 that depend on it. A development pin that would
 close a ring (a tool developed with a member that ships it) moves last, once the release it
 waits for is out. `--dry-run` prints the plan and changes nothing: each member's release and
-what makes it, its section or the pins that move, the train's own releases included. Each
+what makes it, its section or the pins that move, the train's own releases included; each
+member's `generate` step run with the pins it would write, in a copy, and again for each
+closing re-pin with the trees of the releases it waits for, so a config the new release's
+`generate` refuses stops the plan, with what it said. Each
 member says it is the family's, `"policy": "family"` in its `ci/preflight.json`, or the
 train is refused before anything moves, each member without it named.
 

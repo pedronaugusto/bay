@@ -1764,14 +1764,30 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
             try say.out(c.io, "   then: the re-pin committed and built here (bay dev check); gated {s}; the branch pushed, with no tag\n", .{gated.written()});
         } else try say.out(c.io, "   then: nothing\n", .{});
     }
-    // The closing pass: a development pin left out of the order, on a member after it.
-    for (cars, developed_with) |car, dev| for (cars, versions) |later, version| {
-        const v = version orelse continue;
-        if (!pinned(dev, later.name) or std.mem.eql(u8, later.name, car.name)) continue;
-        for (car.needs) |need| {
-            if (std.mem.eql(u8, cars[need].name, later.name)) break;
-        } else try say.out(c.io, "then {s} develops with {s} {f}, gated and pushed with no tag\n", .{ car.name, later.name, v });
-    };
+    // The closing pass: a development pin left out of the order, on a member after it. Its
+    // tidy runs as the closing pass runs it, every member the train releases at its tree, so
+    // what its `generate` refuses with the new release (a config key a new preflight no longer
+    // knows) stops the plan, not the train after its releases are pushed.
+    const all_released = try c.a.alloc(bool, cars.len);
+    for (all_released, versions) |*released, v| released.* = v != null;
+    for (cars, developed_with) |car, dev| {
+        var closing = false;
+        for (cars, versions) |later, version| {
+            const v = version orelse continue;
+            if (!pinned(dev, later.name) or std.mem.eql(u8, later.name, car.name)) continue;
+            for (car.needs) |need| {
+                if (std.mem.eql(u8, cars[need].name, later.name)) break;
+            } else {
+                try say.out(c.io, "then {s} develops with {s} {f}, gated and pushed with no tag\n", .{ car.name, later.name, v });
+                closing = true;
+            }
+        }
+        if (!closing) continue;
+        bayIn(try pinnedFor(c, cars, car, all_released), &.{ "tidy", "--dry-run" }) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "{s}: its closing re-pin would stop the train there, once the releases before it are tagged and pushed: bay tidy fails with the trees they are made from", .{car.name}),
+            else => return err,
+        };
+    }
     return 0;
 }
 

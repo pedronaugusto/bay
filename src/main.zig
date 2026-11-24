@@ -142,7 +142,7 @@ const Tidy = struct {
     dry_run: bool = false,
     pub const spec: ensign.Spec(@This()) = .{
         .options = .{
-            .dry_run = .{ .help = "Print what tidy would pin and which build's generate step it would run; change and run nothing" },
+            .dry_run = .{ .help = "Print what tidy would pin, and run the generate step that would follow in a copy of the package with those pins; change nothing in the package" },
         },
     };
 };
@@ -772,9 +772,11 @@ fn generator(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution
     return .none;
 }
 
-/// `bay tidy --dry-run`: what tidy would pin, and the `generate` step it would then run, read
-/// from the builds with the pins it would write; nothing is written or run. A train's dry run
-/// runs it in each member, so what each car does shows before the first one moves.
+/// `bay tidy --dry-run`: what tidy would pin, and the `generate` step it would then run, run
+/// with the pins it would write in a copy of the package; nothing in the package is written.
+/// A train's dry run runs it in each member, and again for each closing re-pin, so a step that
+/// refuses what follows from the pins (a config key a new preflight no longer knows) shows
+/// before the first car moves.
 fn planTidy(env: Env) !u8 {
     const tidied = try tidying.tidied(env.input(), try env.readManifest());
     for (tidied.moves) |move| try say.note(env.io, "{s} would be {s} {s}", .{ move.name, switch (move.how) {
@@ -784,16 +786,22 @@ fn planTidy(env: Env) !u8 {
     for (tidied.nested) |file| for (file.moves) |move|
         try say.note(env.io, "{f}: {s} would be pinned as build.zig.zon pins it, {s}", .{ manifest.portable(file.path), move.name, move.to });
     if (tidied.moves.len == 0 and tidied.nested.len == 0) try say.note(env.io, "no pin would move", .{});
-    // The builds as they would configure with the pins tidy would write: a build reads the
-    // manifest at its root, so where tidy moves a pin they configure in a copy of the package
-    // with tidy's manifests, as the package's own would once written.
+    // The builds as they would configure with the pins tidy would write, in a copy of the
+    // package with tidy's manifests: a build reads the manifest at its root, and the
+    // `generate` step run there writes into the copy, never the package.
     const parsed = try manifest.parse(env.a, tidied.text);
     const resolution = try buildable(env, parsed);
     var planned = env;
-    if (tidied.moves.len != 0 or tidied.nested.len != 0) planned.package = try tidiedCopy(env, tidied);
+    planned.package = try tidiedCopy(env, tidied);
     const generates = try generator(planned, parsed, resolution);
-    // The copy goes once read; one a failure leaves is replaced by the next dry run's.
-    if (planned.package.ptr != env.package.ptr) try Io.Dir.cwd().deleteTree(env.io, planned.package);
+    // Run as tidy would run it once the pins are written: the step reads what follows from
+    // them, the config its tool reads among it.
+    const generated: u8 = switch (generates) {
+        .step => |where| try built(planned, parsed, resolution, where, &.{"generate"}, &.{}),
+        else => 0,
+    };
+    // The copy goes once used; one a failure leaves is replaced by the next dry run's.
+    try Io.Dir.cwd().deleteTree(env.io, planned.package);
     switch (generates) {
         .none => try say.note(env.io, "no build has a `generate` step: nothing would be made again", .{}),
         // Every pin it configures with is there: a workspace member's is its tree, and the
@@ -804,7 +812,10 @@ fn planTidy(env: Env) !u8 {
             _ = try say.exited(env.io, env.zig, failed.listed.term);
             try say.fail(env.io, "the {t} build does not configure with the pins tidy would write, all of them there (a workspace member's its tree), so what follows from them would not be made and the build would stop there: fix what Zig says above", .{failed.build});
         },
-        .step => |where| try say.note(env.io, "then the {t} build's `generate` step would run", .{where}),
+        .step => |where| if (generated != 0)
+            try say.fail(env.io, "the {t} build's `generate` step fails with the pins tidy would write, all of them there (a workspace member's its tree), so tidy would stop there: fix what it says above", .{where})
+        else
+            try say.note(env.io, "then the {t} build's `generate` step would run, and runs clean with those pins", .{where}),
     }
     return 0;
 }
