@@ -176,6 +176,8 @@ pub const Run = struct {
     conclusion: ?[]const u8 = null,
     html_url: []const u8 = "",
     created_at: []const u8 = "",
+    /// Which attempt of the run this is: one, then one more for each re-run.
+    run_attempt: u32 = 1,
 };
 
 /// One job of a run.
@@ -183,6 +185,18 @@ pub const Job = struct {
     name: []const u8,
     status: []const u8,
     conclusion: ?[]const u8 = null,
+    /// The runner that took the job; zero for one GitHub never gave a runner.
+    runner_id: u64 = 0,
+    steps: []const Step = &.{},
+
+    pub const Step = struct { name: []const u8 = "" };
+
+    /// Cancelled before any runner took it: GitHub found none (its annotation, "The job was not
+    /// acquired by Runner of type hosted even after multiple attempts"), so the job never ran.
+    pub fn unacquired(job: Job) bool {
+        const conclusion = job.conclusion orelse return false;
+        return std.mem.eql(u8, conclusion, "cancelled") and job.runner_id == 0 and job.steps.len == 0;
+    }
 };
 
 /// Starts `workflow` (its file name, `ci.yml`) on `ref` with `inputs` (a JSON object), as its
@@ -247,6 +261,15 @@ pub fn jobs(api: Api, repository: []const u8, id: u64, problem: *Problem) Error!
         else => return fail(a, problem, "{s} answered jobs bay cannot read", .{url}),
     };
     return listing.jobs;
+}
+
+/// Runs again the jobs of run `id` that did not pass, and the jobs that need them; those that
+/// passed keep their result. GitHub makes a new attempt of the same run.
+pub fn rerunFailed(api: Api, repository: []const u8, id: u64, problem: *Problem) Error!void {
+    const a = api.a;
+    const url = try a.print("{s}/repos/{s}/actions/runs/{d}/rerun-failed-jobs", .{ api.base, repository, id });
+    const answer = try request(api, .POST, url, "", "application/json", problem);
+    if (answer.status != .created) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(answer.status), answer.body });
 }
 
 /// The notes of the GitHub Release published at `tag`, or null where there is none.
