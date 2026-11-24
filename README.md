@@ -335,7 +335,10 @@ among its options, the release tier passes the commit before its tag: bay pushes
 (`GITHUB_TOKEN`, else `gh auth token`; bay keeps no token) and waits, saying each job as it
 ends. One such run at a time goes from a machine. Green, the push carries the candidate's
 deletion with the branch and the tag, whose `Gated-by:` line names the run; red, the
-candidate is deleted, the failing jobs are named and nothing is tagged. The GitHub Release
+candidate is deleted, the failing jobs are named and nothing is tagged. A job GitHub gave
+no runner (cancelled before one took it: no runner, no steps, the run a failure) never ran,
+so bay runs the run's unpassed jobs again, up to three times, saying each, and then refuses,
+naming the jobs that never ran; a run a person cancelled is refused as it stands. The GitHub Release
 follows the push, its notes the section and the run. `bay audit releases` checks each
 release tag of the repository so: annotated, its run green on its commit, its GitHub
 Release naming the run; the tags from before the first such release are named once, as
