@@ -505,6 +505,35 @@ fn dispatchedSince(c: Context) ![]const u8 {
     return c.a.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, month_day.month.numeric(), month_day.day_index + 1, time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute() });
 }
 
+/// How many times the hosted gate runs again jobs GitHub gave no runner before it refuses.
+const unacquired_reruns = 3;
+
+fn passed(job: github.Job) bool {
+    const conclusion = job.conclusion orelse return false;
+    return std.mem.eql(u8, conclusion, "success") or std.mem.eql(u8, conclusion, "skipped");
+}
+
+/// The jobs that neither passed nor were skipped, named and joined.
+fn notPassed(a: std.mem.Allocator, job_list: []const github.Job) ![]const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    for (job_list) |job| if (job.conclusion != null and !passed(job)) try names.append(a, job.name);
+    return std.mem.join(a, ", ", names.items);
+}
+
+/// A run that failed only because GitHub gave jobs no runner: every job that did not pass was
+/// cancelled before one took it. A run a person cancelled ends "cancelled", never "failure".
+fn onlyUnacquired(ran: github.Run, job_list: []const github.Job) bool {
+    const conclusion = ran.conclusion orelse return false;
+    if (!std.mem.eql(u8, conclusion, "failure")) return false;
+    var any = false;
+    for (job_list) |job| {
+        if (passed(job)) continue;
+        if (!job.unacquired()) return false;
+        any = true;
+    }
+    return any;
+}
+
 /// The hosted gate: the release commit on the candidate branch, the release tier dispatched on
 /// it and waited on, each job said as it ends, one run at a time on this machine. Green, the
 /// run's page, for the tag's `Gated-by`; red, the candidate deleted, the branch put back and the
@@ -536,27 +565,41 @@ fn hostedGate(c: Context, up: Upstream, hosted: Hosted, commit: []const u8, tag:
     };
     try say.note(c.io, "{s} at {s}: the release tier runs on GitHub, {s}", .{ tag, commit[0..12], found.html_url });
     var said: std.StringHashMapUnmanaged(void) = .empty;
-    const ended = while (true) {
+    // A job GitHub never gave a runner never ran: its jobs are run again, a bounded number of times.
+    var reruns: u32 = 0;
+    var attempt = found.run_attempt;
+    const ended = while (true) : (try c.io.sleep(poll, .awake)) {
         const now = github.run(api, hosted.repository, found.id, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
         const job_list = github.jobs(api, hosted.repository, found.id, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
+        // GitHub shows the re-run's attempt a moment after it is asked for.
+        if (now.run_attempt < attempt) continue;
         for (job_list) |job| if (job.conclusion) |conclusion| if (!said.contains(job.name)) {
             try said.put(c.a, job.name, {});
             try say.note(c.io, "hosted: {s}: {s}", .{ job.name, conclusion });
         };
-        if (std.mem.eql(u8, now.status, "completed")) break .{ now, job_list };
-        try c.io.sleep(poll, .awake);
+        if (!std.mem.eql(u8, now.status, "completed")) continue;
+        if (!onlyUnacquired(now, job_list) or reruns == unacquired_reruns) break .{ now, job_list };
+        reruns += 1;
+        const names = try notPassed(c.a, job_list);
+        for (job_list) |job| if (!passed(job)) {
+            _ = said.remove(job.name);
+        };
+        try say.note(c.io, "hosted: GitHub gave {s} no runner; re-running its jobs, {d} of {d}", .{ names, reruns, unacquired_reruns });
+        github.rerunFailed(api, hosted.repository, found.id, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
+        attempt = now.run_attempt + 1;
     };
     const finished = ended[0];
     if (finished.conclusion != null and std.mem.eql(u8, finished.conclusion.?, "success")) {
         try say.note(c.io, "hosted: green, {s}", .{finished.html_url});
         return finished.html_url;
     }
-    var red: std.ArrayList([]const u8) = .empty;
-    for (ended[1]) |job| if (job.conclusion) |conclusion| if (!std.mem.eql(u8, conclusion, "success") and !std.mem.eql(u8, conclusion, "skipped")) try red.append(c.a, job.name);
+    const red = try notPassed(c.a, ended[1]);
     _ = try git(c, &.{ "push", "--quiet", up.remote, try c.a.print(":{s}", .{candidate}) });
     _ = try must(c, &.{ "reset", "--quiet", "--keep", start });
     try forget(c.io, gated);
-    try say.fail(c.io, "the release tier is {s} on GitHub ({s}): {s}; nothing was tagged or pushed to {s}, {s} is deleted, and {s} is back at {s}", .{ finished.conclusion orelse "unfinished", if (red.items.len == 0) "no job named" else try std.mem.join(c.a, ", ", red.items), finished.html_url, up.onto, branch, up.branch, start[0..12] });
+    if (onlyUnacquired(finished, ended[1]))
+        try say.fail(c.io, "GitHub gave {s} no runner, re-run {d} times ({s}): they never ran, so the release tier neither passed nor failed; nothing was tagged or pushed to {s}, {s} is deleted, and {s} is back at {s}", .{ red, unacquired_reruns, finished.html_url, up.onto, branch, up.branch, start[0..12] });
+    try say.fail(c.io, "the release tier is {s} on GitHub ({s}): {s}; nothing was tagged or pushed to {s}, {s} is deleted, and {s} is back at {s}", .{ finished.conclusion orelse "unfinished", if (red.len == 0) "no job named" else red, finished.html_url, up.onto, branch, up.branch, start[0..12] });
 }
 
 /// A hosted gate GitHub would not run or answer: refused as a red one is, nothing reaching main.
