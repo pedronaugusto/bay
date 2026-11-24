@@ -1314,6 +1314,94 @@ test "a release whose workflow runs a release tier passes it on GitHub before it
     try std.testing.expectEqualStrings("", try w.gateRecord("h", "v1.1.1"));
 }
 
+test "a release tier whose jobs GitHub gave no runner runs them again, three times at most, then refuses naming them; a run a person cancelled is refused at once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var w: World = try .init(a);
+    defer w.deinit();
+    try w.package("h", "1.0.0", "");
+    try w.f.tmp.dir.createDirPath(w.f.io, "h/.github/workflows");
+    try w.f.write("h", ".github/workflows/ci.yml", hosted_workflow);
+    try w.git("h", &.{ "add", "." });
+    try w.git("h", &.{ "commit", "--quiet", "-m", "A workflow" });
+    const home = try w.path("ssh-home");
+    const bare = try std.fs.path.join(a, &.{ home, "o", "h.git" });
+    try w.git(".", &.{ "init", "--quiet", "--bare", "--initial-branch=main", bare });
+    try w.f.env.put("SSH_HOME", home);
+    try w.f.env.put("BAY_POLL_SECONDS", "0");
+    try w.git("h", &.{ "remote", "set-url", "origin", "git@github.com:o/h.git" });
+    try w.git("h", &.{ "push", "--quiet", "--set-upstream", "origin", "main", "--tags" });
+    var fake: FakeGitHub = try .init(w.f.io);
+    defer fake.server.deinit(w.f.io);
+    const runs = "{\"workflow_runs\":[{\"id\":5,\"head_sha\":\"{head}\",\"status\":\"queued\",\"created_at\":\"2999-01-01T00:00:00Z\",\"html_url\":\"https://github.com/o/h/actions/runs/5\"}]}";
+    const page = "https://github.com/o/h/actions/runs/5";
+    // GitHub's shape for a job no hosted runner took: cancelled, no runner, no steps; the run a failure.
+    const unacquired = "{\"jobs\":[{\"name\":\"linux\",\"status\":\"completed\",\"conclusion\":\"success\",\"runner_id\":3,\"steps\":[{\"name\":\"Set up job\"}]},{\"name\":\"macos\",\"status\":\"completed\",\"conclusion\":\"cancelled\",\"runner_id\":0,\"steps\":[]},{\"name\":\"profile\",\"status\":\"completed\",\"conclusion\":\"skipped\",\"runner_id\":0,\"steps\":[]}]}";
+    const failed_at = "{\"id\":5,\"head_sha\":\"{head}\",\"status\":\"completed\",\"conclusion\":\"failure\",\"run_attempt\":N,\"html_url\":\"https://github.com/o/h/actions/runs/5\"}";
+    const rerun: FakeGitHub.Reply = .{ .status = .created, .body = "{}" };
+
+    // Run again once, the new attempt read only once GitHub shows it, then green: tagged.
+    fake.head_from = try std.fs.path.join(a, &.{ bare, "refs", "heads", "release", "v1.1.0" });
+    try w.change("h", "### Added\n\n- A step.\n");
+    const green = try fake.release(&w, "h", "t", &.{
+        .{ .status = .no_content, .body = "" },
+        .{ .status = .ok, .body = runs },
+        .{ .status = .ok, .body = try std.mem.replaceOwned(u8, a, failed_at, "N", "1") },
+        .{ .status = .ok, .body = unacquired },
+        rerun,
+        .{ .status = .ok, .body = try std.mem.replaceOwned(u8, a, failed_at, "N", "1") },
+        .{ .status = .ok, .body = unacquired },
+        .{ .status = .ok, .body = "{\"id\":5,\"head_sha\":\"{head}\",\"status\":\"completed\",\"conclusion\":\"success\",\"run_attempt\":2,\"html_url\":\"https://github.com/o/h/actions/runs/5\"}" },
+        .{ .status = .ok, .body = "{\"jobs\":[{\"name\":\"linux\",\"status\":\"completed\",\"conclusion\":\"success\",\"runner_id\":3,\"steps\":[{\"name\":\"Set up job\"}]},{\"name\":\"macos\",\"status\":\"completed\",\"conclusion\":\"success\",\"runner_id\":4,\"steps\":[{\"name\":\"Set up job\"}]},{\"name\":\"profile\",\"status\":\"completed\",\"conclusion\":\"success\",\"runner_id\":5,\"steps\":[{\"name\":\"Set up job\"}]}]}" },
+        .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
+        .{ .status = .created, .body = "{\"id\":7,\"upload_url\":\"x\",\"html_url\":\"https://github.com/o/h/releases/tag/v1.1.0\"}" },
+    });
+    try std.testing.expect(succeeded(green));
+    try std.testing.expectEqual(std.http.Method.POST, fake.seen.items[4].method);
+    try std.testing.expectEqualStrings("/repos/o/h/actions/runs/5/rerun-failed-jobs", fake.seen.items[4].target);
+    try std.testing.expect(contains(green.stderr, "hosted: GitHub gave macos no runner; re-running its jobs, 1 of 3"));
+    try std.testing.expectEqual(1, std.mem.count(u8, green.stderr, "hosted: macos: cancelled"));
+    try std.testing.expect(contains(green.stderr, "hosted: macos: success"));
+    try std.testing.expect(contains(green.stderr, try a.print("hosted: green, {s}", .{page})));
+    const commit = try w.head("h");
+    try std.testing.expectEqualStrings(commit, try w.remoteAt("h", "refs/tags/v1.1.0"));
+
+    // No runner three re-runs running: refused, the jobs GitHub never ran named, and no red claimed.
+    fake.head_from = try std.fs.path.join(a, &.{ bare, "refs", "heads", "release", "v1.1.1" });
+    try w.change("h", "### Fixed\n\n- A bug.\n");
+    const before = try w.head("h");
+    var replies: std.ArrayList(FakeGitHub.Reply) = .empty;
+    try replies.appendSlice(a, &.{ .{ .status = .no_content, .body = "" }, .{ .status = .ok, .body = runs } });
+    for ([_][]const u8{ "1", "2", "3", "4" }, 0..) |n, k| {
+        try replies.append(a, .{ .status = .ok, .body = try std.mem.replaceOwned(u8, a, failed_at, "N", n) });
+        try replies.append(a, .{ .status = .ok, .body = unacquired });
+        if (k < 3) try replies.append(a, rerun);
+    }
+    const starved = try fake.release(&w, "h", "t", replies.items);
+    try std.testing.expect(refused(starved));
+    try std.testing.expectEqual(replies.items.len, fake.seen.items.len);
+    try std.testing.expect(contains(starved.stderr, "re-running its jobs, 3 of 3"));
+    try std.testing.expect(!contains(starved.stderr, "4 of 3"));
+    try std.testing.expect(contains(starved.stderr, try a.print("GitHub gave macos no runner, re-run 3 times ({s}): they never ran, so the release tier neither passed nor failed; nothing was tagged or pushed to origin/main, release/v1.1.1 is deleted", .{page})));
+    try std.testing.expectEqualStrings(before, try w.head("h"));
+    try std.testing.expectEqualStrings(commit, try w.remoteAt("h", "refs/heads/main"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("h", "refs/tags/v1.1.1"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("h", "refs/heads/release/v1.1.1"));
+
+    // A person cancelled it: the run ends "cancelled", and is refused as it stands, never run again.
+    const cancelled = try fake.release(&w, "h", "t", &.{
+        .{ .status = .no_content, .body = "" },
+        .{ .status = .ok, .body = runs },
+        .{ .status = .ok, .body = "{\"id\":5,\"head_sha\":\"{head}\",\"status\":\"completed\",\"conclusion\":\"cancelled\",\"run_attempt\":1,\"html_url\":\"https://github.com/o/h/actions/runs/5\"}" },
+        .{ .status = .ok, .body = unacquired },
+    });
+    try std.testing.expect(refused(cancelled));
+    try std.testing.expectEqual(4, fake.seen.items.len);
+    try std.testing.expect(!contains(cancelled.stderr, "re-running"));
+    try std.testing.expect(contains(cancelled.stderr, try a.print("the release tier is cancelled on GitHub (macos): {s}; nothing was tagged", .{page})));
+}
+
 test "bay audit releases names each tag since the first gated release that bay release did not make, and the ones before it once" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
