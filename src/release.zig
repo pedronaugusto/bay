@@ -914,6 +914,49 @@ fn oneHashEach(c: Context, parsed: manifest.Manifest, before: []const Released) 
 
 /// A member a train pins at a release before this one: its name, its directory, and the
 /// version of the release, made by the train or there already.
+/// The context a member's turn runs in: every other member the train has not released (`done`
+/// false) named for bay's children (`workspace.pinned_variable`), so they build at its pins and
+/// not from their trees, as its release and its hosted gate build them; a member the train
+/// released is at its tag, its tree, and is built from the tree. Gantry, developed with
+/// preflight a4c8d3c and gated in the workspace with preflight's tree, had its files made by
+/// preflight 72a0988 and refused, where its hosted gate reads them with a4c8d3c.
+fn pinnedFor(c: Context, cars: []const each.Car, car: each.Car, done: []const bool) !Context {
+    var list: std.ArrayList(u8) = .empty;
+    for (cars, done) |other, released| {
+        if (released or std.mem.eql(u8, other.directory, car.directory)) continue;
+        if (list.items.len != 0) try list.append(c.a, std.fs.path.delimiter);
+        try list.appendSlice(c.a, other.directory);
+    }
+    const environ = try c.a.create(std.process.Environ.Map);
+    environ.* = try c.environ.clone(c.a);
+    try environ.put(workspace.pinned_variable, list.items);
+    return .{ .io = c.io, .a = c.a, .environ = environ, .package = car.directory };
+}
+
+/// A development pin on a member the train builds at its pin names a commit the member's
+/// origin holds, on a branch or a tag, or the hosted gate could not fetch what the gate here
+/// built. Read from the member's own clone: its tags and the branches it has from its origin.
+fn pinsFetchable(c: Context, parsed: manifest.Manifest, cars: []const each.Car, done: []const bool) !void {
+    var wrong: std.ArrayList([]const u8) = .empty;
+    for (parsed.dev) |dependency| {
+        const at = for (cars, done) |other, released| {
+            if (!released and std.mem.eql(u8, other.name, dependency.name) and !std.mem.eql(u8, other.directory, c.package)) break other;
+        } else continue;
+        const url = switch (dependency.source) {
+            .remote => |remote| remote.url,
+            .path => continue,
+        };
+        const fragment = git_source.parts(url).fragment orelse continue;
+        if (!git_source.isCommit(fragment)) continue;
+        var there = c;
+        there.package = at.directory;
+        const known = (try git(there, &.{ "cat-file", "-e", try c.a.print("{s}^{{commit}}", .{fragment}) })).ok;
+        const held = known and ((try must(there, &.{ "branch", "--remotes", "--contains", fragment })).len != 0 or (try must(there, &.{ "tag", "--contains", fragment })).len != 0);
+        if (!held) try wrong.append(c.a, try c.a.print("{s} develops with {s} at {s}, which no branch or tag of {s}'s origin holds", .{ parsed.name, dependency.name, fragment[0..12], at.directory }));
+    }
+    if (wrong.items.len != 0) try say.fail(c.io, "{s}: the hosted gate fetches what the pin names, and could not; push it, or pin a commit its origin holds", .{try listed(c.a, wrong.items)});
+}
+
 const Released = struct { name: []const u8, directory: []const u8, version: std.SemanticVersion };
 
 fn releasedAs(before: []const Released, name: []const u8) ?Released {
@@ -1446,14 +1489,14 @@ pub fn train(c: Context, options: Options) !u8 {
                 try say.note(c.io, "{s}: skipped, since {s} did not release", .{ car.name, cars[need].name });
                 break .skipped;
             }
-        } else try ride(c, car, .always, version);
+        } else try ride(c, cars, versions, car, .always, version);
     }
     // A development pin that would close a ring is left out of the order (a tool developed
     // with a release of a member that ships it): its member went first, and now pins the
     // release made after it, gated again and pushed.
     for (cars, done, versions) |car, *outcome, *version| {
         if (outcome.* == .failed or outcome.* == .skipped) continue;
-        const again = try ride(c, car, .when_repinned, version);
+        const again = try ride(c, cars, versions, car, .when_repinned, version);
         if (again == .failed or again == .released or again == .pushed) outcome.* = again;
     }
     var failed = false;
@@ -1505,15 +1548,27 @@ const Done = enum { released, pushed, nothing, failed, skipped };
 
 /// One member's turn: pinned at the releases before it, then released, or gated and pushed
 /// with development pins alone. `.when_repinned` takes a turn only when the pins moved.
-fn ride(c: Context, car: each.Car, when: enum { always, when_repinned }, version: *?std.SemanticVersion) !Done {
-    var member = c;
-    member.package = car.directory;
+fn ride(c: Context, cars: []const each.Car, versions: []const ?std.SemanticVersion, car: each.Car, when: enum { always, when_repinned }, version: *?std.SemanticVersion) !Done {
+    // Gated on what its release publishes: the members the train released are at their tags,
+    // their trees; every other one builds at its pins, its tidy, its build and its gate alike.
+    const done = try c.a.alloc(bool, cars.len);
+    for (done, versions) |*released, v| released.* = v != null;
+    const member = try pinnedFor(c, cars, car, done);
     const pins_moved = repinned(member) catch |err| switch (err) {
         error.Reported => return .failed,
         else => return err,
     };
     if (when == .when_repinned and !pins_moved) return .nothing;
     try say.note(c.io, "{s}: {s}", .{ car.name, car.directory });
+    const now = try manifest.parse(c.a, try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory}));
+    pinsFetchable(member, now, cars, done) catch |err| switch (err) {
+        error.Reported => {
+            if (pins_moved) _ = try must(member, &.{ "reset", "--quiet", "--hard", "HEAD^" });
+            try say.note(c.io, "{s}: {s}nothing of it is gated or pushed", .{ car.name, if (pins_moved) "its re-pin is undone, and " else "" });
+            return .failed;
+        },
+        else => return err,
+    };
     // Built on the pins it moved to, here, before anything of it is gated or pushed: a compile
     // error the re-pin brings would otherwise first show in the hosted run of its release.
     if (pins_moved) bayIn(member, &.{ "dev", "check" }) catch |err| switch (err) {
@@ -1661,12 +1716,16 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
     for (try machines.load(c.io, c.a, c.environ)) |machine| try gated.writer.print(", on {s}", .{machine.name});
     const developed_with = try c.a.alloc([]const manifest.Dependency, cars.len);
     for (cars, versions, developed_with, 1..) |car, *version, *dev, number| {
-        var member = c;
-        member.package = car.directory;
+        // In its turn, the members the plan releases before it are at their tags, their trees;
+        // the rest build at its pins (`pinnedFor`), as the run builds them.
+        const done_before = try c.a.alloc(bool, cars.len);
+        for (done_before, versions, 0..) |*released, v, index| released.* = index < number - 1 and v != null;
+        const planned = try pinnedFor(c, cars, car, done_before);
+        const member = planned;
         const before_text = try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory});
         // Tidied as the train tidies it, in memory: the dry run writes nothing.
         const zig = try toolchain.forPackage(c.io, c.a, c.environ, car.directory);
-        const tidied = tidying.tidied(.{ .io = c.io, .a = c.a, .environ = c.environ, .zig = zig, .package = car.directory }, before_text) catch |err| switch (err) {
+        const tidied = tidying.tidied(.{ .io = c.io, .a = c.a, .environ = planned.environ, .zig = zig, .package = car.directory }, before_text) catch |err| switch (err) {
             error.Reported => try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name}),
             else => return err,
         };
@@ -1702,6 +1761,12 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         // then the steps it takes, so a clash shows before the first car moves.
         bayIn(member, &.{ "tidy", "--dry-run" }) catch |err| switch (err) {
             error.Reported => try say.fail(c.io, "{s}: bay tidy fails there, so the train would stop at it", .{car.name}),
+            else => return err,
+        };
+        // Gated as the run gates it: the members not released before it at its pins, whose
+        // development pins must name what their origins hold.
+        if (version.* != null or developed.items.len != 0) pinsFetchable(planned, after, cars, done_before) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "{s}: the train would stop at it, at its pins, before it is gated", .{car.name}),
             else => return err,
         };
         // The pins the run refuses, as it reads them: tidied, and every member before this one
