@@ -1082,6 +1082,33 @@ test "an install builds what the package ships, whatever its development pins" {
     try f.tmp.dir.access(f.io, if (@import("builtin").os.tag == .windows) "prefix/bin/app.exe" else "prefix/bin/app", .{});
 }
 
+test "an install of a name recorded under another prefix is refused, naming that install, unless --force moves it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.application("app", "", &.{}, "pub fn main() void {}");
+    const program = if (@import("builtin").os.tag == .windows) "bin/app.exe" else "bin/app";
+    const first = try std.fs.path.join(f.a, &.{ f.root, "first" });
+    const second = try std.fs.path.join(f.a, &.{ f.root, "second" });
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "install", "--prefix", first })));
+    // The same name under another prefix: the install under the first stays, its program too.
+    const moved = try f.bay("app", &.{ "install", "--prefix", second });
+    try std.testing.expect(refused(moved));
+    try std.testing.expect(std.mem.find(u8, moved.stderr, try f.a.print("app is installed under {s}", .{first})) != null);
+    try std.testing.expect(std.mem.find(u8, moved.stderr, "--force moves it here") != null);
+    try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "first", program }), .{});
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "second", program }), .{}));
+    // Beside it under another name, both stay.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "install", "--prefix", second, "--name", "app_second" })));
+    try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "first", program }), .{});
+    // --force moves the install: the first prefix's program goes, the record names the second.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "uninstall", "app_second" })));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "install", "--prefix", second, "--force" })));
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "first", program }), .{}));
+    try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "second", program }), .{});
+}
+
 test "an install from a repository's URL builds its newest release, as add pins it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
