@@ -279,7 +279,7 @@ pub fn main(init: std.process.Init) !void {
     const command = cli.command orelse {
         var buffer: [4096]u8 = undefined;
         var w = Io.File.stdout().writer(io, &buffer);
-        try ensign.writeHelp(Cli, &w.interface, "bay", ensign.terminalWidth(io, .stdout(), init.environ_map) orelse 80);
+        try ensign.writeHelp(Cli, &w.interface, "bay", (try ensign.terminalWidth(io, .stdout(), init.environ_map)) orelse 80);
         return w.interface.flush();
     };
     switch (command) {
@@ -741,7 +741,10 @@ fn regenerate(env: Env) !void {
     const resolution = try buildable(env, parsed);
     switch (try generator(env, parsed, resolution)) {
         .none => {},
-        .unconfigured => |build| try say.note(env.io, "the {t} build does not configure with these pins, so what it makes from them (its `generate` step) is not made again: bay tidy makes it once it configures", .{build}),
+        .unconfigured => |failed| {
+            try say.relay(env.io, failed.listed.stderr);
+            try say.note(env.io, "the {t} build does not configure with these pins, so what it makes from them (its `generate` step) is not made again: bay tidy makes it once it configures", .{failed.build});
+        },
         .step => |where| if (try built(env, parsed, resolution, where, &.{"generate"}, &.{}) != 0)
             try say.fail(env.io, "the pins are written, but `generate` failed: what the build makes from them is not", .{}),
     }
@@ -750,13 +753,16 @@ fn regenerate(env: Env) !void {
 /// The build whose `generate` step makes what follows from the pins: the package's own, else
 /// its development build's; none when neither has one, and the first that does not configure
 /// when one does not.
-const Generator = union(enum) { none, unconfigured: Where, step: Where };
+const Generator = union(enum) { none, unconfigured: Unconfigured, step: Where };
+
+/// A build that did not configure, and Zig's listing of it: what it wrote and how it ended.
+const Unconfigured = struct { build: Where, listed: Listing };
 
 fn generator(env: Env, parsed: manifest.Manifest, resolution: resolve.Resolution) !Generator {
     const builds: []const Where = if (parsed.dev.len == 0) &.{.package} else &.{ .package, .development };
     for (builds) |build| {
         const listed = try stepsOf(env, parsed, resolution, build);
-        if (!listed.configured) return .{ .unconfigured = build };
+        if (!listed.configured) return .{ .unconfigured = .{ .build = build, .listed = listed } };
         if (steps.listed(listed.stdout, "generate")) return .{ .step = build };
     }
     return .none;
@@ -774,14 +780,46 @@ fn planTidy(env: Env) !u8 {
     for (tidied.nested) |file| for (file.moves) |move|
         try say.note(env.io, "{f}: {s} would be pinned as build.zig.zon pins it, {s}", .{ manifest.portable(file.path), move.name, move.to });
     if (tidied.moves.len == 0 and tidied.nested.len == 0) try say.note(env.io, "no pin would move", .{});
-    // The builds as they would configure with the pins tidy would write.
+    // The builds as they would configure with the pins tidy would write: a build reads the
+    // manifest at its root, so where tidy moves a pin they configure in a copy of the package
+    // with tidy's manifests, as the package's own would once written.
     const parsed = try manifest.parse(env.a, tidied.text);
-    switch (try generator(env, parsed, try buildable(env, parsed))) {
+    const resolution = try buildable(env, parsed);
+    var planned = env;
+    if (tidied.moves.len != 0 or tidied.nested.len != 0) planned.package = try tidiedCopy(env, tidied);
+    const generates = try generator(planned, parsed, resolution);
+    // The copy goes once read; one a failure leaves is replaced by the next dry run's.
+    if (planned.package.ptr != env.package.ptr) try Io.Dir.cwd().deleteTree(env.io, planned.package);
+    switch (generates) {
         .none => try say.note(env.io, "no build has a `generate` step: nothing would be made again", .{}),
-        .unconfigured => |build| try say.note(env.io, "the {t} build does not configure, so its `generate` step would not run", .{build}),
+        // Every pin it configures with is there: a workspace member's is its tree, and the
+        // others tidy pins as they are. So a build that does not configure is the package's,
+        // and the run stops at it.
+        .unconfigured => |failed| {
+            try say.relay(env.io, failed.listed.stderr);
+            _ = try say.exited(env.io, env.zig, failed.listed.term);
+            try say.fail(env.io, "the {t} build does not configure with the pins tidy would write, all of them there (a workspace member's its tree), so what follows from them would not be made and the build would stop there: fix what Zig says above", .{failed.build});
+        },
         .step => |where| try say.note(env.io, "then the {t} build's `generate` step would run", .{where}),
     }
     return 0;
+}
+
+/// A copy of the package under its cache with the manifests tidy would write in place of its
+/// own, where its builds configure as they will once tidy writes them: a dry run writes nothing
+/// in the package, and the package's own manifest, with forks made for the pins tidy would
+/// write, did not configure (wave1's aperture: aegis's tree the root of the module pinned and of
+/// the module tidy pins). What the copy leaves out is what `copyTree` does: .git, the caches,
+/// zig-out and zig-pkg.
+fn tidiedCopy(env: Env, tidied: tidying.Tidied) ![]const u8 {
+    const copy = try std.fs.path.join(env.a, &.{ env.package, root.directory, "tidied" });
+    try Io.Dir.cwd().deleteTree(env.io, copy);
+    try resolve.copyTree(env.io, env.a, env.package, copy);
+    var dir = try Io.Dir.cwd().openDir(env.io, copy, .{});
+    defer dir.close(env.io);
+    try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = tidied.text });
+    for (tidied.nested) |file| try dir.writeFile(env.io, .{ .sub_path = file.path, .data = file.text });
+    return copy;
 }
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.

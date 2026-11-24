@@ -379,8 +379,12 @@ Each is pinned at the releases of the members before it (as `bay tidy` pins them
 re-pinned dependencies named in its CHANGELOG (`- Pins a 0.3.1.` under `### Changed`), what
 its build makes from its pins made again (its `generate` step, when either build has one:
 preflight's makes the CI caller, which names the preflight the member pins), and committed,
-then released. A member whose only change is development pins is gated and pushed with no
-tag; a member that fails stops the members that depend on it. A development pin that would
+then released. Each is gated on what its release publishes, as its hosted gate builds it:
+the members the train has released are at their tags, which are their trees, and every
+other member builds at the pins, not from its tree; a development pin on such a member at a
+commit its origin holds on no branch or tag is refused. A member whose only change is
+development pins is gated and pushed with no tag; a member that fails stops the members
+that depend on it. A development pin that would
 close a ring (a tool developed with a member that ships it) moves last, once the release it
 waits for is out. `--dry-run` prints the plan and changes nothing: each member's release and
 what makes it, its section or the pins that move, the train's own releases included. Each
@@ -473,8 +477,10 @@ copies its sources and builds them as anything that depends on the package would
 what it ships, without its development dependencies, as `cargo install` does. Zig's
 package cache is never written to. bay records what each install put where in
 `~/.local/share/bay/installed.zon` (`$XDG_DATA_HOME/bay`): `uninstall` removes exactly
-that, and a file bay did not install is never replaced without `--force`. Installed
-programs run without bay.
+that, and a file bay did not install is never replaced without `--force`. A name is one
+install: installing it under another prefix than the one recorded is refused, naming that
+install, unless `--force` moves it (its files there removed); `--name` records another
+beside it. Installed programs run without bay.
 
 ## How it works
 

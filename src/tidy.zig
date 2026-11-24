@@ -115,7 +115,7 @@ fn shared(own: manifest.Manifest, name: []const u8) ?@FieldType(manifest.Source,
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.
 pub fn resolved(input: Input, parsed: manifest.Manifest) !resolve.Resolution {
-    return resolve.resolve(.{ .io = input.io, .a = input.a, .environ = input.environ, .zig = input.zig, .package = input.package, .parsed = parsed, .members = try workspace.members(input.io, input.a, input.package) });
+    return resolve.resolve(.{ .io = input.io, .a = input.a, .environ = input.environ, .zig = input.zig, .package = input.package, .parsed = parsed, .members = try workspace.building(input.io, input.a, input.environ, input.package) });
 }
 
 /// A dependency's selected revision as a person reads it: name, version, hash.

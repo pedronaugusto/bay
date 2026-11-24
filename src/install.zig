@@ -54,7 +54,7 @@ pub const Args = struct {
         .options = .{
             .prefix = .{ .value_name = "DIR", .hint = .directory, .help = "Install under this directory's bin" },
             .name = .{ .help = "The name to record the install under" },
-            .force = .{ .help = "Replace programs another install put in place" },
+            .force = .{ .help = "Replace programs another install put in place, or move an install of the name from another prefix" },
             .list = .{ .help = "What bay installed, and from where" },
             .update = .{ .help = "Reinstall each one named, or every one, from its recorded branch or tag" },
             .sources = .{ .positional = true, .value_name = "SOURCE", .hint = .directory, .help = "A URL or directory to install from; with --update, the names to reinstall" },
@@ -173,6 +173,12 @@ fn one(c: Context, records: *std.ArrayList(Record), source: []const u8, given_pr
     const name = given_name orelse (try manifest.parse(c.a, try c.a.dupeSentinel(u8, package_text, 0))).name;
     // The name names directories bay writes and deletes: it must be a Zig identifier, as a manifest's is.
     if (!identifier(name)) try say.fail(c.io, "{s} is not a package name: letters, digits and _, not starting with a digit", .{name});
+    // One record per name: the name recorded under another prefix is an install there, whose
+    // files this one would delete, as it moves the record (bay's own, ~/.local/bin/bay, went when
+    // a scratch install under another prefix took its name). Refused before anything is built,
+    // unless --force moves it.
+    if (find(records.items, name)) |index| if (!force and !std.mem.eql(u8, records.items[index].prefix, prefix))
+        try say.fail(c.io, "{s} is installed under {s}, from {s}; installing it under {s} would remove that install: --name records this one beside it under another name, --force moves it here", .{ name, records.items[index].prefix, records.items[index].source, prefix });
     // The build runs in a copy, so Zig's package cache is never written to.
     const work = try std.fs.path.join(c.a, &.{ data, "work", name });
     const stage = try std.fs.path.join(c.a, &.{ data, "stage", name });

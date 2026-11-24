@@ -91,6 +91,29 @@ test "a root pinned below the selection is refused until tidy raises it, and --l
     try std.testing.expect(succeeded(try f.bay("app", &.{ "--locked", "tidy" })));
 }
 
+test "a dry run refuses a build that does not configure with the pins tidy would write, saying what Zig said" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try diamond(&f);
+    // Pinned below the selection, so tidy would raise c, and the dry run configures the copy
+    // with the raise; the build stops as it configures, whatever its pins, as glint's did on a
+    // panic in preflight's build helper.
+    try f.application("app", try std.mem.concat(f.a, u8, &.{ try f.pin("a", "a"), try f.pin("b", "b"), try f.pin("c", "c1") }), &.{ "a", "b", "c" }, main_ab);
+    const build = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig", f.a, .limited(1 << 20));
+    try f.write("app", "build.zig", try std.mem.replaceOwned(u8, f.a, build, "pub fn build(b: *std.Build) void {\n", "pub fn build(b: *std.Build) void {\n    if (b.args == null) @panic(\"the build stops as it configures\");\n"));
+    const before = try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20));
+    const planned = try f.bay("app", &.{ "tidy", "--dry-run" });
+    try std.testing.expect(refused(planned));
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "c would be raised to") != null);
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "the build stops as it configures") != null);
+    try std.testing.expect(std.mem.find(u8, planned.stderr, "the package build does not configure with the pins tidy would write") != null);
+    // Nothing written, and the copy it configured is gone.
+    try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, "app/build.zig.zon", f.a, .limited(1 << 20)));
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, "app/.zig-cache/bay/tidied", .{}));
+}
+
 test "a tidy gives a nested manifest the package's pins of what both pin, and leaves the rest as it is" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1057,6 +1080,33 @@ test "an install builds what the package ships, whatever its development pins" {
     const installed = try f.bay("app", &.{ "install", "--prefix", try std.fs.path.join(f.a, &.{ f.root, "prefix" }) });
     try std.testing.expect(succeeded(installed));
     try f.tmp.dir.access(f.io, if (@import("builtin").os.tag == .windows) "prefix/bin/app.exe" else "prefix/bin/app", .{});
+}
+
+test "an install of a name recorded under another prefix is refused, naming that install, unless --force moves it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = try .init(arena.allocator());
+    defer f.deinit();
+    try f.application("app", "", &.{}, "pub fn main() void {}");
+    const program = if (@import("builtin").os.tag == .windows) "bin/app.exe" else "bin/app";
+    const first = try std.fs.path.join(f.a, &.{ f.root, "first" });
+    const second = try std.fs.path.join(f.a, &.{ f.root, "second" });
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "install", "--prefix", first })));
+    // The same name under another prefix: the install under the first stays, its program too.
+    const moved = try f.bay("app", &.{ "install", "--prefix", second });
+    try std.testing.expect(refused(moved));
+    try std.testing.expect(std.mem.find(u8, moved.stderr, try f.a.print("app is installed under {s}", .{first})) != null);
+    try std.testing.expect(std.mem.find(u8, moved.stderr, "--force moves it here") != null);
+    try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "first", program }), .{});
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "second", program }), .{}));
+    // Beside it under another name, both stay.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "install", "--prefix", second, "--name", "app_second" })));
+    try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "first", program }), .{});
+    // --force moves the install: the first prefix's program goes, the record names the second.
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "uninstall", "app_second" })));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "install", "--prefix", second, "--force" })));
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "first", program }), .{}));
+    try f.tmp.dir.access(f.io, try std.fs.path.join(f.a, &.{ "second", program }), .{});
 }
 
 test "an install from a repository's URL builds its newest release, as add pins it" {
