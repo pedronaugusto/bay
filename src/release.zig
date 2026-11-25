@@ -38,6 +38,7 @@ const nuget_signature = @import("nuget_signature.zig");
 const toolchain = @import("toolchain.zig");
 const fetch = @import("fetch.zig");
 const lock = @import("lock.zig");
+const resolve = @import("resolve.zig");
 const dirs = @import("dirs.zig");
 const git_source = @import("git.zig");
 const advertised = @import("remote.zig");
@@ -1492,6 +1493,10 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
         try cut.section.write(&out.writer);
         try say.out(c.io, "{s}\n", .{out.written()});
         try say.out(c.io, "commit Release {s} on {s}\n", .{ plan.tag, up.branch });
+        releaseCopy(c, cut.manifest, cut.text, plan.version) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "the release commit, at {f}, does not configure, so its gate would be red: fix what it says above", .{plan.version}),
+            else => return err,
+        };
     } else try say.out(c.io, "{s} under way at HEAD\n", .{plan.tag});
     try say.out(c.io, "gate it here", .{});
     for (gate_machines) |machine| try say.out(c.io, ", on {s}", .{machine.name});
@@ -1597,6 +1602,15 @@ fn ride(c: Context, cars: []const each.Car, versions: []const ?std.SemanticVersi
     const done = try c.a.alloc(bool, cars.len);
     for (done, versions) |*released, v| released.* = v != null;
     const member = try pinnedFor(c, cars, car, done);
+    // Where its release would be refused (another branch, changes, behind the remote), before
+    // its re-pin is committed there.
+    _ = releasable(member) catch |err| switch (err) {
+        error.Reported => {
+            try say.note(c.io, "{s}: nothing of it moved", .{car.name});
+            return .failed;
+        },
+        else => return err,
+    };
     const pins_moved = repinned(member) catch |err| switch (err) {
         error.Reported => return .failed,
         else => return err,
@@ -1745,6 +1759,49 @@ fn bayIn(c: Context, args: []const []const u8) !void {
     }
 }
 
+/// The release commit a release would make, made in a copy of the package and configured as
+/// its gate configures it: the CHANGELOG cut at `version`, the manifest `manifest_text` naming
+/// it, what the build makes from the manifest made again (`bay tidy`), and the package's build
+/// and its development build configured (`bay fetch`), Zig compiling each build script. A
+/// package that does not configure at the version it would release (a build that checks the
+/// manifest's version against a file of its own) is refused in a dry run, before any commit.
+/// The copy is a checkout of the package, so a workspace holds it as it holds the package. It
+/// goes once it configures; one a failure leaves is replaced by the next dry run's.
+fn releaseCopy(c: Context, manifest_text: [:0]const u8, log: []const u8, version: std.SemanticVersion) !void {
+    var problem: changelog.Problem = undefined;
+    const cut_log = changelog.cut(c.a, log, version, try today(c.a, c.io), &problem) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => try say.fail(c.io, "CHANGELOG.md:{d}: {s}", .{ problem.line, problem.what }),
+    };
+    const copy = try std.fs.path.join(c.a, &.{ c.package, ".zig-cache", "bay", "release-candidate" });
+    try Io.Dir.cwd().deleteTree(c.io, copy);
+    try resolve.copyTree(c.io, c.a, c.package, copy);
+    var dir = try Io.Dir.cwd().openDir(c.io, copy, .{});
+    defer dir.close(c.io);
+    try dir.writeFile(c.io, .{ .sub_path = "CHANGELOG.md", .data = cut_log });
+    try dir.writeFile(c.io, .{ .sub_path = "build.zig.zon", .data = try manifest.setVersion(c.a, manifest_text, version) });
+    var there = c;
+    there.package = copy;
+    try bayIn(there, &.{"tidy"});
+    try bayIn(there, &.{"fetch"});
+    try Io.Dir.cwd().deleteTree(c.io, copy);
+    try say.note(c.io, "its release commit, at {f}, configures (made in a copy)", .{version});
+}
+
+/// A car's release commit, made in a copy at the version it would tag, the re-pins of what it
+/// ships named in its section as the run names them, and configured (`releaseCopy`): a member
+/// that does not configure at that version stops the plan, not its gate after the commit.
+fn carCopy(c: Context, name: []const u8, manifest_text: [:0]const u8, log: []const u8, shipped: []const []const u8, version: std.SemanticVersion) !void {
+    const named = if (shipped.len == 0) log else changelog.addEntry(c.a, log, .changed, try c.a.print("- Pins {s}.", .{try listed(c.a, shipped)})) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => try say.fail(c.io, "{s}: CHANGELOG.md has no `## [Unreleased]` section to name the re-pins in", .{name}),
+    };
+    releaseCopy(c, manifest_text, named, version) catch |err| switch (err) {
+        error.Reported => try say.fail(c.io, "{s}: its release commit, at {f}, does not configure, so the train would stop at its gate: fix what it says above", .{ name, version }),
+        else => return err,
+    };
+}
+
 /// What a train would do, member by member, changing nothing: each member pinned at the
 /// releases before it, those there now and those the train makes; the release its section
 /// and its moved pins make; and the development pins the closing pass moves after it.
@@ -1765,6 +1822,12 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         for (done_before, versions, 0..) |*released, v, index| released.* = index < number - 1 and v != null;
         const planned = try pinnedFor(c, cars, car, done_before);
         const member = planned;
+        // Refused where the run refuses it, before anything of it moves: a checkout not on its
+        // remote's default branch, a tree with changes, or one behind the remote.
+        const up, _ = releasable(member) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "{s}: the train would stop at it before anything of it moves", .{car.name}),
+            else => return err,
+        };
         const before_text = try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory});
         // Tidied as the train tidies it, in memory: the dry run writes nothing.
         const zig = try toolchain.forPackage(c.io, c.a, c.environ, car.directory);
@@ -1790,7 +1853,7 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         const current = changelog.parseVersion(before.version) orelse try say.fail(c.io, "{s}: .version \"{s}\" is not major.minor.patch", .{ car.name, before.version });
         currents[number - 1] = current;
         // The version the run would tag, by the rule the run follows, from what it reads.
-        const history = try historyOf(member, log, current, try remoteTags(member, (try upstream(member)).remote));
+        const history = try historyOf(member, log, current, try remoteTags(member, up.remote));
         try say.out(c.io, "{d}. {s} {f}", .{ number, car.name, current });
         if (change != .none) {
             version.* = nextVersion(current, change, history);
@@ -1823,6 +1886,7 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
                 else => return err,
             };
         }
+        if (version.*) |v| try carCopy(planned, car.name, after_text, log, shipped.items, v);
         if (version.*) |v| {
             try say.out(c.io, "   then: the re-pin committed and built here (bay dev check), if a pin moves; v{f} written from its section and committed; gated {s}; the branch and the tag pushed\n", .{ v, gated.written() });
         } else if (developed.items.len != 0) {

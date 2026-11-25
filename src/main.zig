@@ -155,7 +155,7 @@ const Release = struct {
     pub const spec: ensign.Spec(@This()) = .{
         .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed, gated here and on the machines in bay's machines.zon and, where its ci.yml runs a release tier, on GitHub at release/vX.Y.Z, then the default branch and its annotated tag pushed at once over SSH; on GitHub, its release published with the section as its notes and, where the build has a dist step, the programs it makes and their SHA256SUMS. GITHUB_TOKEN, else gh's login, authorizes GitHub",
         .options = .{
-            .dry_run = .{ .help = "Print the version, the section as it will be written and the plan; change nothing" },
+            .dry_run = .{ .help = "Print the version, the section as it will be written and the plan, and configure the release commit in a copy of the package; change nothing in it" },
             .no_push = .{ .help = "Commit and gate, and push nothing: the gated commit is held here for a later bay release to push without gating it again" },
             .gate_bundle = .{ .hidden = true, .value_name = "DIRECTORY", .help = "A machine's side of a release: the commit on stdin, gated in a repository at DIRECTORY" },
             .package = .{ .hidden = true, .help = "With --gate-bundle, the package's directory in the repository" },
