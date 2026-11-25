@@ -1664,3 +1664,97 @@ test "a train's dry run runs each closing re-pin's generate against the trees be
     if (!succeeded(clean)) std.debug.print("{s}\n{s}\n", .{ clean.stdout, clean.stderr });
     try std.testing.expect(succeeded(clean));
 }
+
+test "a train's dry run refuses a member not on its remote's default branch, as its run does" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    try w.package("lib", "0.1.0", "");
+    try familyPolicy(&w, "lib", "family");
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"lib\" } }\n");
+    // A clone on a line of its own: the run refuses it at its turn, so the plan does too.
+    try w.git("lib", &.{ "checkout", "--quiet", "-b", "line" });
+    try w.change("lib", "### Fixed\n\n- A fix.\n");
+    const start = try w.head("lib");
+    const remote_main = try w.remoteAt("lib", "refs/heads/main");
+    for ([_][]const []const u8{ &.{ "--workspace", "release", "--dry-run" }, &.{ "--workspace", "release" } }) |args| {
+        const off = try w.f.bay(".", args);
+        try std.testing.expect(refused(off));
+        try std.testing.expect(contains(off.stderr, "line would go to origin/line, and a release goes only to origin's default branch, main"));
+        try std.testing.expectEqualStrings(start, try w.head("lib"));
+        try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.1"));
+        try std.testing.expectEqualStrings(remote_main, try w.remoteAt("lib", "refs/heads/main"));
+    }
+    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    try std.testing.expect(contains(plan.stderr, "lib: the train would stop at it before anything of it moves"));
+    // On the default branch, the plan passes.
+    try w.git("lib", &.{ "checkout", "--quiet", "main" });
+    try w.git("lib", &.{ "merge", "--quiet", "--ff-only", "line" });
+    const clean = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    if (!succeeded(clean)) std.debug.print("{s}\n{s}\n", .{ clean.stdout, clean.stderr });
+    try std.testing.expect(succeeded(clean));
+    try std.testing.expect(contains(clean.stdout, "1. lib 0.1.0 -> 0.1.1 (fix): its [Unreleased] section\n"));
+}
+
+test "a dry run makes the release commit in a copy at its version and configures it, refusing one that does not configure there" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    try w.package("lib", "0.1.0", "");
+    // A build that refuses a manifest whose version differs from a file of its own: the
+    // release sets the manifest's alone, so its commit does not configure.
+    try w.f.write("lib", "version.zig", "pub const version = \"0.1.0\";\n");
+    try w.f.write("lib", "build.zig", gate_build ++
+        \\comptime {
+        \\    const zon = @import("build.zig.zon").version;
+        \\    const own = @import("version.zig").version;
+        \\    if (!std.mem.eql(u8, zon, own)) @compileError("version.zig names " ++ own ++ "; build.zig.zon names " ++ zon);
+        \\}
+        \\
+    );
+    try w.git("lib", &.{ "add", "." });
+    try w.git("lib", &.{ "commit", "--quiet", "-m", "A version of its own" });
+    try w.git("lib", &.{ "push", "--quiet", "origin", "main" });
+    try familyPolicy(&w, "lib", "family");
+    try w.change("lib", "### Fixed\n\n- A fix.\n");
+    const start = try w.head("lib");
+    const candidate = try std.fs.path.join(w.f.a, &.{ "lib", ".zig-cache", "bay", "release-candidate" });
+
+    // Alone, and as a train's car: refused in the plan, before any commit, with Zig's words.
+    const alone = try w.releaseIn("lib", &.{"--dry-run"});
+    try std.testing.expect(refused(alone));
+    try std.testing.expect(contains(alone.stderr, "version.zig names 0.1.0; build.zig.zon names 0.1.1"));
+    try std.testing.expect(contains(alone.stderr, "the release commit, at 0.1.1, does not configure, so its gate would be red"));
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"lib\" } }\n");
+    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    try std.testing.expect(refused(plan));
+    try std.testing.expect(contains(plan.stderr, "version.zig names 0.1.0; build.zig.zon names 0.1.1"));
+    try std.testing.expect(contains(plan.stderr, "lib: its release commit, at 0.1.1, does not configure, so the train would stop at its gate"));
+    try std.testing.expectEqualStrings(start, try w.head("lib"));
+    try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
+    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.1"));
+
+    // A build that reads the manifest's version alone configures at any: the plan passes, and
+    // the copy goes. Its `generate` asks git where it stands, as preflight's does, and is
+    // refused anywhere but at its repository's top: each copy is a repository of its own.
+    const generate_line = "    b.step(\"generate\", \"Make what follows from the pins\").dependOn(&generated.step);\n";
+    try w.f.write("lib", "build.zig", try std.mem.replaceOwned(u8, w.f.a, gate_build, generate_line,
+        \\    const where = b.addSystemCommand(&.{ "git", "rev-parse", "--show-prefix" });
+        \\    where.setCwd(b.path("."));
+        \\    where.has_side_effects = true;
+        \\    where.expectStdOutEqual("\n");
+        \\    generated.step.dependOn(&where.step);
+        \\
+    ++ generate_line));
+    try w.git("lib", &.{ "rm", "--quiet", "version.zig" });
+    try w.git("lib", &.{ "add", "." });
+    try w.git("lib", &.{ "commit", "--quiet", "-m", "The manifest's version alone" });
+    const clean = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    if (!succeeded(clean)) std.debug.print("{s}\n{s}\n", .{ clean.stdout, clean.stderr });
+    try std.testing.expect(succeeded(clean));
+    try std.testing.expect(contains(clean.stderr, "its release commit, at 0.1.1, configures (made in a copy)"));
+    try std.testing.expectError(error.FileNotFound, w.f.tmp.dir.access(w.f.io, candidate, .{}));
+    try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
+}

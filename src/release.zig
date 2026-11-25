@@ -38,6 +38,7 @@ const nuget_signature = @import("nuget_signature.zig");
 const toolchain = @import("toolchain.zig");
 const fetch = @import("fetch.zig");
 const lock = @import("lock.zig");
+const resolve = @import("resolve.zig");
 const dirs = @import("dirs.zig");
 const git_source = @import("git.zig");
 const advertised = @import("remote.zig");
@@ -430,7 +431,13 @@ fn releaseOne(c: Context, options: Options) !Outcome {
     try push(c, up, commit, .{ .name = plan.tag, .gated_by = gated_by });
     try forget(c.io, gated);
     try say.note(c.io, "released {s} {s} at {s}: {s} and the tag {s} on {s}", .{ parsed.name, plan.tag, commit[0..12], up.onto, plan.tag, up.remote });
-    try publishRelease(c, up, plan.tag, plan.version, .just_pushed);
+    // The tag is out, and never moves: a GitHub Release that cannot be finished now (its dist
+    // build, GitHub's answer) is said and left for `bay release` at the tag, and the release
+    // stands, so a train goes on to the members that pin it.
+    publishRelease(c, up, plan.tag, plan.version, .just_pushed) catch |err| switch (err) {
+        error.Reported => try say.note(c.io, "{s} is released; its GitHub Release waits for bay release at {s}", .{ plan.tag, plan.tag }),
+        else => return err,
+    };
     return .{ .released = plan.version };
 }
 
@@ -508,30 +515,11 @@ fn dispatchedSince(c: Context) ![]const u8 {
 /// How many times the hosted gate runs again jobs GitHub gave no runner before it refuses.
 const unacquired_reruns = 3;
 
-fn passed(job: github.Job) bool {
-    const conclusion = job.conclusion orelse return false;
-    return std.mem.eql(u8, conclusion, "success") or std.mem.eql(u8, conclusion, "skipped");
-}
-
 /// The jobs that neither passed nor were skipped, named and joined.
 fn notPassed(a: std.mem.Allocator, job_list: []const github.Job) ![]const u8 {
     var names: std.ArrayList([]const u8) = .empty;
-    for (job_list) |job| if (job.conclusion != null and !passed(job)) try names.append(a, job.name);
+    for (job_list) |job| if (job.conclusion != null and !job.passed()) try names.append(a, job.name);
     return std.mem.join(a, ", ", names.items);
-}
-
-/// A run that failed only because GitHub gave jobs no runner: every job that did not pass was
-/// cancelled before one took it. A run a person cancelled ends "cancelled", never "failure".
-fn onlyUnacquired(ran: github.Run, job_list: []const github.Job) bool {
-    const conclusion = ran.conclusion orelse return false;
-    if (!std.mem.eql(u8, conclusion, "failure")) return false;
-    var any = false;
-    for (job_list) |job| {
-        if (passed(job)) continue;
-        if (!job.unacquired()) return false;
-        any = true;
-    }
-    return any;
 }
 
 /// The hosted gate: the release commit on the candidate branch, the release tier dispatched on
@@ -556,7 +544,13 @@ fn hostedGate(c: Context, up: Upstream, hosted: Hosted, commit: []const u8, tag:
     // GitHub makes the run a moment after the dispatch: looked for until it shows.
     var looks: u32 = 0;
     const found = while (true) : (looks += 1) {
-        if (github.newestRun(api, hosted.repository, branch, commit, since, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated)) |one| break one;
+        // A look GitHub does not answer is one more of the forty.
+        const shown = github.newestRun(api, hosted.repository, branch, commit, since, &problem) catch |err| unanswered: {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            try say.note(c.io, "hosted: {s}; looking again", .{problem.what});
+            break :unanswered null;
+        };
+        if (shown) |one| break one;
         if (looks == 40) {
             problem.what = try c.a.print("GitHub shows no run of {s} on {s} after {d} looks", .{ workflow, branch, looks });
             try hostedFailed(c, up, error.GitHub, problem, candidate, start, gated);
@@ -568,38 +562,56 @@ fn hostedGate(c: Context, up: Upstream, hosted: Hosted, commit: []const u8, tag:
     // A job GitHub never gave a runner never ran: its jobs are run again, a bounded number of times.
     var reruns: u32 = 0;
     var attempt = found.run_attempt;
+    // A look GitHub does not answer (a 5xx, a dropped connection) is taken again, a few in a
+    // row at most: a run waited on for an hour meets one, and it says nothing of the run.
+    var misses: u32 = 0;
     const ended = while (true) : (try c.io.sleep(poll, .awake)) {
-        const now = github.run(api, hosted.repository, found.id, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
-        const job_list = github.jobs(api, hosted.repository, found.id, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
+        const seen = look(api, hosted.repository, found.id, &problem) catch |err| {
+            if (err == error.OutOfMemory or misses == unanswered_looks) try hostedFailed(c, up, err, problem, candidate, start, gated);
+            misses += 1;
+            try say.note(c.io, "hosted: {s}; looking again, {d} of {d}", .{ problem.what, misses, unanswered_looks });
+            continue;
+        };
+        misses = 0;
+        const now, const job_list = seen;
         // GitHub shows the re-run's attempt a moment after it is asked for.
         if (now.run_attempt < attempt) continue;
         for (job_list) |job| if (job.conclusion) |conclusion| if (!said.contains(job.name)) {
             try said.put(c.a, job.name, {});
             try say.note(c.io, "hosted: {s}: {s}", .{ job.name, conclusion });
         };
-        if (!std.mem.eql(u8, now.status, "completed")) continue;
-        if (!onlyUnacquired(now, job_list) or reruns == unacquired_reruns) break .{ now, job_list };
+        const stands = github.verdict(now, job_list);
+        if (stands == .waiting) continue;
+        if (stands != .unacquired or reruns == unacquired_reruns) break .{ now, job_list, stands };
         reruns += 1;
         const names = try notPassed(c.a, job_list);
-        for (job_list) |job| if (!passed(job)) {
+        for (job_list) |job| if (!job.passed()) {
             _ = said.remove(job.name);
         };
         try say.note(c.io, "hosted: GitHub gave {s} no runner; re-running its jobs, {d} of {d}", .{ names, reruns, unacquired_reruns });
         github.rerunFailed(api, hosted.repository, found.id, &problem) catch |err| try hostedFailed(c, up, err, problem, candidate, start, gated);
         attempt = now.run_attempt + 1;
     };
-    const finished = ended[0];
-    if (finished.conclusion != null and std.mem.eql(u8, finished.conclusion.?, "success")) {
+    const finished, const finished_jobs, const stands = ended;
+    if (stands == .green) {
         try say.note(c.io, "hosted: green, {s}", .{finished.html_url});
         return finished.html_url;
     }
-    const red = try notPassed(c.a, ended[1]);
+    const red = try notPassed(c.a, finished_jobs);
     _ = try git(c, &.{ "push", "--quiet", up.remote, try c.a.print(":{s}", .{candidate}) });
     _ = try must(c, &.{ "reset", "--quiet", "--keep", start });
     try forget(c.io, gated);
-    if (onlyUnacquired(finished, ended[1]))
+    if (stands == .unacquired)
         try say.fail(c.io, "GitHub gave {s} no runner, re-run {d} times ({s}): they never ran, so the release tier neither passed nor failed; nothing was tagged or pushed to {s}, {s} is deleted, and {s} is back at {s}", .{ red, unacquired_reruns, finished.html_url, up.onto, branch, up.branch, start[0..12] });
     try say.fail(c.io, "the release tier is {s} on GitHub ({s}): {s}; nothing was tagged or pushed to {s}, {s} is deleted, and {s} is back at {s}", .{ finished.conclusion orelse "unfinished", if (red.len == 0) "no job named" else red, finished.html_url, up.onto, branch, up.branch, start[0..12] });
+}
+
+/// How many looks in a row GitHub may leave unanswered before the hosted gate gives up.
+const unanswered_looks = 5;
+
+/// The run `id` and its jobs, as GitHub answers them now.
+fn look(api: github.Api, repository: []const u8, id: u64, problem: *github.Problem) github.Error!struct { github.Run, []const github.Job } {
+    return .{ try github.run(api, repository, id, problem), try github.jobs(api, repository, id, problem) };
 }
 
 /// A hosted gate GitHub would not run or answer: refused as a red one is, nothing reaching main.
@@ -768,7 +780,7 @@ fn lacking(c: Context, api: github.Api, repository: []const u8, tag: ReleaseTag)
             if (github.run(api, repository, run_id, &problem)) |ran| {
                 const candidate = try c.a.print("release/{s}", .{tag.name});
                 if (ran.conclusion == null or !std.mem.eql(u8, ran.conclusion.?, "success"))
-                    try lacks.append(c.a, try c.a.print("its run {s} ended {s}, not green", .{ page, ran.conclusion orelse ran.status }));
+                    try lacks.append(c.a, try c.a.print("its run {s} ended {s}, not green", .{ page, ran.conclusion orelse ran.status orelse "with no status" }));
                 if (!std.mem.eql(u8, ran.head_sha, tag.commit))
                     try lacks.append(c.a, try c.a.print("its run {s} ran on {s}, not on the tagged {s}", .{ page, ran.head_sha[0..@min(12, ran.head_sha.len)], tag.commit[0..12] }));
                 if (ran.head_branch == null or !std.mem.eql(u8, ran.head_branch.?, candidate))
@@ -1492,6 +1504,10 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, gate_machines: []const machines.
         try cut.section.write(&out.writer);
         try say.out(c.io, "{s}\n", .{out.written()});
         try say.out(c.io, "commit Release {s} on {s}\n", .{ plan.tag, up.branch });
+        releaseCopy(c, cut.manifest, cut.text, plan.version) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "the release commit, at {f}, does not configure, so its gate would be red: fix what it says above", .{plan.version}),
+            else => return err,
+        };
     } else try say.out(c.io, "{s} under way at HEAD\n", .{plan.tag});
     try say.out(c.io, "gate it here", .{});
     for (gate_machines) |machine| try say.out(c.io, ", on {s}", .{machine.name});
@@ -1597,6 +1613,15 @@ fn ride(c: Context, cars: []const each.Car, versions: []const ?std.SemanticVersi
     const done = try c.a.alloc(bool, cars.len);
     for (done, versions) |*released, v| released.* = v != null;
     const member = try pinnedFor(c, cars, car, done);
+    // Where its release would be refused (another branch, changes, behind the remote), before
+    // its re-pin is committed there.
+    _ = releasable(member) catch |err| switch (err) {
+        error.Reported => {
+            try say.note(c.io, "{s}: nothing of it moved", .{car.name});
+            return .failed;
+        },
+        else => return err,
+    };
     const pins_moved = repinned(member) catch |err| switch (err) {
         error.Reported => return .failed,
         else => return err,
@@ -1745,6 +1770,71 @@ fn bayIn(c: Context, args: []const []const u8) !void {
     }
 }
 
+/// A copy of the package under its cache (`.zig-cache/bay/<name>`), for a dry run to build in
+/// and write to: a clone of its repository sharing its objects (`git clone --shared`), with the
+/// package's files as they stand laid over it, so the copy's git (its top, its files, its tags)
+/// is its own. A copy of the files alone sits inside the package's repository, and a step that
+/// asks git where it stands (preflight's `generate`, its `git rev-parse --show-toplevel`) reads
+/// the package's top in place of the copy's. Outside a repository, the files alone. `top` is
+/// what to delete once used; `package` the package's directory in it.
+pub fn checkout(c: Context, name: []const u8) !struct { top: []const u8, package: []const u8 } {
+    const here = try Io.Dir.cwd().realPathFileAlloc(c.io, c.package, c.a);
+    const top_copy = try std.fs.path.join(c.a, &.{ here, ".zig-cache", "bay", name });
+    try Io.Dir.cwd().deleteTree(c.io, top_copy);
+    const top = try git(c, &.{ "rev-parse", "--show-toplevel" });
+    if (!top.ok) {
+        try resolve.copyTree(c.io, c.a, here, top_copy);
+        return .{ .top = top_copy, .package = top_copy };
+    }
+    _ = try must(c, &.{ "clone", "--quiet", "--shared", top.out, top_copy });
+    const prefix = std.mem.trimEnd(u8, (try git(c, &.{ "rev-parse", "--show-prefix" })).out, "/");
+    const package = if (prefix.len == 0) top_copy else try std.fs.path.join(c.a, &.{ top_copy, prefix });
+    // What the tree holds beside its commit, a dry run's pins among it: `bay tidy --dry-run` plans a tree as it stands.
+    try resolve.copyTree(c.io, c.a, here, package);
+    return .{ .top = top_copy, .package = package };
+}
+
+/// The release commit a release would make, made in a copy of the package and configured as
+/// its gate configures it: the CHANGELOG cut at `version`, the manifest `manifest_text` naming
+/// it, what the build makes from the manifest made again (`bay tidy`), and the package's build
+/// and its development build configured (`bay fetch`), Zig compiling each build script. A
+/// package that does not configure at the version it would release (a build that checks the
+/// manifest's version against a file of its own) is refused in a dry run, before any commit.
+/// The copy (`checkout`) is a clone of the package, so a workspace holds it as it holds the package. It
+/// goes once it configures; one a failure leaves is replaced by the next dry run's.
+fn releaseCopy(c: Context, manifest_text: [:0]const u8, log: []const u8, version: std.SemanticVersion) !void {
+    var problem: changelog.Problem = undefined;
+    const cut_log = changelog.cut(c.a, log, version, try today(c.a, c.io), &problem) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => try say.fail(c.io, "CHANGELOG.md:{d}: {s}", .{ problem.line, problem.what }),
+    };
+    const copy = try checkout(c, "release-candidate");
+    var dir = try Io.Dir.cwd().openDir(c.io, copy.package, .{});
+    defer dir.close(c.io);
+    try dir.writeFile(c.io, .{ .sub_path = "CHANGELOG.md", .data = cut_log });
+    try dir.writeFile(c.io, .{ .sub_path = "build.zig.zon", .data = try manifest.setVersion(c.a, manifest_text, version) });
+    var there = c;
+    there.package = copy.package;
+    try bayIn(there, &.{"tidy"});
+    try bayIn(there, &.{"fetch"});
+    try Io.Dir.cwd().deleteTree(c.io, copy.top);
+    try say.note(c.io, "its release commit, at {f}, configures (made in a copy)", .{version});
+}
+
+/// A car's release commit, made in a copy at the version it would tag, the re-pins of what it
+/// ships named in its section as the run names them, and configured (`releaseCopy`): a member
+/// that does not configure at that version stops the plan, not its gate after the commit.
+fn carCopy(c: Context, name: []const u8, manifest_text: [:0]const u8, log: []const u8, shipped: []const []const u8, version: std.SemanticVersion) !void {
+    const named = if (shipped.len == 0) log else changelog.addEntry(c.a, log, .changed, try c.a.print("- Pins {s}.", .{try listed(c.a, shipped)})) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => try say.fail(c.io, "{s}: CHANGELOG.md has no `## [Unreleased]` section to name the re-pins in", .{name}),
+    };
+    releaseCopy(c, manifest_text, named, version) catch |err| switch (err) {
+        error.Reported => try say.fail(c.io, "{s}: its release commit, at {f}, does not configure, so the train would stop at its gate: fix what it says above", .{ name, version }),
+        else => return err,
+    };
+}
+
 /// What a train would do, member by member, changing nothing: each member pinned at the
 /// releases before it, those there now and those the train makes; the release its section
 /// and its moved pins make; and the development pins the closing pass moves after it.
@@ -1765,6 +1855,12 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         for (done_before, versions, 0..) |*released, v, index| released.* = index < number - 1 and v != null;
         const planned = try pinnedFor(c, cars, car, done_before);
         const member = planned;
+        // Refused where the run refuses it, before anything of it moves: a checkout not on its
+        // remote's default branch, a tree with changes, or one behind the remote.
+        const up, _ = releasable(member) catch |err| switch (err) {
+            error.Reported => try say.fail(c.io, "{s}: the train would stop at it before anything of it moves", .{car.name}),
+            else => return err,
+        };
         const before_text = try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory});
         // Tidied as the train tidies it, in memory: the dry run writes nothing.
         const zig = try toolchain.forPackage(c.io, c.a, c.environ, car.directory);
@@ -1790,7 +1886,7 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
         const current = changelog.parseVersion(before.version) orelse try say.fail(c.io, "{s}: .version \"{s}\" is not major.minor.patch", .{ car.name, before.version });
         currents[number - 1] = current;
         // The version the run would tag, by the rule the run follows, from what it reads.
-        const history = try historyOf(member, log, current, try remoteTags(member, (try upstream(member)).remote));
+        const history = try historyOf(member, log, current, try remoteTags(member, up.remote));
         try say.out(c.io, "{d}. {s} {f}", .{ number, car.name, current });
         if (change != .none) {
             version.* = nextVersion(current, change, history);
@@ -1823,6 +1919,7 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
                 else => return err,
             };
         }
+        if (version.*) |v| try carCopy(planned, car.name, after_text, log, shipped.items, v);
         if (version.*) |v| {
             try say.out(c.io, "   then: the re-pin committed and built here (bay dev check), if a pin moves; v{f} written from its section and committed; gated {s}; the branch and the tag pushed\n", .{ v, gated.written() });
         } else if (developed.items.len != 0) {

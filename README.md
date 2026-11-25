@@ -342,7 +342,10 @@ naming the jobs that never ran; a run a person cancelled is refused as it stands
 follows the push, its notes the section and the run. `bay audit releases` checks each
 release tag of the repository so: annotated, its run green on its commit, its GitHub
 Release naming the run; the tags from before the first such release are named once, as
-history. `bay release --dry-run` prints the version, the section and the plan;
+history. `bay release --dry-run` prints the version, the section and the plan, and makes
+the release commit in a copy of the package (the section cut, the manifest at the new
+version, `bay tidy`) and configures its builds, so a package that does not configure at the
+version it would release is refused before any commit;
 `bay release --no-push` commits and gates, and holds the gated commit for a later `bay
 release`, someone else's it may be, to push without gating it again.
 
@@ -393,7 +396,10 @@ waits for is out. `--dry-run` prints the plan and changes nothing: each member's
 what makes it, its section or the pins that move, the train's own releases included; each
 member's `generate` step run with the pins it would write, in a copy, and again for each
 closing re-pin with the trees of the releases it waits for, so a config the new release's
-`generate` refuses stops the plan, with what it said. Each
+`generate` refuses stops the plan, with what it said; each release commit made in a copy
+and configured, as `bay release --dry-run` makes it; and each member refused where its run
+would refuse it, a checkout off its remote's default branch among them, which the run
+refuses before its re-pin is committed. Each
 member says it is the family's, `"policy": "family"` in its `ci/preflight.json`, or the
 train is refused before anything moves, each member without it named.
 
