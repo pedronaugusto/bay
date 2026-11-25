@@ -1758,3 +1758,56 @@ test "a dry run makes the release commit in a copy at its version and configures
     try std.testing.expectError(error.FileNotFound, w.f.tmp.dir.access(w.f.io, candidate, .{}));
     try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
 }
+
+test "a dry run's tidy resolves the package itself in its copy, with tidy's pins: a member pinned at an older release builds once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var w: World = try .init(a);
+    defer w.deinit();
+    // shuttle's shape: shuttle pinned aegis 0.2.4, aegis is a member at its release 0.5.0, and
+    // shuttle develops with shakedown, which depends on shuttle. Here lib pins core 0.1.0, core
+    // is a member at its release 0.1.1, and lib develops with tool, which depends on lib: tool's
+    // lib is the package itself, and its core the member's tree.
+    const loads = struct {
+        fn one(comptime name: []const u8) []const u8 {
+            return "pub fn build(b: *std.Build) void {\n    _ = b.dependency(\"" ++ name ++ "\", .{});\n";
+        }
+    };
+    // No build has a `generate` step, as shuttle's package build has none: the dry run
+    // configures both builds, the development build among them.
+    const no_generate = try std.mem.replaceOwned(u8, a, gate_build, "    b.step(\"generate\", \"Make what follows from the pins\").dependOn(&generated.step);\n", "");
+    try w.package("core", "0.1.0", "");
+    // Its next release, a commit of its own at 0.1.1: another hash than 0.1.0's.
+    try w.f.write("core", "build.zig.zon", try std.mem.replaceOwned(u8, a, try w.read("core", "build.zig.zon"), "\"0.1.0\"", "\"0.1.1\""));
+    try w.git("core", &.{ "commit", "--quiet", "-am", "0.1.1" });
+    try w.git("core", &.{ "push", "--quiet", "origin", "main" });
+    try w.git("core", &.{ "tag", "v0.1.1" });
+    try w.git("core", &.{ "push", "--quiet", "origin", "v0.1.1" });
+    // lib 0.1.0 pins core 0.1.0, and tool 0.1.0 depends on lib 0.1.0.
+    for ([_][]const u8{ "lib", "tool" }, [_][]const u8{ "core", "lib" }, [_][]const u8{ loads.one("core"), loads.one("lib") }) |dir, on, header| {
+        try w.package(dir, "0.1.0", "");
+        try std.testing.expect(succeeded(try w.f.bay(dir, &.{ "add", try a.print("{s}#v0.1.0", .{try w.pinUrl(on)}) })));
+        try w.f.write(dir, "build.zig", try std.mem.replaceOwned(u8, a, no_generate, "pub fn build(b: *std.Build) void {\n", header));
+        try w.git(dir, &.{ "add", "." });
+        try w.git(dir, &.{ "commit", "--quiet", "-m", try a.print("Depend on {s}", .{on}) });
+        try w.git(dir, &.{ "push", "--quiet", "origin", "main" });
+        try w.git(dir, &.{ "tag", "--force", "v0.1.0" });
+        try w.git(dir, &.{ "push", "--quiet", "--force", "origin", "v0.1.0" });
+    }
+    try std.testing.expect(succeeded(try w.f.bay("lib", &.{ "add", "--dev", try a.print("{s}#v0.1.0", .{try w.pinUrl("tool")}) })));
+    try w.f.write("lib", "build.zig", try std.mem.replaceOwned(u8, a, try w.read("lib", "build.zig"), "pub fn dev(b: *std.Build, _: type) void {\n", "pub fn dev(b: *std.Build, _: type) void {\n    _ = b.dependency(\"tool\", .{});\n"));
+    try w.git("lib", &.{ "add", "." });
+    try w.git("lib", &.{ "commit", "--quiet", "-m", "Develop with tool" });
+    try w.git("lib", &.{ "push", "--quiet", "origin", "main" });
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"core\", \"lib\" } }\n");
+    const head = try w.head("lib");
+
+    const plan = try w.f.bay("lib", &.{ "tidy", "--dry-run" });
+    if (!succeeded(plan)) std.debug.print("{s}\n{s}\n", .{ plan.stdout, plan.stderr });
+    try std.testing.expect(succeeded(plan));
+    try std.testing.expect(contains(plan.stderr, "core would be pinned at its release"));
+    try std.testing.expect(std.mem.find(u8, plan.stderr, "file exists in modules") == null);
+    try std.testing.expectEqualStrings(head, try w.head("lib"));
+    try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
+}

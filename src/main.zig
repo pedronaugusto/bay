@@ -789,11 +789,15 @@ fn planTidy(env: Env) !u8 {
     // The builds as they would configure with the pins tidy would write, in a copy of the
     // package with tidy's manifests: a build reads the manifest at its root, and the
     // `generate` step run there writes into the copy, never the package.
+    // Resolved in the copy, as the package once tidy writes it: where the build reaches the
+    // package itself (its development build's `b.dependency` on it), that is the copy, with
+    // tidy's pins, never the package's tree with its pins as they stand, which would hold a
+    // member it pins at two versions, both its tree (shuttle's aegis 0.2.4 and 0.4.0).
     const parsed = try manifest.parse(env.a, tidied.text);
-    const resolution = try buildable(env, parsed);
     var planned = env;
     const copy = try tidiedCopy(env, tidied);
     planned.package = copy.package;
+    const resolution = try buildable(planned, parsed);
     const generates = try generator(planned, parsed, resolution);
     // Run as tidy would run it once the pins are written: the step reads what follows from
     // them, the config its tool reads among it.
