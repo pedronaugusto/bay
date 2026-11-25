@@ -1737,8 +1737,17 @@ test "a dry run makes the release commit in a copy at its version and configures
     try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.1"));
 
     // A build that reads the manifest's version alone configures at any: the plan passes, and
-    // the copy goes.
-    try w.f.write("lib", "build.zig", gate_build);
+    // the copy goes. Its `generate` asks git where it stands, as preflight's does, and is
+    // refused anywhere but at its repository's top: each copy is a repository of its own.
+    const generate_line = "    b.step(\"generate\", \"Make what follows from the pins\").dependOn(&generated.step);\n";
+    try w.f.write("lib", "build.zig", try std.mem.replaceOwned(u8, w.f.a, gate_build, generate_line,
+        \\    const where = b.addSystemCommand(&.{ "git", "rev-parse", "--show-prefix" });
+        \\    where.setCwd(b.path("."));
+        \\    where.has_side_effects = true;
+        \\    where.expectStdOutEqual("\n");
+        \\    generated.step.dependOn(&where.step);
+        \\
+    ++ generate_line));
     try w.git("lib", &.{ "rm", "--quiet", "version.zig" });
     try w.git("lib", &.{ "add", "." });
     try w.git("lib", &.{ "commit", "--quiet", "-m", "The manifest's version alone" });

@@ -792,7 +792,8 @@ fn planTidy(env: Env) !u8 {
     const parsed = try manifest.parse(env.a, tidied.text);
     const resolution = try buildable(env, parsed);
     var planned = env;
-    planned.package = try tidiedCopy(env, tidied);
+    const copy = try tidiedCopy(env, tidied);
+    planned.package = copy.package;
     const generates = try generator(planned, parsed, resolution);
     // Run as tidy would run it once the pins are written: the step reads what follows from
     // them, the config its tool reads among it.
@@ -801,7 +802,7 @@ fn planTidy(env: Env) !u8 {
         else => 0,
     };
     // The copy goes once used; one a failure leaves is replaced by the next dry run's.
-    try Io.Dir.cwd().deleteTree(env.io, planned.package);
+    try Io.Dir.cwd().deleteTree(env.io, copy.top);
     switch (generates) {
         .none => try say.note(env.io, "no build has a `generate` step: nothing would be made again", .{}),
         // Every pin it configures with is there: a workspace member's is its tree, and the
@@ -824,17 +825,16 @@ fn planTidy(env: Env) !u8 {
 /// own, where its builds configure as they will once tidy writes them: a dry run writes nothing
 /// in the package, and the package's own manifest, with forks made for the pins tidy would
 /// write, did not configure (wave1's aperture: aegis's tree the root of the module pinned and of
-/// the module tidy pins). What the copy leaves out is what `copyTree` does: .git, the caches,
-/// zig-out and zig-pkg.
-fn tidiedCopy(env: Env, tidied: tidying.Tidied) ![]const u8 {
-    const copy = try std.fs.path.join(env.a, &.{ env.package, root.directory, "tidied" });
-    try Io.Dir.cwd().deleteTree(env.io, copy);
-    try resolve.copyTree(env.io, env.a, env.package, copy);
-    var dir = try Io.Dir.cwd().openDir(env.io, copy, .{});
+/// the module tidy pins). The copy is `release.checkout`'s, a clone of the package's repository
+/// with its files laid over it, so a `generate` that asks git where it stands reads the copy.
+/// Its `top` is returned, to delete once used, beside the package's directory in it.
+fn tidiedCopy(env: Env, tidied: tidying.Tidied) !struct { top: []const u8, package: []const u8 } {
+    const copy = try release.checkout(.{ .io = env.io, .a = env.a, .environ = env.environ, .package = env.package }, "tidied");
+    var dir = try Io.Dir.cwd().openDir(env.io, copy.package, .{});
     defer dir.close(env.io);
     try dir.writeFile(env.io, .{ .sub_path = "build.zig.zon", .data = tidied.text });
     for (tidied.nested) |file| try dir.writeFile(env.io, .{ .sub_path = file.path, .data = file.text });
-    return copy;
+    return .{ .top = copy.top, .package = copy.package };
 }
 
 /// The package's graph, resolved: a workspace's members are main modules beside it.

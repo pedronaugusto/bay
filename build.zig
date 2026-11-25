@@ -89,6 +89,16 @@ fn tests(b: *std.Build, package: *std.Build, target: std.Build.ResolvedTarget, o
     const link_test = b.addTest(.{ .root_module = link, .filters = filters });
     step.dependOn(&b.addRunArtifact(link_test).step);
     check.dependOn(&link_test.step);
+    // bay's readers of GitHub's answers, on answers GitHub gave (test/github/).
+    const github = b.createModule(.{ .root_source_file = package.path("src/github.zig"), .target = target, .optimize = optimize });
+    const answers = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = package.path("test/github.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "github", .module = github }},
+    }), .filters = filters });
+    step.dependOn(&b.addRunArtifact(answers).step);
+    check.dependOn(&answers.step);
     const unit_module = program(b, package, target, optimize);
     unit_module.addImport("shakedown", shakedown);
     unit_module.addImport("link", link);

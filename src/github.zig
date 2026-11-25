@@ -67,13 +67,22 @@ pub const Api = struct {
     token: []const u8,
 };
 
-/// What bay reads of a release GitHub holds.
-const Release = struct {
+/// What bay reads of a release GitHub holds (`release` in GitHub's schema, where none of these
+/// is nullable), as `GET /repos/{owner}/{repo}/releases/tags/{tag}` and `POST .../releases`
+/// answer it. Every field bay does not read is left unread.
+pub const Release = struct {
     id: u64,
     upload_url: []const u8,
     html_url: []const u8 = "",
     assets: []const struct { name: []const u8 } = &.{},
+    /// The notes; nullable.
+    body: ?[]const u8 = null,
 };
+
+/// A release as GitHub answers it.
+pub fn readRelease(a: std.mem.Allocator, body: []const u8) !Release {
+    return std.json.parseFromSliceLeaky(Release, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+}
 
 pub const Error = error{ OutOfMemory, GitHub };
 
@@ -124,9 +133,9 @@ fn safeName(name: []const u8) bool {
 }
 
 fn parse(a: std.mem.Allocator, body: []const u8, url: []const u8, problem: *Problem) Error!Release {
-    return std.json.parseFromSliceLeaky(Release, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+    return readRelease(a, body) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        else => fail(a, problem, "{s} answered a release bay cannot read", .{url}),
+        else => fail(a, problem, "{s} answered a release bay cannot read ({t})", .{ url, err }),
     };
 }
 
@@ -165,39 +174,107 @@ fn request(api: Api, method: std.http.Method, url: []const u8, payload: ?[]const
 }
 
 /// A workflow run as bay reads it: which commit it ran on, where it stands, and how it ended.
+/// Each field GitHub's schema (`workflow-run`) allows to be null is optional here, and every
+/// field bay does not read is left unread: a run GitHub answers is never one bay cannot read.
 pub const Run = struct {
     id: u64,
     head_sha: []const u8,
-    /// The branch it ran on: a release's candidate, `release/vX.Y.Z`.
+    /// The branch it ran on: a release's candidate, `release/vX.Y.Z`. Nullable.
     head_branch: ?[]const u8 = null,
-    /// `queued`, `in_progress`, `completed` (and GitHub's waiting states).
-    status: []const u8,
-    /// Set once completed: `success`, `failure`, `cancelled`, `timed_out`, and the rest.
+    /// `queued`, `in_progress`, `completed` (and GitHub's waiting states). Nullable.
+    status: ?[]const u8 = null,
+    /// Set once completed: `success`, `failure`, `cancelled`, `timed_out`, and the rest. Nullable.
     conclusion: ?[]const u8 = null,
     html_url: []const u8 = "",
     created_at: []const u8 = "",
     /// Which attempt of the run this is: one, then one more for each re-run.
     run_attempt: u32 = 1,
+
+    pub fn completed(ran: Run) bool {
+        return std.mem.eql(u8, ran.status orelse return false, "completed");
+    }
 };
 
-/// One job of a run.
+/// One job of a run. GitHub's schema (`job`) allows `conclusion` and `runner_id` to be null:
+/// a job not yet ended has no conclusion, and a skipped or queued one no runner (`null`), as a
+/// job cancelled before any runner took it has none (`0`).
 pub const Job = struct {
     name: []const u8,
     status: []const u8,
     conclusion: ?[]const u8 = null,
-    /// The runner that took the job; zero for one GitHub never gave a runner.
-    runner_id: u64 = 0,
+    /// The runner that took the job; null or zero for one no runner took.
+    runner_id: ?u64 = null,
     steps: []const Step = &.{},
 
     pub const Step = struct { name: []const u8 = "" };
+
+    /// Passed: ended green, or skipped.
+    pub fn passed(job: Job) bool {
+        const conclusion = job.conclusion orelse return false;
+        return std.mem.eql(u8, conclusion, "success") or std.mem.eql(u8, conclusion, "skipped");
+    }
 
     /// Cancelled before any runner took it: GitHub found none (its annotation, "The job was not
     /// acquired by Runner of type hosted even after multiple attempts"), so the job never ran.
     pub fn unacquired(job: Job) bool {
         const conclusion = job.conclusion orelse return false;
-        return std.mem.eql(u8, conclusion, "cancelled") and job.runner_id == 0 and job.steps.len == 0;
+        return std.mem.eql(u8, conclusion, "cancelled") and (job.runner_id orelse 0) == 0 and job.steps.len == 0;
+    }
+
+    /// preflight's `runners` job, which fails a run where a job had no runner ("Every job had a
+    /// runner"): red only for what `unacquired` names.
+    pub fn runnersCheck(job: Job) bool {
+        return std.mem.eql(u8, job.name, "runners") or std.mem.endsWith(u8, job.name, "/ runners");
     }
 };
+
+/// Where a run stands for a release's hosted gate.
+pub const Verdict = enum {
+    /// Not completed yet: looked at again.
+    waiting,
+    green,
+    /// Failed only because GitHub gave jobs no runner (and preflight's `runners` job said so):
+    /// nothing failed that ran, so those jobs are run again.
+    unacquired,
+    /// Anything else completed: failed, cancelled by a person, timed out.
+    red,
+};
+
+/// The verdict on run `ran`, its jobs `job_list`. A run a person cancelled ends "cancelled", never
+/// "failure", so it is red, never run again.
+pub fn verdict(ran: Run, job_list: []const Job) Verdict {
+    if (!ran.completed()) return .waiting;
+    const conclusion = ran.conclusion orelse return .red;
+    if (std.mem.eql(u8, conclusion, "success")) return .green;
+    if (!std.mem.eql(u8, conclusion, "failure")) return .red;
+    var any = false;
+    for (job_list) |job| {
+        if (job.passed()) continue;
+        if (job.unacquired()) {
+            any = true;
+        } else if (job.runnersCheck() and job.conclusion != null and std.mem.eql(u8, job.conclusion.?, "failure")) {
+            continue;
+        } else return .red;
+    }
+    return if (any) .unacquired else .red;
+}
+
+/// A run as GitHub's `GET /repos/{owner}/{repo}/actions/runs/{id}` answers it.
+pub fn readRun(a: std.mem.Allocator, body: []const u8) !Run {
+    return std.json.parseFromSliceLeaky(Run, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+}
+
+/// The jobs as `GET /repos/{owner}/{repo}/actions/runs/{id}/jobs` answers them.
+pub fn readJobs(a: std.mem.Allocator, body: []const u8) ![]const Job {
+    const Listing = struct { jobs: []const Job = &.{} };
+    return (try std.json.parseFromSliceLeaky(Listing, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).jobs;
+}
+
+/// The runs as `GET /repos/{owner}/{repo}/actions/runs` answers them.
+pub fn readRuns(a: std.mem.Allocator, body: []const u8) ![]const Run {
+    const Listing = struct { workflow_runs: []const Run = &.{} };
+    return (try std.json.parseFromSliceLeaky(Listing, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).workflow_runs;
+}
 
 /// Starts `workflow` (its file name, `ci.yml`) on `ref` with `inputs` (a JSON object), as its
 /// `workflow_dispatch` takes them. GitHub answers no run: `newestRun` finds it.
@@ -223,13 +300,12 @@ pub fn newestRun(api: Api, repository: []const u8, branch: []const u8, head_sha:
     const url = try a.print("{s}/repos/{s}/actions/runs?branch={s}&event=workflow_dispatch&per_page=20", .{ api.base, repository, encoded.written() });
     const answer = try request(api, .GET, url, null, "application/json", problem);
     if (answer.status != .ok) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(answer.status), answer.body });
-    const Listing = struct { workflow_runs: []const Run = &.{} };
-    const listing = std.json.parseFromSliceLeaky(Listing, a, answer.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+    const listed = readRuns(a, answer.body) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return fail(a, problem, "{s} answered runs bay cannot read", .{url}),
+        else => return fail(a, problem, "{s} answered runs bay cannot read ({t})", .{ url, err }),
     };
     var newest: ?Run = null;
-    for (listing.workflow_runs) |one| {
+    for (listed) |one| {
         if (!std.mem.eql(u8, one.head_sha, head_sha)) continue;
         if (std.mem.order(u8, one.created_at, since) == .lt) continue;
         if (newest == null or one.id > newest.?.id) newest = one;
@@ -243,9 +319,9 @@ pub fn run(api: Api, repository: []const u8, id: u64, problem: *Problem) Error!R
     const url = try a.print("{s}/repos/{s}/actions/runs/{d}", .{ api.base, repository, id });
     const answer = try request(api, .GET, url, null, "application/json", problem);
     if (answer.status != .ok) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(answer.status), answer.body });
-    return std.json.parseFromSliceLeaky(Run, a, answer.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+    return readRun(a, answer.body) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        else => fail(a, problem, "{s} answered a run bay cannot read", .{url}),
+        else => fail(a, problem, "{s} answered a run bay cannot read ({t})", .{ url, err }),
     };
 }
 
@@ -255,12 +331,10 @@ pub fn jobs(api: Api, repository: []const u8, id: u64, problem: *Problem) Error!
     const url = try a.print("{s}/repos/{s}/actions/runs/{d}/jobs?per_page=100", .{ api.base, repository, id });
     const answer = try request(api, .GET, url, null, "application/json", problem);
     if (answer.status != .ok) return fail(a, problem, "{s} answered {d}: {s}", .{ url, @backingInt(answer.status), answer.body });
-    const Listing = struct { jobs: []const Job = &.{} };
-    const listing = std.json.parseFromSliceLeaky(Listing, a, answer.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| switch (err) {
+    return readJobs(a, answer.body) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return fail(a, problem, "{s} answered jobs bay cannot read", .{url}),
+        else => return fail(a, problem, "{s} answered jobs bay cannot read ({t})", .{ url, err }),
     };
-    return listing.jobs;
 }
 
 /// Runs again the jobs of run `id` that did not pass, and the jobs that need them; those that
