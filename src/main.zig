@@ -94,7 +94,7 @@ pub const Cli = struct {
             .{ .command = "bay add https://github.com/pedronaugusto/aegis", .help = "Pin a dependency at its newest release" },
             .{ .command = "bay test -Dtest-filter=parse", .help = "Run a step, with arguments for zig build" },
             .{ .command = "bay release --dry-run", .help = "The version the CHANGELOG's [Unreleased] section makes, and what releasing it does" },
-            .{ .command = "bay --workspace release", .help = "Release every member of a workspace that changed, in order, each pinned at the releases before it" },
+            .{ .command = "bay --workspace release", .help = "Release every member of a workspace that changed as one batch: version commits landed in order, each pinned at the version commits before it, then proved on GitHub and tagged" },
         },
     };
 };
@@ -153,10 +153,10 @@ const Release = struct {
     gate_bundle: ?[]const u8 = null,
     package: []const u8 = ".",
     pub const spec: ensign.Spec(@This()) = .{
-        .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed, gated here and on the machines in bay's machines.zon and, where its ci.yml runs a release tier, on GitHub at release/vX.Y.Z, then the default branch and its annotated tag pushed at once over SSH; on GitHub, its release published with the section as its notes and, where the build has a dist step, the programs it makes and their SHA256SUMS. GITHUB_TOKEN, else gh's login, authorizes GitHub",
+        .about = "Release the package: the version its CHANGELOG's [Unreleased] section makes, committed as its version commit. Where its ci.yml runs a full tier on GitHub, that commit is configured and built here (bay fetch, bay check) and landed on the default branch, and its full run, dispatched at that commit on release/vX.Y.Z, proves it before an annotated tag naming the run goes on it; otherwise it is gated here and on the machines in bay's machines.zon, then landed and tagged. Pushes go over SSH; on GitHub, its release is published with the section as its notes and, where the build has a dist step, the programs it makes and their SHA256SUMS. GITHUB_TOKEN, else gh's login, authorizes GitHub",
         .options = .{
-            .dry_run = .{ .help = "Print the version, the section as it will be written and the plan, and configure the release commit in a copy of the package; change nothing in it" },
-            .no_push = .{ .help = "Commit and gate, and push nothing: the gated commit is held here for a later bay release to push without gating it again" },
+            .dry_run = .{ .help = "Print the version, the section as it will be written and the plan, and configure the version commit in a copy of the package; change nothing in it" },
+            .no_push = .{ .help = "Commit and check (or gate), and push nothing: the commit is held here for a later bay release to land without checking it again" },
             .gate_bundle = .{ .hidden = true, .value_name = "DIRECTORY", .help = "A machine's side of a release: the commit on stdin, gated in a repository at DIRECTORY" },
             .package = .{ .hidden = true, .help = "With --gate-bundle, the package's directory in the repository" },
         },
@@ -433,8 +433,8 @@ fn releaseCommand(io: Io, a: std.mem.Allocator, environ: *std.process.Environ.Ma
     _ = environ.swapRemove("ZIG");
     if (args.gate_bundle) |directory| return machines.receive(io, a, environ, directory, args.package);
     if (cli.workspace) {
-        if (cli.jobs != null) try say.fail(io, "a train releases one member at a time: --jobs is for other commands", .{});
-        if (args.no_push) try say.fail(io, "a train pushes each release before the next member pins it: --no-push is for one package", .{});
+        if (cli.jobs != null) try say.fail(io, "a train lands one member at a time and paces its runs on GitHub to the account runners: --jobs is for other commands", .{});
+        if (args.no_push) try say.fail(io, "a train lands each version commit before the next member pins it: --no-push is for one package", .{});
         const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
         return release.train(.{ .io = io, .a = a, .environ = environ, .package = here }, .{ .dry_run = args.dry_run });
     }
@@ -1345,6 +1345,7 @@ test {
     _ = @import("dirs.zig");
     _ = @import("download.zig");
     _ = @import("lock.zig");
+    _ = @import("proof.zig");
     _ = each;
     _ = fetch;
     _ = git;
