@@ -1112,6 +1112,45 @@ test "a train builds each member on the pins it moved it to, and one that does n
     try std.testing.expectEqual(0, try w.gated(head));
 }
 
+test "a train run again builds only the release commits whose inputs changed since its plan built them, and forgets them once it releases everything" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // app ships core and does not build until it is fixed; core builds from the start.
+    try w.package("core", "0.1.0", "");
+    try w.package("app", "0.1.0", "");
+    try std.testing.expect(succeeded(try w.f.bay("app", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("core")}) })));
+    try w.f.write("app", "check.zig", "comptime {\n    @compileError(\"app is not fixed yet\");\n}\n");
+    try w.git("app", &.{ "add", "." });
+    try w.git("app", &.{ "commit", "--quiet", "-m", "Pin core" });
+    try w.git("app", &.{ "push", "--quiet", "origin", "main" });
+    for ([_][]const u8{ "core", "app" }) |dir| {
+        try w.change(dir, "### Fixed\n\n- A fix.\n");
+        try familyPolicy(&w, dir, "family");
+    }
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"core\", \"app\" } }\n");
+    const stopped = try w.f.bay(".", &.{ "--workspace", "release" });
+    try std.testing.expect(refused(stopped));
+    try std.testing.expect(contains(stopped.stderr, "app is not fixed yet"));
+    try std.testing.expect(contains(stopped.stderr, "the plan stops above: nothing moved"));
+    try std.testing.expectEqual(1, std.mem.count(u8, stopped.stderr, "builds (made in a copy"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("core", "refs/tags/v0.1.1"));
+    // app fixed: core's release commit, its inputs as they were, is not built again.
+    try w.f.write("app", "check.zig", "comptime {}\n");
+    try w.git("app", &.{ "add", "." });
+    try w.git("app", &.{ "commit", "--quiet", "-m", "Fix app" });
+    const train = try w.f.bay(".", &.{ "--workspace", "release" });
+    if (!succeeded(train)) {
+        std.debug.print("the train refused:\n{s}\n", .{train.stderr});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(1, std.mem.count(u8, train.stderr, "its release commit, at 0.1.1, built before at these inputs"));
+    try std.testing.expectEqual(1, std.mem.count(u8, train.stderr, "its release commit, at 0.1.1, builds (made in a copy"));
+    for ([_][]const u8{ "core", "app" }) |dir| try std.testing.expectEqualStrings(try w.head(dir), try w.remoteAt(dir, "refs/tags/v0.1.1"));
+    try std.testing.expectError(error.FileNotFound, w.f.tmp.dir.access(w.f.io, ".zig-cache/bay/train-proven", .{}));
+}
+
 /// GitHub's API as a test scripts it: a server on the loopback that answers each request in
 /// turn, one connection per request, and keeps what each asked. `stop` ends `serve`.
 const FakeGitHub = struct {

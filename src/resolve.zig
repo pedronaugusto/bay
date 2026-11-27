@@ -375,7 +375,7 @@ fn writeWorkingFork(input: Input, main: select.Revision, rewrites: []const manif
 /// A digest of the files `copyTree` copies from `root`: each one's path, kind and contents (a
 /// link's target), in path order, so the same tree digests the same whatever order its
 /// directory lists it in.
-fn treeDigest(io: Io, a: std.mem.Allocator, root: []const u8) !u64 {
+pub fn treeDigest(io: Io, a: std.mem.Allocator, root: []const u8) !u64 {
     var dir = try Io.Dir.cwd().openDir(io, root, .{ .iterate = true });
     defer dir.close(io);
     var walker = try dir.walk(a);
@@ -412,7 +412,7 @@ fn treeDigest(io: Io, a: std.mem.Allocator, root: []const u8) !u64 {
 }
 
 /// The contents of the file at `path` in `dir`, read a buffer at a time into `digest`.
-fn digestFile(io: Io, dir: Io.Dir, path: []const u8, digest: *std.hash.Wyhash) !void {
+pub fn digestFile(io: Io, dir: Io.Dir, path: []const u8, digest: *std.hash.Wyhash) !void {
     const file = try dir.openFile(io, path, .{});
     defer file.close(io);
     var buffer: [64 * 1024]u8 = undefined;

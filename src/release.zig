@@ -1521,7 +1521,7 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, hosted: ?Hosted, gate_machines: 
         try cut.section.write(&out.writer);
         try say.out(c.io, "{s}\n", .{out.written()});
         try say.out(c.io, "commit Release {s} on {s}\n", .{ plan.tag, up.branch });
-        releaseCopy(c, cut.manifest, cut.text, plan.version) catch |err| switch (err) {
+        releaseCopy(c, cut.manifest, cut.text, plan.version, null) catch |err| switch (err) {
             error.Reported => try say.fail(c.io, "the version commit, at {f}, does not build here, so it would not land: fix what it says above", .{plan.version}),
             else => return err,
         };
@@ -1663,6 +1663,8 @@ pub fn train(c: Context, options: Options) !u8 {
             .failed, .skipped, .red, .unproved, .waiting => failed = true,
         }
     }
+    // Every member released: the plan's builds are not needed again.
+    if (!failed) try Io.Dir.cwd().deleteTree(c.io, try provenDirectory(c));
     return if (failed) 1 else 0;
 }
 
@@ -1965,8 +1967,11 @@ pub fn checkout(c: Context, name: []const u8) !struct { top: []const u8, package
 /// manifest's version against a file of its own, a member that does not compile against the
 /// releases the batch makes) is refused before any commit.
 /// The copy (`checkout`) is a clone of the package, so a workspace holds it as it holds the package. It
-/// goes once it builds; one a failure leaves is replaced by the next one's.
-fn releaseCopy(c: Context, manifest_text: [:0]const u8, log: []const u8, version: std.SemanticVersion) !void {
+/// goes once it builds; one a failure leaves is replaced by the next one's. It builds in the
+/// package's own cache (`ZIG_LOCAL_CACHE_DIR`, which bay run in it passes on), so it compiles
+/// only what the package's builds have not, and the landing after it finds what it built.
+/// With `proven`, a train's plan: a copy whose inputs built before is not built again.
+fn releaseCopy(c: Context, manifest_text: [:0]const u8, log: []const u8, version: std.SemanticVersion, proven: ?Proven) !void {
     var problem: changelog.Problem = undefined;
     const cut_log = changelog.cut(c.a, log, version, try today(c.a, c.io), &problem) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1977,10 +1982,22 @@ fn releaseCopy(c: Context, manifest_text: [:0]const u8, log: []const u8, version
     defer dir.close(c.io);
     try dir.writeFile(c.io, .{ .sub_path = "CHANGELOG.md", .data = cut_log });
     try dir.writeFile(c.io, .{ .sub_path = "build.zig.zon", .data = try manifest.setVersion(c.a, manifest_text, version) });
-    var there = c;
-    there.package = copy.package;
+    const environ = try c.a.create(std.process.Environ.Map);
+    environ.* = try c.environ.clone(c.a);
+    if (c.environ.get("ZIG_LOCAL_CACHE_DIR") == null) {
+        const here = try Io.Dir.cwd().realPathFileAlloc(c.io, c.package, c.a);
+        try environ.put("ZIG_LOCAL_CACHE_DIR", try std.fs.path.join(c.a, &.{ here, ".zig-cache" }));
+    }
+    const there: Context = .{ .io = c.io, .a = c.a, .environ = environ, .package = copy.package };
     try bayIn(there, &.{"tidy"});
+    const inputs = if (proven) |p| try p.inputs(there) else null;
+    if (inputs) |name| if (try proven.?.holds(c, name)) {
+        try Io.Dir.cwd().deleteTree(c.io, copy.top);
+        try say.note(c.io, "its release commit, at {f}, built before at these inputs (its tree, the trees of the members it builds with, its Zig and this bay), so it is not built again", .{version});
+        return;
+    };
     if (!try checkBuild(there)) return error.Reported;
+    if (inputs) |name| try proven.?.keep(c, name);
     try Io.Dir.cwd().deleteTree(c.io, copy.top);
     try say.note(c.io, "its release commit, at {f}, builds (made in a copy: bay fetch, bay check)", .{version});
 }
@@ -1988,15 +2005,92 @@ fn releaseCopy(c: Context, manifest_text: [:0]const u8, log: []const u8, version
 /// A car's release commit, made in a copy at the version it would tag, the re-pins of what it
 /// ships named in its section as the run names them, and configured (`releaseCopy`): a member
 /// that does not build at that version stops the plan, and the train before anything moves.
-fn carCopy(c: Context, name: []const u8, manifest_text: [:0]const u8, log: []const u8, shipped: []const []const u8, version: std.SemanticVersion) !void {
+fn carCopy(c: Context, name: []const u8, manifest_text: [:0]const u8, log: []const u8, shipped: []const []const u8, version: std.SemanticVersion, proven: Proven) !void {
     const named = if (shipped.len == 0) log else changelog.addEntry(c.a, log, .changed, try c.a.print("- Pins {s}.", .{try listed(c.a, shipped)})) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => try say.fail(c.io, "{s}: CHANGELOG.md has no `## [Unreleased]` section to name the re-pins in", .{name}),
     };
-    releaseCopy(c, manifest_text, named, version) catch |err| switch (err) {
+    releaseCopy(c, manifest_text, named, version, proven) catch |err| switch (err) {
         error.Reported => try say.fail(c.io, "{s}: its release commit, at {f}, does not build here, so the train would stop at it: fix what it says above", .{ name, version }),
         else => return err,
     };
+}
+
+/// The release commits a train's plan has built, each kept by its inputs: the copy's tree,
+/// the trees of the workspace members its build reaches (built from those trees at the
+/// member's pins), the members the train builds at their pins, its Zig and this bay. A plan
+/// run again, as a train restarted once a member is fixed runs it, builds only the copies
+/// whose inputs changed. Kept in the workspace's bay cache until a train releases everything.
+const Proven = struct {
+    /// Where the inputs built are kept, an empty file named by each.
+    directory: []const u8,
+    /// The directories of the workspace members the copy's build reaches.
+    reaches: []const []const u8,
+
+    /// The copy at `c.package`'s inputs, as a name.
+    fn inputs(p: Proven, c: Context) ![]const u8 {
+        var digest = std.hash.Wyhash.init(0);
+        for ([_][]const []const u8{ &.{c.package}, p.reaches }) |directories| for (directories) |directory| {
+            digest.update(directory);
+            digest.update(std.mem.asBytes(&try resolve.treeDigest(c.io, c.a, directory)));
+        };
+        digest.update(c.environ.get(workspace.pinned_variable) orelse "");
+        digest.update(try toolchain.forPackage(c.io, c.a, c.environ, c.package));
+        try resolve.digestFile(c.io, Io.Dir.cwd(), c.environ.get("BAY").?, &digest); // safe: main sets BAY before any command
+        return c.a.print("{x:0>16}", .{digest.final()});
+    }
+
+    fn holds(p: Proven, c: Context, inputs_name: []const u8) !bool {
+        Io.Dir.cwd().access(c.io, try std.fs.path.join(c.a, &.{ p.directory, inputs_name }), .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => |e| return e,
+        };
+        return true;
+    }
+
+    fn keep(p: Proven, c: Context, inputs_name: []const u8) !void {
+        try Io.Dir.cwd().createDirPath(c.io, p.directory);
+        try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = try std.fs.path.join(c.a, &.{ p.directory, inputs_name }), .data = "" });
+    }
+};
+
+/// Where a train's plan keeps the inputs of the release commits it built (`Proven`): under
+/// the workspace's bay cache.
+fn provenDirectory(c: Context) ![]const u8 {
+    const file = (try workspace.fileOf(c.io, c.a, c.package)).?; // safe: a train found its workspace before it plans
+    return std.fs.path.join(c.a, &.{ std.fs.path.dirname(file) orelse ".", ".zig-cache", "bay", "train-proven" });
+}
+
+/// The directories of the workspace members each car's build reaches: those its manifest
+/// names, shipped or developed with, and theirs, a ring's edges among them, in train order.
+fn reached(c: Context, cars: []const each.Car) ![]const []const []const u8 {
+    const named = try c.a.alloc([]const usize, cars.len);
+    for (cars, named) |car, *direct| {
+        var member = c;
+        member.package = car.directory;
+        const parsed = try manifest.parse(c.a, try read(member, "build.zig.zon") orelse try say.fail(c.io, "no build.zig.zon in {s}", .{car.directory}));
+        var list: std.ArrayList(usize) = .empty;
+        for ([_][]const manifest.Dependency{ parsed.normal, parsed.dev }) |dependencies| for (dependencies) |dependency| {
+            for (cars, 0..) |other, index| if (std.mem.eql(u8, other.name, dependency.name)) try list.append(c.a, index);
+        };
+        direct.* = list.items;
+    }
+    const result = try c.a.alloc([]const []const u8, cars.len);
+    for (result, 0..) |*directories, start| {
+        const seen = try c.a.alloc(bool, cars.len);
+        @memset(seen, false);
+        var waiting: std.ArrayList(usize) = .empty;
+        try waiting.appendSlice(c.a, named[start]);
+        while (waiting.pop()) |index| {
+            if (seen[index]) continue;
+            seen[index] = true;
+            try waiting.appendSlice(c.a, named[index]);
+        }
+        var list: std.ArrayList([]const u8) = .empty;
+        for (cars, seen, 0..) |car, is_seen, index| if (is_seen and index != start) try list.append(c.a, car.directory);
+        directories.* = list.items;
+    }
+    return result;
 }
 
 /// What a train would do, member by member, changing nothing: each member pinned at the
@@ -2014,6 +2108,9 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
     try gated.writer.writeAll("here");
     for (try machines.load(c.io, c.a, c.environ)) |machine| try gated.writer.print(", on {s}", .{machine.name});
     const developed_with = try c.a.alloc([]const manifest.Dependency, cars.len);
+    // The release commits built before at the same inputs, which are not built again.
+    const kept = try provenDirectory(c);
+    const reaches = try reached(c, cars);
     for (cars, versions, developed_with, 1..) |car, *version, *dev, number| {
         // In its turn, the members the plan releases before it are at their tags, their trees;
         // the rest build at its pins (`pinnedFor`), as the run builds them.
@@ -2085,7 +2182,7 @@ fn trainPlan(c: Context, cars: []const each.Car) !u8 {
                 else => return err,
             };
         }
-        if (version.*) |v| try carCopy(planned, car.name, after_text, log, shipped.items, v);
+        if (version.*) |v| try carCopy(planned, car.name, after_text, log, shipped.items, v, .{ .directory = kept, .reaches = reaches[number - 1] });
         if (version.*) |v| {
             const proved = if (try hostedOf(member, up)) |h|
                 try c.a.print("its full run on GitHub ({s} tier, {d} jobs at most at once, {d} on macOS) proves that head, and its tag goes on it once green", .{ h.tier, h.demand.jobs, h.demand.macos })

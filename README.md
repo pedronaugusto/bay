@@ -391,7 +391,11 @@ gates at once with this one, its lines named; the tag waits for all of them.
 is the family's, `"policy": "family"` in its `ci/preflight.json`, and each is on its
 remote's default branch, clean and not behind it, or nothing moves; then the family is built
 once in the workspace at the commits it releases: the dry run's plan, each member's release
-commit made in a copy, pinned as the train pins it, and built (`bay fetch`, `bay check`). Then, in dependency order, one member at a time, each
+commit made in a copy, pinned as the train pins it, and built (`bay fetch`, `bay check`) in
+the member's own Zig cache. A copy built before at the same inputs (its tree, the trees of
+the members it builds with, its Zig and bay) is not built again, so a train run again once a
+member is fixed builds only what changed; what was built is forgotten once a train releases
+every member. Then, in dependency order, one member at a time, each
 is pinned at the version commits of the batch members it depends on, as their tags will
 pin them: `?ref=vX.Y.Z#<commit>`, which Zig fetches by its commit before the tag exists.
 Its re-pinned dependencies are named in its CHANGELOG (`- Pins a 0.3.1.` under `### Changed`),
