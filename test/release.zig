@@ -763,10 +763,17 @@ test "a workspace's train releases its members in order, each pinned at the rele
     }
     try familyPolicy(&w, "a", "family");
     try w.change("a", "### Fixed\n\n- A fix.\n");
-    // The plan, changing nothing: each release, the pins that make it, the closing pass.
     const heads = [_][]const u8{ try w.head("a"), try w.head("b"), try w.head("c") };
-    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
-    try std.testing.expect(succeeded(plan));
+    // One member released alone would gate with the others' trees in place of its pins.
+    const alone = try w.releaseIn("a", &.{});
+    try std.testing.expect(refused(alone));
+    try std.testing.expect(contains(alone.stderr, "bay.work holds this package with c and b: their trees would stand in for the pins"));
+    try std.testing.expectEqualStrings(heads[0], try w.head("a"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("a", "refs/tags/v0.1.1"));
+    // The train's first step is its plan: each release, the pins that make it, the closing pass.
+    const train = try w.f.bay(".", &.{ "--workspace", "release" });
+    try std.testing.expect(succeeded(train));
+    const plan = train;
     for ([_][]const u8{
         "1. a 0.1.0 -> 0.1.1 (fix): its [Unreleased] section\n",
         "2. b 0.1.0 -> 0.1.1 (fix): pins a 0.1.1\n",
@@ -781,18 +788,6 @@ test "a workspace's train releases its members in order, each pinned at the rele
     // Each member's tidy, run as the train runs it, runs the generate step that would follow,
     // and a's again for its closing re-pin.
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, plan.stderr, "then the package build's `generate` step would run, and runs clean with those pins"));
-    for ([_][]const u8{ "a", "b", "c" }, heads) |dir, head| {
-        try std.testing.expectEqualStrings(head, try w.head(dir));
-        try std.testing.expectEqualStrings("", try w.out(dir, &.{ "status", "--porcelain" }));
-    }
-    // One member released alone would gate with the others' trees in place of its pins.
-    const alone = try w.releaseIn("a", &.{});
-    try std.testing.expect(refused(alone));
-    try std.testing.expect(contains(alone.stderr, "bay.work holds this package with c and b: their trees would stand in for the pins"));
-    try std.testing.expectEqualStrings(heads[0], try w.head("a"));
-    try std.testing.expectEqualStrings("", try w.remoteAt("a", "refs/tags/v0.1.1"));
-    const train = try w.f.bay(".", &.{ "--workspace", "release" });
-    try std.testing.expect(succeeded(train));
     // In order: a, then b pinning it, then c pinning b; each released and pushed with its tag.
     const said = train.stderr;
     try std.testing.expect(std.mem.find(u8, said, "released a v0.1.1").? < std.mem.find(u8, said, "released b v0.1.1").?);
@@ -871,13 +866,12 @@ test "a train's plan is what its run tags: a first release the manifest's versio
     try w.change("old", "### Added\n\n- More.\n");
     for ([_][]const u8{ "new", "old" }) |dir| try familyPolicy(&w, dir, "family");
     try w.f.write(".", "bay.work", ".{ .members = .{ \"new\", \"old\" } }\n");
-    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    const plan = try w.f.bay(".", &.{ "--workspace", "release" });
     try std.testing.expect(succeeded(plan));
     for ([_][]const u8{ "new 0.1.0 -> 0.1.0 (feature, its first release): its [Unreleased] section\n", "old 0.1.0 -> 0.1.1 (feature): its [Unreleased] section\n" }) |line| if (!contains(plan.stdout, line)) {
         std.debug.print("expected the line:\n{s}in the plan:\n{s}\n", .{ line, plan.stdout });
         return error.TestUnexpectedResult;
     };
-    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
     // What the plan said is what the run tagged, and no other version.
     try std.testing.expectEqualStrings(try w.head("new"), try w.remoteAt("new", "refs/tags/v0.1.0"));
     try std.testing.expectEqualStrings("", try w.remoteAt("new", "refs/tags/v0.1.1"));
@@ -914,7 +908,6 @@ test "a train's plan refuses the pins its run refuses: a package no member, pinn
     try std.testing.expect(succeeded(try w.f.bay("user", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("ext")}) })));
     try w.git("user", &.{ "add", "." });
     try w.git("user", &.{ "commit", "--quiet", "-m", "Pin ext at its release" });
-    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" })));
     try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
     try std.testing.expectEqualStrings(try w.head("user"), try w.remoteAt("user", "refs/tags/v0.1.1"));
 }
@@ -966,7 +959,6 @@ test "a release's graph holds each package at a version under one hash, in the p
     try std.testing.expect(succeeded(try w.f.bay("top", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("dep")}) })));
     try w.git("top", &.{ "add", "." });
     try w.git("top", &.{ "commit", "--quiet", "-m", "Pin dep where mid does" });
-    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" })));
     try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
     try std.testing.expectEqualStrings(try w.head("top"), try w.remoteAt("top", "refs/tags/v0.1.1"));
 }
@@ -998,13 +990,12 @@ test "a train's plan moves a member it releases in every tree it reaches, as the
     try w.f.write(".", "bay.work", ".{ .members = .{ \"x\", \"y\", \"u\", \"z\" } }\n");
     // The train releases x first and pins y and u at it: z's graph holds x once, in the plan
     // as in the run.
-    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    const plan = try w.f.bay(".", &.{ "--workspace", "release" });
     if (!succeeded(plan)) {
-        std.debug.print("the plan refused what the run releases:\n{s}\n", .{plan.stderr});
+        std.debug.print("the train refused at its plan:\n{s}\n", .{plan.stderr});
         return error.TestUnexpectedResult;
     }
     try std.testing.expect(contains(plan.stdout, "z 0.1.0 -> 0.1.1 (fix): its [Unreleased] section, and pins "));
-    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
     for ([_][]const u8{ "x", "y", "u", "z" }) |dir| try std.testing.expectEqualStrings(try w.head(dir), try w.remoteAt(dir, "refs/tags/v0.1.1"));
 }
 
@@ -1043,13 +1034,12 @@ test "a train's plan pins a member with nothing to release at its release, in ev
     try w.f.write(".", "bay.work", ".{ .members = .{ \"l\", \"a\", \"b\", \"z\" } }\n");
     // The train pins a and b at l 0.1.0 before z: z's graph holds l once, in the plan as in
     // the run.
-    const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
+    const plan = try w.f.bay(".", &.{ "--workspace", "release" });
     if (!succeeded(plan)) {
-        std.debug.print("the plan refused what the run releases:\n{s}\n", .{plan.stderr});
+        std.debug.print("the train refused at its plan:\n{s}\n", .{plan.stderr});
         return error.TestUnexpectedResult;
     }
     try std.testing.expect(contains(plan.stdout, "1. l 0.1.0: nothing to release\n"));
-    try std.testing.expect(succeeded(try w.f.bay(".", &.{ "--workspace", "release" })));
     for ([_][]const u8{ "a", "b", "z" }) |dir| try std.testing.expectEqualStrings(try w.head(dir), try w.remoteAt(dir, "refs/tags/v0.1.1"));
 }
 
