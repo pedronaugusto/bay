@@ -13,6 +13,11 @@
 //! next run starts as the last ones' tails leave room; a run dispatched and not yet shown, or
 //! between its phases with no job listed, holds its plan. A run whose plan alone is past the
 //! budget starts when the batch holds no runner.
+//!
+//! The account's runners are shared with every other run of the account, and with GitHub's own
+//! pace, which the batch does not see. It reads them from its own runs instead: a run going
+//! that has a job queued at two looks in a row waits for a runner the account does not have,
+//! whoever holds them, and nothing more is dispatched until its jobs start.
 const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
@@ -57,6 +62,62 @@ fn heldBy(job_list: []const github.Job) ?Demand {
         if (job.onMacos()) held.macos += 1;
     };
     return if (held.jobs == 0) null else held;
+}
+
+/// One look at a run going, as its jobs stand: what it holds, and how many looks in a row a
+/// job of it has been queued.
+fn look(running: *Running, job_list: []const github.Job) void {
+    running.holds = heldBy(job_list);
+    const queued = for (job_list) |job| {
+        if (std.mem.eql(u8, job.status, "queued")) break true;
+    } else false;
+    running.queued_looks = if (queued) running.queued_looks + 1 else 0;
+}
+
+/// The head to dispatch now, if any: none while a run going has had a job queued past one look
+/// (the account is full, whoever fills it); else the first one pending whose plan fits beside
+/// what the runs going hold.
+fn next(states: []const State, heads: []const Head, budget: Budget) ?usize {
+    var busy: Demand = .{};
+    for (states, heads) |state, head| {
+        const holds = switch (state) {
+            .looking => head.demand.within(budget),
+            .running => |running| holds: {
+                if (running.queued_looks > 1) return null;
+                break :holds running.holds orelse head.demand.within(budget);
+            },
+            .pending, .done => continue,
+        };
+        busy.jobs += holds.jobs;
+        busy.macos += holds.macos;
+    }
+    for (states, heads, 0..) |state, head, index| if (state == .pending and head.demand.fits(busy, budget)) return index;
+    return null;
+}
+
+test "a run going with a job queued past one look holds back the batch's dispatches, whoever fills the account" {
+    const head: Head = .{ .name = "a", .repository = "o/a", .ref = "release/v0.1.1", .sha = "0000000000000000000000000000000000000000", .tier = "release", .demand = .{ .jobs = 3, .macos = 1 } };
+    const heads = [_]Head{ head, head };
+    var running: Running = .{ .id = 1, .attempt = 1 };
+    const waiting = [_]github.Job{
+        .{ .name = "linux", .status = "in_progress", .labels = &.{"ubuntu-latest"} },
+        .{ .name = "macos", .status = "queued", .labels = &.{"macos-latest"} },
+    };
+    const started = [_]github.Job{
+        .{ .name = "linux", .status = "in_progress", .labels = &.{"ubuntu-latest"} },
+        .{ .name = "macos", .status = "in_progress", .labels = &.{"macos-latest"} },
+    };
+    // Queued at one look: a job GitHub has not started yet, which says nothing of the account.
+    look(&running, &waiting);
+    try std.testing.expectEqual(1, next(&.{ .{ .running = running }, .pending }, &heads, account).?);
+    // Queued at the next look too: the account has no runner for it, and nothing is dispatched.
+    look(&running, &waiting);
+    try std.testing.expect(next(&.{ .{ .running = running }, .pending }, &heads, account) == null);
+    // Its jobs started: room again.
+    look(&running, &started);
+    try std.testing.expectEqual(1, next(&.{ .{ .running = running }, .pending }, &heads, account).?);
+    // Room by the plan matters still: a plan past what is left waits.
+    try std.testing.expect(next(&.{ .{ .running = running }, .pending }, &.{ head, .{ .name = "b", .repository = "o/b", .ref = "release/v0.2.0", .sha = "1111111111111111111111111111111111111111", .tier = "release", .demand = .{ .jobs = 19 } } }, account) == null);
 }
 
 test "a run going holds its jobs queued or in progress, and the next starts once they leave room" {
@@ -230,6 +291,8 @@ const Running = struct {
     said: std.StringHashMapUnmanaged(void) = .empty,
     /// What it held at the last look (`heldBy`); null before any, or with none listed.
     holds: ?Demand = null,
+    /// How many looks in a row a job of it was queued (`look`).
+    queued_looks: u32 = 0,
 };
 
 const State = union(enum) {
@@ -255,22 +318,11 @@ pub fn prove(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, he
     }
     var stopped = false;
     while (true) {
-        // What the runs going hold: their jobs queued or in progress at the last look, or their
-        // plan where none was listed.
-        var busy: Demand = .{};
-        for (states, heads) |state, head| {
-            const holds = switch (state) {
-                .looking => head.demand.within(budget),
-                .running => |running| running.holds orelse head.demand.within(budget),
-                .pending, .done => continue,
-            };
-            busy.jobs += holds.jobs;
-            busy.macos += holds.macos;
-        }
-        if (!stopped) for (states, outcomes, heads) |*state, *outcome, head| {
-            if (state.* != .pending) continue;
-            if (!head.demand.fits(busy, budget)) continue;
-            const takes = head.demand.within(budget);
+        // Dispatched while the runs going leave room (`next`), each taking its plan until it shows.
+        if (!stopped) while (next(states, heads, budget)) |index| {
+            const head = heads[index];
+            const state = &states[index];
+            const outcome = &outcomes[index];
             const since = try dispatchedSince(io, a);
             var problem: github.Problem = .{};
             const inputs = try a.print("{{\"tier\":\"{s}\"}}", .{head.tier});
@@ -284,8 +336,6 @@ pub fn prove(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, he
             };
             try say.note(io, "{s}: its full run ({s} tier, {d} jobs, {d} on macOS) dispatched at {s}", .{ head.name, head.tier, head.demand.jobs, head.demand.macos, head.sha[0..12] });
             state.* = .{ .looking = .{ .since = since } };
-            busy.jobs += takes.jobs;
-            busy.macos += takes.macos;
         };
         var open = false;
         for (states, outcomes, heads) |*state, *outcome, head| {
@@ -338,7 +388,7 @@ fn step(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, head: H
     const now = github.run(api, head.repository, running.id, &problem) catch |err| return missed(io, a, head, state, outcome, err, problem);
     const job_list = github.jobs(api, head.repository, running.id, &problem) catch |err| return missed(io, a, head, state, outcome, err, problem);
     running.misses = 0;
-    running.holds = heldBy(job_list);
+    look(running, job_list);
     if (now.run_attempt < running.attempt) return;
     for (job_list) |job| if (job.conclusion) |conclusion| if (!running.said.contains(job.name)) {
         try running.said.put(a, job.name, {});

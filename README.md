@@ -409,7 +409,9 @@ runners allow: GitHub Free runs 20 jobs at once, 5 of them on macOS, and a job q
 long is cancelled unrun, so a run is dispatched only while the jobs its plan holds (read
 from the matrices in its `ci.yml`) fit beside the jobs the runs going still have queued or in
 progress, read from GitHub at each look, so one run's tail overlaps the next one's start;
-one whose plan alone is larger starts once the batch holds no runner. A red run stops the dispatches still to go. Then each
+one whose plan alone is larger starts once the batch holds no runner. A job of the batch's
+own runs queued at two looks in a row means the account has no runner for it, whatever holds
+them (other repositories' runs among them), and nothing more is dispatched until it starts. A red run stops the dispatches still to go. Then each
 proved head is tagged in order, once every batch member it pins is tagged, so the tag's pins
 name tags that exist at exactly those commits; a member pinning one whose run was red waits,
 proved and untagged, for the next train. A development pin that would close a ring (a tool

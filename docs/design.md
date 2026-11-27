@@ -128,7 +128,8 @@ else reads them, and `bay audit releases` checks that it was so.
   past its runner's wait is cancelled unrun): a run is dispatched only while the jobs its plan holds, read from the
   matrices `ci.yml` carries, fit beside the jobs the runs going still have queued or in progress, read from GitHub
   at each look (a run not yet shown, or with no job listed, holds its plan); one whose plan alone is larger starts
-  when the batch holds no runner. One batch at a time on the machine: the
+  when the batch holds no runner; and a job of the batch's own runs queued at two looks in a row holds back every
+  dispatch until it starts, as the account's runners are shared with what the batch does not see. One batch at a time on the machine: the
   `release_queue` lock, waited on. A login is asked for before anything is made.
 - **The tag goes on the proved head.** Green: an annotated tag on that very commit, its message the version and a
   `Proved-by:` line with the run's page, pushed atomically with the branch (already there) and read back with
