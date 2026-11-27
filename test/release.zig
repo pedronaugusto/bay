@@ -265,7 +265,8 @@ test "a release cuts the section, gates that commit, and pushes the branch and i
     const released = try w.releaseIn("lib", &.{});
     try std.testing.expect(succeeded(released));
     const commit = try w.head("lib");
-    try std.testing.expect(contains(released.stderr, try w.f.a.print("released lib v0.1.1 at {s}: origin/main and the tag v0.1.1 on origin", .{commit[0..12]})));
+    try std.testing.expect(contains(released.stderr, try w.f.a.print("v0.1.1's version commit {s} landed on origin/main", .{commit[0..12]})));
+    try std.testing.expect(contains(released.stderr, try w.f.a.print("released lib v0.1.1 at {s}: the tag v0.1.1 on origin", .{commit[0..12]})));
     try std.testing.expect(!std.mem.eql(u8, before, commit));
     try std.testing.expectEqualStrings(before, try w.out("lib", &.{ "rev-parse", "HEAD^" }));
     try std.testing.expectEqualStrings("Release v0.1.1", try w.out("lib", &.{ "log", "-1", "--format=%s" }));
@@ -314,7 +315,7 @@ test "a release goes only to the remote's default branch, which a branch with no
     try w.git("lib", &.{ "branch", "--unset-upstream" });
     const dry = try w.releaseIn("lib", &.{"--dry-run"});
     try std.testing.expect(succeeded(dry));
-    try std.testing.expect(contains(dry.stdout, "push it to origin/main and the tag v0.1.1 on origin"));
+    try std.testing.expect(contains(dry.stdout, "land it on origin/main"));
     try std.testing.expect(contains(dry.stdout, "which becomes the branch's upstream"));
     // The dry run set nothing.
     try std.testing.expect(!succeeded(try w.f.run("lib", &.{ "git", "config", "--get", "branch.main.remote" })));
@@ -354,7 +355,7 @@ test "the version is the section's largest change, and a dry run changes nothing
         try std.testing.expect(succeeded(dry));
         try std.testing.expect(contains(dry.stdout, case.version));
         try std.testing.expect(contains(dry.stdout, "gate it here"));
-        try std.testing.expect(contains(dry.stdout, "push it to origin/main and the tag v"));
+        try std.testing.expect(contains(dry.stdout, "push the tag v"));
         // Nothing moved: the commit, the tree, the tags, the remote.
         try std.testing.expectEqualStrings(start, try w.head(case.dir));
         try std.testing.expectEqualStrings("", try w.out(case.dir, &.{ "status", "--porcelain" }));
@@ -587,7 +588,7 @@ test "a release stopped after its commit or its push is finished, and never tags
     try w.f.tmp.dir.deleteFile(w.f.io, hook);
     const pushed = try w.releaseIn("lib", &.{});
     try std.testing.expect(succeeded(pushed));
-    try std.testing.expect(contains(pushed.stderr, "was gated green; pushing it"));
+    try std.testing.expect(contains(pushed.stderr, "was gated green here; landing it"));
     try std.testing.expectEqual(1, try w.gated(second));
     try std.testing.expectEqualStrings(second, try w.remoteAt("lib", "refs/tags/v0.1.2"));
     // Held with --no-push: gated, recorded, nothing on the remote; the next run pushes it ungated.
@@ -608,24 +609,32 @@ test "a release stopped after its commit or its push is finished, and never tags
     try std.testing.expect(contains(confirmed.stderr, "v0.1.3 is on origin at"));
     try std.testing.expectEqualStrings(third, try w.out("lib", &.{ "rev-parse", "v0.1.3^{commit}" }));
     try std.testing.expectEqualStrings("tag", try w.out("lib", &.{ "cat-file", "-t", "v0.1.3" }));
-    // A stopped release under later commits is refused, naming it; so is a tag made here and never pushed.
+    // A stopped release under a later commit whose entry is under [Unreleased] is refused,
+    // naming it; with the entry in the release's own section, the later head is released.
     try w.change("lib", "### Fixed\n\n- A third fix.\n");
     try refusePushes(&w, hook);
     try std.testing.expect(refused(try w.releaseIn("lib", &.{})));
     try w.f.tmp.dir.deleteFile(w.f.io, hook);
-    try w.f.write("lib", "later.txt", "x");
-    try w.git("lib", &.{ "add", "." });
-    try w.git("lib", &.{ "commit", "--quiet", "-m", "Later" });
+    try w.change("lib", "### Fixed\n\n- Later.\n");
     const buried = try w.releaseIn("lib", &.{});
     try std.testing.expect(refused(buried));
-    try std.testing.expect(contains(buried.stderr, "CHANGELOG.md releases 0.1.4, and no tag names it"));
-    try w.git("lib", &.{ "reset", "--quiet", "--hard", "v0.1.3" });
+    try std.testing.expect(contains(buried.stderr, "CHANGELOG.md releases 0.1.4, which no tag names yet, and its [Unreleased] section lists entries"));
+    try w.git("lib", &.{ "reset", "--quiet", "--hard", "HEAD~1" });
+    const log = try w.read("lib", "CHANGELOG.md");
+    try w.f.write("lib", "CHANGELOG.md", try std.mem.replaceOwned(u8, w.f.a, log, "- A third fix.\n", "- A third fix.\n- Later.\n"));
+    try w.git("lib", &.{ "commit", "--quiet", "-am", "Later" });
+    const later = try w.head("lib");
+    const taken = try w.releaseIn("lib", &.{});
+    try std.testing.expect(succeeded(taken));
+    try std.testing.expect(contains(taken.stderr, "v0.1.4 is under way"));
+    try std.testing.expectEqualStrings(later, try w.remoteAt("lib", "refs/tags/v0.1.4"));
+    // A tag made here and never pushed is refused.
     try w.change("lib", "### Fixed\n\n- A fourth fix.\n");
-    try w.git("lib", &.{ "tag", "v0.1.4" });
+    try w.git("lib", &.{ "tag", "v0.1.5" });
     const local = try w.releaseIn("lib", &.{});
     try std.testing.expect(refused(local));
     try std.testing.expect(contains(local.stderr, "is tagged here already"));
-    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.4"));
+    try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.5"));
 }
 
 /// `policy` as the package's policy in its ci/preflight.json, committed and pushed.
@@ -762,9 +771,9 @@ test "a workspace's train releases its members in order, each pinned at the rele
         "1. a 0.1.0 -> 0.1.1 (fix): its [Unreleased] section\n",
         "2. b 0.1.0 -> 0.1.1 (fix): pins a 0.1.1\n",
         "3. c 0.1.0 -> 0.1.1 (fix): pins b 0.1.1\n",
-        "then a develops with c 0.1.1, gated and pushed with no tag\n",
+        "then a develops with c 0.1.1, checked here and pushed with no tag\n",
         // Each car's steps, after its tidy run as a dry run.
-        "   then: the re-pin committed and built here (bay dev check), if a pin moves; v0.1.1 written from its section and committed; gated here; the branch and the tag pushed\n",
+        "   then: pinned at the version commits of the batch members it depends on; v0.1.1 written from its section and committed; configured and built here (bay fetch, bay check) and landed on origin/main; gated here before it lands, and tagged, after the batch members it pins are tagged\n",
     }) |line| if (!contains(plan.stdout, line)) {
         std.debug.print("expected the line:\n{s}in the plan:\n{s}\n", .{ line, plan.stdout });
         return error.TestUnexpectedResult;
@@ -1066,9 +1075,11 @@ test "a train builds each member on the pins it moved it to, and one that does n
     const remote_main = try w.remoteAt("y", "refs/heads/main");
     const train = try w.f.bay(".", &.{ "--workspace", "release" });
     try std.testing.expect(refused(train));
-    try std.testing.expect(contains(train.stderr, "y: does not build on the pins the train moved it to (bay dev check)"));
+    try std.testing.expect(contains(train.stderr, "does not build here (bay fetch, bay check): nothing was landed or tagged"));
+    try std.testing.expect(contains(train.stderr, try w.f.a.print("y: nothing of it landed, and it is back at {s}", .{head[0..12]})));
     try std.testing.expect(contains(train.stderr, "x 0.1.1 changed what y calls"));
-    // x went out; y is as it was, here and on its remote, and was never gated.
+    // x went out; y is as it was, here and on its remote, and was never gated: it failed
+    // its build here, before it could land.
     try std.testing.expectEqualStrings(try w.head("x"), try w.remoteAt("x", "refs/tags/v0.1.1"));
     try std.testing.expectEqualStrings(head, try w.head("y"));
     try std.testing.expectEqualStrings("", try w.out("y", &.{ "status", "--porcelain" }));
@@ -1089,7 +1100,8 @@ const FakeGitHub = struct {
     /// the reply, as GitHub names the commit a run is on.
     head_from: []const u8 = "",
 
-    const Reply = struct { status: std.http.Status, body: []const u8 };
+    /// `head`, where set, is the ref file read for `{head}` in this reply in place of `head_from`.
+    const Reply = struct { status: std.http.Status, body: []const u8, head: []const u8 = "" };
     const Seen = struct { method: std.http.Method, target: []const u8, authorization: []const u8, body: []const u8 };
 
     fn init(io: Io) !FakeGitHub {
@@ -1136,8 +1148,9 @@ const FakeGitHub = struct {
         var body_buffer: [4096]u8 = @splat(0);
         const body = try (asked.readerExpectNone(&body_buffer)).allocRemaining(a, .limited(1 << 20));
         try f.seen.append(a, .{ .method = method, .target = target, .authorization = authorization, .body = body });
-        const sent = if (f.head_from.len != 0 and std.mem.find(u8, reply.body, "{head}") != null) sent: {
-            const commit = std.mem.trim(u8, try Io.Dir.cwd().readFileAlloc(io, f.head_from, a, .limited(256)), " \r\n");
+        const head_from = if (reply.head.len != 0) reply.head else f.head_from;
+        const sent = if (head_from.len != 0 and std.mem.find(u8, reply.body, "{head}") != null) sent: {
+            const commit = std.mem.trim(u8, try Io.Dir.cwd().readFileAlloc(io, head_from, a, .limited(256)), " \r\n");
             break :sent try std.mem.replaceOwned(u8, a, reply.body, "{head}", commit);
         } else reply.body;
         try asked.respond(sent, .{ .status = reply.status, .keep_alive = false });
@@ -1241,7 +1254,7 @@ test "a release on GitHub is published with its section as notes and the dist st
     try std.testing.expectEqualStrings(try a.print("{s}  p-program\n", .{&std.fmt.bytesToHex(digest, .lower)}), fake.seen.items[1].body);
 }
 
-/// A workflow as preflight generates one: dispatched with a tier, the release tier among them.
+/// A workflow as preflight generates one: dispatched with a tier, the full matrix's among them.
 const hosted_workflow =
     \\name: CI
     \\on:
@@ -1251,41 +1264,55 @@ const hosted_workflow =
     \\      tier:
     \\        type: choice
     \\        options: [ci, release, fuzz]
+    \\jobs:
+    \\  gate:
+    \\    with:
+    \\      release-matrix: >-
+    \\        {"include":[{"os":"ubuntu-latest"},{"os":"macos-latest"}]}
     \\
 ;
 
-test "a release whose workflow runs a release tier passes it on GitHub before its tag; a red run tags nothing and puts the branch back" {
+/// `dir` on a remote named as GitHub names it (`git@github.com:o/<dir>.git`), which the ssh
+/// stand-in reaches under its home, with `hosted_workflow` committed: the bare repository.
+fn onGitHub(w: *World, dir: []const u8) ![]const u8 {
+    const a = w.f.a;
+    try w.f.tmp.dir.createDirPath(w.f.io, try a.print("{s}/.github/workflows", .{dir}));
+    try w.f.write(dir, ".github/workflows/ci.yml", hosted_workflow);
+    try w.git(dir, &.{ "add", "." });
+    try w.git(dir, &.{ "commit", "--quiet", "-m", "A workflow" });
+    const home = try w.path("ssh-home");
+    const bare = try std.fs.path.join(a, &.{ home, "o", try a.print("{s}.git", .{dir}) });
+    try w.git(".", &.{ "init", "--quiet", "--bare", "--initial-branch=main", bare });
+    try w.f.env.put("SSH_HOME", home);
+    try w.f.env.put("BAY_POLL_SECONDS", "0");
+    try w.git(dir, &.{ "remote", "set-url", "origin", try a.print("git@github.com:o/{s}.git", .{dir}) });
+    try w.git(dir, &.{ "push", "--quiet", "--set-upstream", "origin", "main", "--tags" });
+    return bare;
+}
+
+test "a release whose ci.yml runs a full tier lands its version commit, proves that head on GitHub and tags it; a red run leaves it landed, untagged, for its fix" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var w: World = try .init(a);
     defer w.deinit();
     try w.package("h", "1.0.0", "");
-    try w.f.tmp.dir.createDirPath(w.f.io, "h/.github/workflows");
-    try w.f.write("h", ".github/workflows/ci.yml", hosted_workflow);
-    try w.git("h", &.{ "add", "." });
-    try w.git("h", &.{ "commit", "--quiet", "-m", "A workflow" });
-    const home = try w.path("ssh-home");
-    const bare = try std.fs.path.join(a, &.{ home, "o", "h.git" });
-    try w.git(".", &.{ "init", "--quiet", "--bare", "--initial-branch=main", bare });
-    try w.f.env.put("SSH_HOME", home);
-    try w.f.env.put("BAY_POLL_SECONDS", "0");
-    try w.git("h", &.{ "remote", "set-url", "origin", "git@github.com:o/h.git" });
-    try w.git("h", &.{ "push", "--quiet", "--set-upstream", "origin", "main", "--tags" });
+    const bare = try onGitHub(&w, "h");
     var fake: FakeGitHub = try .init(w.f.io);
     defer fake.server.deinit(w.f.io);
 
-    // With no login to dispatch it, refused before anything is made.
+    // With no login to dispatch its run, refused before anything is made.
     try w.change("h", "### Added\n\n- A step.\n");
     const start = try w.head("h");
     const logged_out = try fake.release(&w, "h", "", &.{});
     try std.testing.expect(refused(logged_out));
-    try std.testing.expect(contains(logged_out.stderr, "o/h's workflow runs a release tier, which a release passes on GitHub before its tag: log in with gh auth login, or set GITHUB_TOKEN"));
+    try std.testing.expect(contains(logged_out.stderr, "o/h's ci.yml runs a full tier, whose run on GitHub proves a release before its tag: log in with gh auth login, or set GITHUB_TOKEN"));
     try std.testing.expectEqualStrings(start, try w.head("h"));
     try std.testing.expectEqual(0, fake.seen.items.len);
 
-    // Green: the commit on release/v1.1.0, the tier dispatched and read job by job, then main and
-    // an annotated tag naming the run, pushed with the candidate's deletion; the release made.
+    // Green: the version commit landed on main, its full run dispatched on release/v1.1.0 at that
+    // commit and read job by job, then an annotated tag on that very commit naming the run; the
+    // candidate deleted, the release made.
     fake.head_from = try std.fs.path.join(a, &.{ bare, "refs", "heads", "release", "v1.1.0" });
     const runs = "{\"workflow_runs\":[{\"id\":4,\"head_sha\":\"0000\",\"status\":\"completed\",\"created_at\":\"2999-01-01T00:00:00Z\"},{\"id\":5,\"head_sha\":\"{head}\",\"status\":\"queued\",\"created_at\":\"2999-01-01T00:00:00Z\",\"html_url\":\"https://github.com/o/h/actions/runs/5\"}]}";
     const page = "https://github.com/o/h/actions/runs/5";
@@ -1307,61 +1334,100 @@ test "a release whose workflow runs a release tier passes it on GitHub before it
     try std.testing.expectEqual(std.http.Method.POST, seen[0].method);
     try std.testing.expectEqualStrings("/repos/o/h/actions/workflows/ci.yml/dispatches", seen[0].target);
     try std.testing.expectEqualStrings("Bearer t", seen[0].authorization);
+    // The tier ci.yml's dispatch offers for the full matrix, named as the preflight it pins names it.
     try std.testing.expectEqualStrings("{\"ref\":\"release/v1.1.0\",\"inputs\":{\"tier\":\"release\"}}", seen[0].body);
     try std.testing.expectEqualStrings("/repos/o/h/actions/runs?branch=release%2Fv1.1.0&event=workflow_dispatch&per_page=20", seen[1].target);
     try std.testing.expectEqualStrings("/repos/o/h/actions/runs/5", seen[3].target);
     try std.testing.expectEqualStrings("/repos/o/h/actions/runs/5/jobs?per_page=100", seen[4].target);
-    try std.testing.expect(contains(seen[8].body, try a.print("Gated by the release tier on GitHub: {s}", .{page})));
-    try std.testing.expect(contains(green.stderr, try a.print("v1.1.0 at {s}: the release tier runs on GitHub, {s}", .{ commit[0..12], page })));
-    try std.testing.expectEqual(1, std.mem.count(u8, green.stderr, "hosted: linux: success"));
-    try std.testing.expectEqual(1, std.mem.count(u8, green.stderr, "hosted: macos: success"));
-    try std.testing.expect(contains(green.stderr, try a.print("hosted: green, {s}", .{page})));
+    try std.testing.expect(contains(seen[8].body, try a.print("Proved by its full run on GitHub: {s}", .{page})));
+    // Landed before its run, the run's jobs and plan said as they go.
+    try std.testing.expect(std.mem.find(u8, green.stderr, try a.print("v1.1.0's version commit {s} landed on origin/main", .{commit[0..12]})).? < std.mem.find(u8, green.stderr, "dispatched at").?);
+    try std.testing.expect(contains(green.stderr, try a.print("h v1.1.0: its full run (release tier, 3 jobs, 1 on macOS) dispatched at {s}", .{commit[0..12]})));
+    try std.testing.expect(contains(green.stderr, try a.print("h v1.1.0: its full run is {s}", .{page})));
+    try std.testing.expectEqual(1, std.mem.count(u8, green.stderr, "h v1.1.0: linux: success"));
+    try std.testing.expectEqual(1, std.mem.count(u8, green.stderr, "h v1.1.0: macos: success"));
+    try std.testing.expect(contains(green.stderr, try a.print("h v1.1.0: its full run is green, {s}", .{page})));
     try std.testing.expectEqualStrings(commit, try w.remoteAt("h", "refs/heads/main"));
     try std.testing.expectEqualStrings(commit, try w.remoteAt("h", "refs/tags/v1.1.0"));
     try std.testing.expectEqualStrings("", try w.remoteAt("h", "refs/heads/release/v1.1.0"));
-    try std.testing.expectEqualStrings(try a.print("v1.1.0\n\nGated-by: {s}", .{page}), try w.out("h", &.{ "for-each-ref", "--format=%(contents)", "refs/tags/v1.1.0" }));
+    try std.testing.expectEqualStrings(try a.print("v1.1.0\n\nProved-by: {s}", .{page}), try w.out("h", &.{ "for-each-ref", "--format=%(contents)", "refs/tags/v1.1.0" }));
     try std.testing.expectEqualStrings("", try w.gateRecord("h", "v1.1.0"));
+    // Built here as any landing is; never gated, its run on GitHub its proof.
+    try std.testing.expectEqual(0, try w.gated(commit));
 
-    // Red: the candidate deleted, the branch back where it was, nothing on main or tagged, the
-    // failing jobs named.
+    // Red: the version commit landed and stays, untagged; the candidate deleted, the failing
+    // jobs named, and what to do next said.
     fake.head_from = try std.fs.path.join(a, &.{ bare, "refs", "heads", "release", "v1.1.1" });
     try w.change("h", "### Fixed\n\n- A bug.\n");
-    const before = try w.head("h");
+    const red_runs = try std.mem.replaceOwned(u8, a, runs, "runs/5", "runs/6");
+    const red_run = "{\"id\":6,\"head_sha\":\"{head}\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/o/h/actions/runs/6\"}";
+    const red_jobs = "{\"jobs\":[{\"name\":\"linux\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"name\":\"windows\",\"status\":\"completed\",\"conclusion\":\"failure\"},{\"name\":\"freebsd\",\"status\":\"completed\",\"conclusion\":\"skipped\"}]}";
     const red = try fake.release(&w, "h", "t", &.{
         .{ .status = .no_content, .body = "" },
-        .{ .status = .ok, .body = try std.mem.replaceOwned(u8, a, runs, "runs/5", "runs/6") },
-        .{ .status = .ok, .body = "{\"id\":5,\"head_sha\":\"{head}\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/o/h/actions/runs/6\"}" },
-        .{ .status = .ok, .body = "{\"jobs\":[{\"name\":\"linux\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"name\":\"windows\",\"status\":\"completed\",\"conclusion\":\"failure\"},{\"name\":\"freebsd\",\"status\":\"completed\",\"conclusion\":\"skipped\"}]}" },
+        .{ .status = .ok, .body = try std.mem.replaceOwned(u8, a, red_runs, "\"id\":5", "\"id\":6") },
+        .{ .status = .ok, .body = red_run },
+        .{ .status = .ok, .body = red_jobs },
     });
     try std.testing.expect(refused(red));
-    try std.testing.expect(contains(red.stderr, "hosted: windows: failure"));
-    try std.testing.expect(contains(red.stderr, "the release tier is failure on GitHub (windows): https://github.com/o/h/actions/runs/6; nothing was tagged or pushed to origin/main, release/v1.1.1 is deleted"));
-    try std.testing.expectEqualStrings(before, try w.head("h"));
+    const landed = try w.head("h");
+    try std.testing.expect(contains(red.stderr, "h v1.1.1: windows: failure"));
+    try std.testing.expect(contains(red.stderr, try a.print("v1.1.1: its full run is failure (windows): https://github.com/o/h/actions/runs/6; v1.1.1 landed on origin/main at {s} and is not tagged", .{landed[0..12]})));
+    try std.testing.expectEqualStrings("Release v1.1.1", try w.out("h", &.{ "log", "-1", "--format=%s" }));
     try std.testing.expectEqualStrings("", try w.out("h", &.{ "status", "--porcelain" }));
-    try std.testing.expectEqualStrings(commit, try w.remoteAt("h", "refs/heads/main"));
+    try std.testing.expectEqualStrings(landed, try w.remoteAt("h", "refs/heads/main"));
     try std.testing.expectEqualStrings("", try w.remoteAt("h", "refs/tags/v1.1.1"));
     try std.testing.expectEqualStrings("", try w.remoteAt("h", "refs/heads/release/v1.1.1"));
-    try std.testing.expectEqualStrings("", try w.gateRecord("h", "v1.1.1"));
+
+    // Run again at that head, its run is the one recorded: red again, nothing dispatched.
+    const again = try fake.release(&w, "h", "t", &.{
+        .{ .status = .ok, .body = red_run },
+        .{ .status = .ok, .body = red_jobs },
+    });
+    try std.testing.expect(refused(again));
+    try std.testing.expectEqual(2, fake.seen.items.len);
+    try std.testing.expectEqualStrings("/repos/o/h/actions/runs/6", fake.seen.items[0].target);
+    try std.testing.expect(contains(again.stderr, try a.print("h v1.1.1: its full run at {s} is run 6, dispatched before: waiting on it", .{landed[0..12]})));
+
+    // A fix with an entry in [Unreleased] is refused: a release under way takes it in its own section.
+    try w.change("h", "### Fixed\n\n- The bug's fix.\n");
+    const misplaced = try fake.release(&w, "h", "t", &.{});
+    try std.testing.expect(refused(misplaced));
+    try std.testing.expect(contains(misplaced.stderr, "CHANGELOG.md releases 1.1.1, which no tag names yet, and its [Unreleased] section lists entries"));
+    try std.testing.expectEqual(0, fake.seen.items.len);
+    try w.git("h", &.{ "reset", "--quiet", "--hard", landed });
+
+    // The fix lands on it, its line in v1.1.1's section: the release is taken up at the new head,
+    // never cut again, and that head is proved and tagged.
+    const log = try w.read("h", "CHANGELOG.md");
+    try w.f.write("h", "CHANGELOG.md", try std.mem.replaceOwned(u8, a, log, "- A bug.\n", "- A bug.\n- The bug's fix.\n"));
+    try w.f.write("h", "lib.zig", "// fixed\n");
+    try w.git("h", &.{ "add", "." });
+    try w.git("h", &.{ "commit", "--quiet", "-m", "The fix" });
+    const fixed = try w.head("h");
+    const resumed = try fake.release(&w, "h", "t", &.{
+        .{ .status = .no_content, .body = "" },
+        .{ .status = .ok, .body = try std.mem.replaceOwned(u8, a, runs, "runs/5", "runs/8") },
+        .{ .status = .ok, .body = "{\"id\":5,\"head_sha\":\"{head}\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/o/h/actions/runs/8\"}" },
+        .{ .status = .ok, .body = "{\"jobs\":[{\"name\":\"linux\",\"status\":\"completed\",\"conclusion\":\"success\"}]}" },
+        .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
+        .{ .status = .created, .body = "{\"id\":9,\"upload_url\":\"x\",\"html_url\":\"https://github.com/o/h/releases/tag/v1.1.1\"}" },
+    });
+    try std.testing.expect(succeeded(resumed));
+    try std.testing.expect(contains(resumed.stderr, try a.print("v1.1.1 is under way at {s}: landing, proving and tagging it", .{fixed[0..12]})));
+    try std.testing.expectEqualStrings(fixed, try w.head("h"));
+    try std.testing.expectEqualStrings(fixed, try w.remoteAt("h", "refs/heads/main"));
+    try std.testing.expectEqualStrings(fixed, try w.remoteAt("h", "refs/tags/v1.1.1"));
+    try std.testing.expectEqual(1, std.mem.count(u8, try w.read("h", "CHANGELOG.md"), "## [1.1.1]"));
 }
 
-test "a release tier whose jobs GitHub gave no runner runs them again, three times at most, then refuses naming them; a run a person cancelled is refused at once" {
+test "a full run whose jobs GitHub gave no runner runs them again, three times at most, then refuses naming them; a run a person cancelled is refused at once" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var w: World = try .init(a);
     defer w.deinit();
     try w.package("h", "1.0.0", "");
-    try w.f.tmp.dir.createDirPath(w.f.io, "h/.github/workflows");
-    try w.f.write("h", ".github/workflows/ci.yml", hosted_workflow);
-    try w.git("h", &.{ "add", "." });
-    try w.git("h", &.{ "commit", "--quiet", "-m", "A workflow" });
-    const home = try w.path("ssh-home");
-    const bare = try std.fs.path.join(a, &.{ home, "o", "h.git" });
-    try w.git(".", &.{ "init", "--quiet", "--bare", "--initial-branch=main", bare });
-    try w.f.env.put("SSH_HOME", home);
-    try w.f.env.put("BAY_POLL_SECONDS", "0");
-    try w.git("h", &.{ "remote", "set-url", "origin", "git@github.com:o/h.git" });
-    try w.git("h", &.{ "push", "--quiet", "--set-upstream", "origin", "main", "--tags" });
+    const bare = try onGitHub(&w, "h");
     var fake: FakeGitHub = try .init(w.f.io);
     defer fake.server.deinit(w.f.io);
     const runs = "{\"workflow_runs\":[{\"id\":5,\"head_sha\":\"{head}\",\"status\":\"queued\",\"created_at\":\"2999-01-01T00:00:00Z\",\"html_url\":\"https://github.com/o/h/actions/runs/5\"}]}";
@@ -1390,17 +1456,17 @@ test "a release tier whose jobs GitHub gave no runner runs them again, three tim
     try std.testing.expect(succeeded(green));
     try std.testing.expectEqual(std.http.Method.POST, fake.seen.items[4].method);
     try std.testing.expectEqualStrings("/repos/o/h/actions/runs/5/rerun-failed-jobs", fake.seen.items[4].target);
-    try std.testing.expect(contains(green.stderr, "hosted: GitHub gave macos no runner; re-running its jobs, 1 of 3"));
-    try std.testing.expectEqual(1, std.mem.count(u8, green.stderr, "hosted: macos: cancelled"));
-    try std.testing.expect(contains(green.stderr, "hosted: macos: success"));
-    try std.testing.expect(contains(green.stderr, try a.print("hosted: green, {s}", .{page})));
+    try std.testing.expect(contains(green.stderr, "h v1.1.0: GitHub gave macos no runner; re-running its jobs, 1 of 3"));
+    try std.testing.expectEqual(1, std.mem.count(u8, green.stderr, "h v1.1.0: macos: cancelled"));
+    try std.testing.expect(contains(green.stderr, "h v1.1.0: macos: success"));
+    try std.testing.expect(contains(green.stderr, try a.print("h v1.1.0: its full run is green, {s}", .{page})));
     const commit = try w.head("h");
     try std.testing.expectEqualStrings(commit, try w.remoteAt("h", "refs/tags/v1.1.0"));
 
-    // No runner three re-runs running: refused, the jobs GitHub never ran named, and no red claimed.
+    // No runner three re-runs running: refused, the jobs GitHub never ran named, and no red
+    // claimed; the version commit landed, untagged.
     fake.head_from = try std.fs.path.join(a, &.{ bare, "refs", "heads", "release", "v1.1.1" });
     try w.change("h", "### Fixed\n\n- A bug.\n");
-    const before = try w.head("h");
     var replies: std.ArrayList(FakeGitHub.Reply) = .empty;
     try replies.appendSlice(a, &.{ .{ .status = .no_content, .body = "" }, .{ .status = .ok, .body = runs } });
     for ([_][]const u8{ "1", "2", "3", "4" }, 0..) |n, k| {
@@ -1413,13 +1479,17 @@ test "a release tier whose jobs GitHub gave no runner runs them again, three tim
     try std.testing.expectEqual(replies.items.len, fake.seen.items.len);
     try std.testing.expect(contains(starved.stderr, "re-running its jobs, 3 of 3"));
     try std.testing.expect(std.mem.find(u8, starved.stderr, "4 of 3") == null);
-    try std.testing.expect(contains(starved.stderr, try a.print("GitHub gave macos no runner, re-run 3 times ({s}): they never ran, so the release tier neither passed nor failed; nothing was tagged or pushed to origin/main, release/v1.1.1 is deleted", .{page})));
-    try std.testing.expectEqualStrings(before, try w.head("h"));
-    try std.testing.expectEqualStrings(commit, try w.remoteAt("h", "refs/heads/main"));
+    try std.testing.expect(contains(starved.stderr, try a.print("v1.1.1: GitHub gave macos no runner, re-run 3 times ({s}): they never ran, so the full run neither passed nor failed; v1.1.1 landed on origin/main", .{page})));
+    const landed = try w.head("h");
+    try std.testing.expectEqualStrings(landed, try w.remoteAt("h", "refs/heads/main"));
     try std.testing.expectEqualStrings("", try w.remoteAt("h", "refs/tags/v1.1.1"));
     try std.testing.expectEqualStrings("", try w.remoteAt("h", "refs/heads/release/v1.1.1"));
 
-    // A person cancelled it: the run ends "cancelled", and is refused as it stands, never run again.
+    // A fix on it, a new head: its run dispatched, and a person cancelled it. The run ends
+    // "cancelled", and is refused as it stands, never run again.
+    const log = try w.read("h", "CHANGELOG.md");
+    try w.f.write("h", "CHANGELOG.md", try std.mem.replaceOwned(u8, a, log, "- A bug.\n", "- A bug.\n- Another.\n"));
+    try w.git("h", &.{ "commit", "--quiet", "-am", "Another fix" });
     const cancelled = try fake.release(&w, "h", "t", &.{
         .{ .status = .no_content, .body = "" },
         .{ .status = .ok, .body = runs },
@@ -1429,29 +1499,131 @@ test "a release tier whose jobs GitHub gave no runner runs them again, three tim
     try std.testing.expect(refused(cancelled));
     try std.testing.expectEqual(4, fake.seen.items.len);
     try std.testing.expect(std.mem.find(u8, cancelled.stderr, "re-running") == null);
-    try std.testing.expect(contains(cancelled.stderr, try a.print("the release tier is cancelled on GitHub (macos): {s}; nothing was tagged", .{page})));
+    try std.testing.expect(contains(cancelled.stderr, try a.print("v1.1.1: its full run is cancelled (macos): {s}; v1.1.1 landed", .{page})));
 }
 
-test "bay audit releases names each tag since the first gated release that bay release did not make, and the ones before it once" {
+test "a train lands each version commit pinned at those before it, proves the heads on GitHub at once, and tags them in order; a red run leaves its dependents waiting until its fix" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var w: World = try .init(a);
+    defer w.deinit();
+    // b ships core; both on GitHub, both the family's.
+    try w.package("core", "0.1.0", "");
+    const bare_core = try onGitHub(&w, "core");
+    try w.package("b", "0.1.0", "");
+    const bare_b = try onGitHub(&w, "b");
+    const core_url = try std.mem.replaceOwned(u8, a, bare_core, "\\", "/");
+    try std.testing.expect(succeeded(try w.f.bay("b", &.{ "add", try a.print("git+file://{s}{s}#v0.1.0", .{ if (core_url[0] == '/') "" else "/", core_url }) })));
+    try w.git("b", &.{ "add", "." });
+    try w.git("b", &.{ "commit", "--quiet", "-m", "Pin core" });
+    try w.git("b", &.{ "push", "--quiet", "origin", "main" });
+    for ([_][]const u8{ "core", "b" }) |dir| {
+        try familyPolicy(&w, dir, "family");
+        try w.change(dir, "### Fixed\n\n- A fix.\n");
+    }
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"core\", \"b\" } }\n");
+    var fake: FakeGitHub = try .init(w.f.io);
+    defer fake.server.deinit(w.f.io);
+    const core_head = try std.fs.path.join(a, &.{ bare_core, "refs", "heads", "release", "v0.1.1" });
+    const b_head = try std.fs.path.join(a, &.{ bare_b, "refs", "heads", "release", "v0.1.1" });
+    const listing = "{\"workflow_runs\":[{\"id\":ID,\"head_sha\":\"{head}\",\"status\":\"queued\",\"created_at\":\"2999-01-01T00:00:00Z\",\"html_url\":\"https://github.com/o/R/actions/runs/ID\"}]}";
+    const ended = "{\"id\":ID,\"head_sha\":\"{head}\",\"status\":\"completed\",\"conclusion\":\"END\",\"html_url\":\"https://github.com/o/R/actions/runs/ID\"}";
+    const Run = struct {
+        fn of(al: std.mem.Allocator, text: []const u8, repository: []const u8, id: []const u8, end: []const u8) ![]const u8 {
+            return std.mem.replaceOwned(u8, al, try std.mem.replaceOwned(u8, al, try std.mem.replaceOwned(u8, al, text, "ID", id), "/R/", try al.print("/{s}/", .{repository})), "END", end);
+        }
+    };
+    const jobs_green = "{\"jobs\":[{\"name\":\"linux\",\"status\":\"completed\",\"conclusion\":\"success\"}]}";
+    const jobs_red = "{\"jobs\":[{\"name\":\"linux\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}";
+
+    // core's run red, b's green: core's version commit landed and untagged, and b, which pins
+    // it, proved and untagged, waiting on it.
+    const first = try fake.bay(&w, ".", &.{ "--workspace", "release" }, "t", &.{
+        .{ .status = .no_content, .body = "" },
+        .{ .status = .no_content, .body = "" },
+        .{ .status = .ok, .body = try Run.of(a, listing, "core", "11", ""), .head = core_head },
+        .{ .status = .ok, .body = try Run.of(a, ended, "core", "11", "failure"), .head = core_head },
+        .{ .status = .ok, .body = jobs_red },
+        .{ .status = .ok, .body = try Run.of(a, listing, "b", "12", ""), .head = b_head },
+        .{ .status = .ok, .body = try Run.of(a, ended, "b", "12", "success"), .head = b_head },
+        .{ .status = .ok, .body = jobs_green },
+    });
+    try std.testing.expect(refused(first));
+    const seen = fake.seen.items;
+    try std.testing.expectEqual(8, seen.len);
+    // Both runs dispatched before either is looked at: the batch's runs go at once.
+    try std.testing.expectEqualStrings("/repos/o/core/actions/workflows/ci.yml/dispatches", seen[0].target);
+    try std.testing.expectEqualStrings("/repos/o/b/actions/workflows/ci.yml/dispatches", seen[1].target);
+    const core_landed = try w.head("core");
+    const b_landed = try w.head("b");
+    // b's version commit pins core's, as core's tag will name it.
+    try std.testing.expect(contains(try w.read("b", "build.zig.zon"), try a.print("?ref=v0.1.1#{s}\"", .{core_landed})));
+    try std.testing.expect(contains(try w.read("b", "CHANGELOG.md"), try a.print("## [0.1.1] - {s}\n\n### Changed\n\n- Pins core 0.1.1.\n", .{try today(a)})));
+    for ([_][]const u8{ "core", "b" }, [_][]const u8{ core_landed, b_landed }) |dir, landed| {
+        try std.testing.expectEqualStrings("Release v0.1.1", try w.out(dir, &.{ "log", "-1", "--format=%s" }));
+        try std.testing.expectEqualStrings(landed, try w.remoteAt(dir, "refs/heads/main"));
+        try std.testing.expectEqualStrings("", try w.remoteAt(dir, "refs/tags/v0.1.1"));
+        try std.testing.expectEqualStrings("", try w.remoteAt(dir, "refs/heads/release/v0.1.1"));
+    }
+    try std.testing.expect(contains(first.stderr, "b: not tagged, as it pins core's version commit, which is not"));
+    try std.testing.expect(contains(first.stderr, "core: red"));
+    try std.testing.expect(contains(first.stderr, "b: waiting"));
+
+    // core's fix lands on it, its line in its own section; the train takes both releases up: b
+    // pinned at core's new head, the same version, named once in its CHANGELOG; both proved and
+    // tagged, core first.
+    const log = try w.read("core", "CHANGELOG.md");
+    try w.f.write("core", "CHANGELOG.md", try std.mem.replaceOwned(u8, a, log, "- A fix.\n", "- A fix.\n- Its fix.\n"));
+    try w.git("core", &.{ "commit", "--quiet", "-am", "Its fix" });
+    const second = try fake.bay(&w, ".", &.{ "--workspace", "release" }, "t", &.{
+        .{ .status = .no_content, .body = "" },
+        .{ .status = .no_content, .body = "" },
+        .{ .status = .ok, .body = try Run.of(a, listing, "core", "21", ""), .head = core_head },
+        .{ .status = .ok, .body = try Run.of(a, ended, "core", "21", "success"), .head = core_head },
+        .{ .status = .ok, .body = jobs_green },
+        .{ .status = .ok, .body = try Run.of(a, listing, "b", "22", ""), .head = b_head },
+        .{ .status = .ok, .body = try Run.of(a, ended, "b", "22", "success"), .head = b_head },
+        .{ .status = .ok, .body = jobs_green },
+        .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
+        .{ .status = .created, .body = "{\"id\":1,\"upload_url\":\"x\",\"html_url\":\"https://github.com/o/core/releases/tag/v0.1.1\"}" },
+        .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
+        .{ .status = .created, .body = "{\"id\":2,\"upload_url\":\"x\",\"html_url\":\"https://github.com/o/b/releases/tag/v0.1.1\"}" },
+    });
+    if (!succeeded(second)) std.debug.print("{s}\n", .{second.stderr});
+    try std.testing.expect(succeeded(second));
+    const core_tagged = try w.head("core");
+    try std.testing.expectEqualStrings("Its fix", try w.out("core", &.{ "log", "-1", "--format=%s" }));
+    try std.testing.expectEqualStrings(core_tagged, try w.remoteAt("core", "refs/tags/v0.1.1"));
+    try std.testing.expectEqualStrings("Pin core 0.1.1", try w.out("b", &.{ "log", "-1", "--format=%s" }));
+    try std.testing.expectEqualStrings(try w.head("b"), try w.remoteAt("b", "refs/tags/v0.1.1"));
+    try std.testing.expect(contains(try w.read("b", "build.zig.zon"), try a.print("?ref=v0.1.1#{s}\"", .{core_tagged})));
+    try std.testing.expectEqual(1, std.mem.count(u8, try w.read("b", "CHANGELOG.md"), "Pins core 0.1.1."));
+    try std.testing.expect(std.mem.find(u8, second.stderr, "released core v0.1.1").? < std.mem.find(u8, second.stderr, "released b v0.1.1").?);
+    try std.testing.expectEqualStrings(try a.print("v0.1.1\n\nProved-by: https://github.com/o/b/actions/runs/22", .{}), try w.out("b", &.{ "for-each-ref", "--format=%(contents)", "refs/tags/v0.1.1" }));
+}
+
+test "bay audit releases names each tag since the first proved release that bay release did not make, and the ones before it once" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var w: World = try .init(a);
     defer w.deinit();
     // v1.0.0, a plain tag from before the rule; v1.1.0 as bay release makes it; v1.2.0 pushed by
-    // hand; v1.3.0 annotated with a run that went red and a GitHub Release made by hand.
+    // hand; v1.3.0 annotated with a run that went red and a GitHub Release made by hand; v1.4.0
+    // as bay release makes it now, its Proved-by run green on its very commit.
     try w.package("h", "1.0.0", "");
     const home = try w.path("ssh-home");
     try w.git(".", &.{ "init", "--quiet", "--bare", "--initial-branch=main", try std.fs.path.join(a, &.{ home, "o", "h.git" }) });
     try w.f.env.put("SSH_HOME", home);
     try w.git("h", &.{ "remote", "set-url", "origin", "git@github.com:o/h.git" });
     const runs = "https://github.com/o/h/actions/runs/";
-    var commits: [3][]const u8 = undefined;
-    for ([_][]const u8{ "v1.1.0", "v1.2.0", "v1.3.0" }, [_]?[]const u8{ "5", null, "6" }, &commits) |tag, run, *commit| {
+    var commits: [4][]const u8 = undefined;
+    for ([_][]const u8{ "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.0" }, [_]?[]const u8{ "5", null, "6", "7" }, &commits) |tag, run, *commit| {
         try w.change("h", "### Fixed\n\n- A fix.\n");
         commit.* = try w.head("h");
         if (run) |id| {
-            try w.git("h", &.{ "tag", "--annotate", tag, "--message", try a.print("{s}\n\nGated-by: {s}{s}", .{ tag, runs, id }) });
+            try w.git("h", &.{ "tag", "--annotate", tag, "--message", try a.print("{s}\n\n{s}: {s}{s}", .{ tag, if (std.mem.eql(u8, tag, "v1.4.0")) "Proved-by" else "Gated-by", runs, id }) });
         } else try w.git("h", &.{ "tag", tag });
     }
     try w.git("h", &.{ "push", "--quiet", "--set-upstream", "origin", "main", "--tags" });
@@ -1465,21 +1637,24 @@ test "bay audit releases names each tag since the first gated release that bay r
         .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
         .{ .status = .ok, .body = try a.print("{{\"id\":6,\"head_sha\":\"{s}\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"failure\"}}", .{commits[1]}) },
         .{ .status = .ok, .body = "{\"body\":\"By hand.\"}" },
+        .{ .status = .ok, .body = try a.print("{{\"id\":7,\"head_sha\":\"{s}\",\"head_branch\":\"release/v1.4.0\",\"status\":\"completed\",\"conclusion\":\"success\"}}", .{commits[3]}) },
+        .{ .status = .ok, .body = "{\"body\":\"### Fixed\\n\\n- A fix.\\n\\nProved by its full run on GitHub: https://github.com/o/h/actions/runs/7\"}" },
     });
     try std.testing.expect(refused(audited));
     const seen = fake.seen.items;
-    try std.testing.expectEqual(5, seen.len);
+    try std.testing.expectEqual(7, seen.len);
     try std.testing.expectEqualStrings("/repos/o/h/actions/runs/5", seen[0].target);
     try std.testing.expectEqualStrings("/repos/o/h/releases/tags/v1.1.0", seen[1].target);
     try std.testing.expectEqualStrings("/repos/o/h/releases/tags/v1.2.0", seen[2].target);
     try std.testing.expectEqualStrings("/repos/o/h/actions/runs/6", seen[3].target);
     try std.testing.expectEqualStrings("/repos/o/h/releases/tags/v1.3.0", seen[4].target);
     const said = audited.stdout;
-    try std.testing.expect(contains(said, "history: v1.0.0 came before the first release gated on GitHub, v1.1.0\n"));
+    try std.testing.expect(contains(said, "history: v1.0.0 came before the first release proved on GitHub, v1.1.0\n"));
     try std.testing.expect(std.mem.find(u8, said, "v1.1.0:") == null);
     try std.testing.expect(contains(said, "v1.2.0: a lightweight tag, which names no run; no GitHub Release\n"));
-    try std.testing.expect(contains(said, try a.print("v1.3.0: its run {s}6 ended failure, not green; its run {s}6 ran on {s}, not on the tagged {s}; its run {s}6 ran on main, not on release/v1.3.0; a GitHub Release whose notes name no Gated-by run, which bay release did not make\n", .{ runs, runs, commits[1][0..12], commits[2][0..12], runs })));
-    try std.testing.expect(contains(said, "o/h: 2 of 3 releases since are not as bay release makes them\n"));
+    try std.testing.expect(contains(said, try a.print("v1.3.0: its run {s}6 ended failure, not green; its run {s}6 ran on {s}, not on the tagged {s}; its run {s}6 ran on main, not on release/v1.3.0; a GitHub Release whose notes name not the run its tag names, which bay release did not make\n", .{ runs, runs, commits[1][0..12], commits[2][0..12], runs })));
+    try std.testing.expect(std.mem.find(u8, said, "v1.4.0:") == null);
+    try std.testing.expect(contains(said, "o/h: 2 of 4 releases since are not as bay release makes them\n"));
     try std.testing.expectEqualStrings("", try w.out("fresh", &.{ "tag", "--list" }));
 
     // A repository whose tags all came before the rule passes, with nothing asked of GitHub.
@@ -1489,7 +1664,7 @@ test "bay audit releases names each tag since the first gated release that bay r
     try w.git("old", &.{ "push", "--quiet", "origin", "main", "--tags" });
     const before = try fake.bay(&w, "old", &.{ "audit", "releases" }, "t", &.{});
     try std.testing.expect(succeeded(before));
-    try std.testing.expect(contains(before.stdout, "o/old: no release gated on GitHub yet, so its 1 release tag is history\n"));
+    try std.testing.expect(contains(before.stdout, "o/old: no release proved on GitHub yet, so its 1 release tag is history\n"));
     try std.testing.expectEqual(0, fake.seen.items.len);
     // A remote off github.com is refused: the audit reads what GitHub holds for its tags.
     try w.package("elsewhere", "0.1.0", "");
@@ -1650,7 +1825,7 @@ test "a train's dry run runs each closing re-pin's generate against the trees be
     // the tool's tree, is refused before anything moves, with the generator's own words.
     const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
     try std.testing.expect(refused(plan));
-    try std.testing.expect(contains(plan.stdout, "then rider develops with tool 0.1.1, gated and pushed with no tag\n"));
+    try std.testing.expect(contains(plan.stdout, "then rider develops with tool 0.1.1, checked here and pushed with no tag\n"));
     try std.testing.expect(contains(plan.stderr, "generate: unknown key \"compile_once\" in ci/preflight.json"));
     try std.testing.expect(contains(plan.stderr, "rider: its closing re-pin would stop the train there, once the releases before it are tagged and pushed"));
     for ([_][]const u8{ "rider", "tool" }, heads) |dir, head| {
@@ -1726,7 +1901,7 @@ test "a dry run makes the release commit in a copy at its version and configures
     const alone = try w.releaseIn("lib", &.{"--dry-run"});
     try std.testing.expect(refused(alone));
     try std.testing.expect(contains(alone.stderr, "version.zig names 0.1.0; build.zig.zon names 0.1.1"));
-    try std.testing.expect(contains(alone.stderr, "the release commit, at 0.1.1, does not configure, so its gate would be red"));
+    try std.testing.expect(contains(alone.stderr, "the version commit, at 0.1.1, does not configure, so it would not land"));
     try w.f.write(".", "bay.work", ".{ .members = .{ \"lib\" } }\n");
     const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
     try std.testing.expect(refused(plan));
@@ -1756,5 +1931,58 @@ test "a dry run makes the release commit in a copy at its version and configures
     try std.testing.expect(succeeded(clean));
     try std.testing.expect(contains(clean.stderr, "its release commit, at 0.1.1, configures (made in a copy)"));
     try std.testing.expectError(error.FileNotFound, w.f.tmp.dir.access(w.f.io, candidate, .{}));
+    try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
+}
+
+test "a dry run's tidy resolves the package itself in its copy, with tidy's pins: a member pinned at an older release builds once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var w: World = try .init(a);
+    defer w.deinit();
+    // shuttle's shape: shuttle pinned aegis 0.2.4, aegis is a member at its release 0.5.0, and
+    // shuttle develops with shakedown, which depends on shuttle. Here lib pins core 0.1.0, core
+    // is a member at its release 0.1.1, and lib develops with tool, which depends on lib: tool's
+    // lib is the package itself, and its core the member's tree.
+    const loads = struct {
+        fn one(comptime name: []const u8) []const u8 {
+            return "pub fn build(b: *std.Build) void {\n    _ = b.dependency(\"" ++ name ++ "\", .{});\n";
+        }
+    };
+    // No build has a `generate` step, as shuttle's package build has none: the dry run
+    // configures both builds, the development build among them.
+    const no_generate = try std.mem.replaceOwned(u8, a, gate_build, "    b.step(\"generate\", \"Make what follows from the pins\").dependOn(&generated.step);\n", "");
+    try w.package("core", "0.1.0", "");
+    // Its next release, a commit of its own at 0.1.1: another hash than 0.1.0's.
+    try w.f.write("core", "build.zig.zon", try std.mem.replaceOwned(u8, a, try w.read("core", "build.zig.zon"), "\"0.1.0\"", "\"0.1.1\""));
+    try w.git("core", &.{ "commit", "--quiet", "-am", "0.1.1" });
+    try w.git("core", &.{ "push", "--quiet", "origin", "main" });
+    try w.git("core", &.{ "tag", "v0.1.1" });
+    try w.git("core", &.{ "push", "--quiet", "origin", "v0.1.1" });
+    // lib 0.1.0 pins core 0.1.0, and tool 0.1.0 depends on lib 0.1.0.
+    for ([_][]const u8{ "lib", "tool" }, [_][]const u8{ "core", "lib" }, [_][]const u8{ loads.one("core"), loads.one("lib") }) |dir, on, header| {
+        try w.package(dir, "0.1.0", "");
+        try std.testing.expect(succeeded(try w.f.bay(dir, &.{ "add", try a.print("{s}#v0.1.0", .{try w.pinUrl(on)}) })));
+        try w.f.write(dir, "build.zig", try std.mem.replaceOwned(u8, a, no_generate, "pub fn build(b: *std.Build) void {\n", header));
+        try w.git(dir, &.{ "add", "." });
+        try w.git(dir, &.{ "commit", "--quiet", "-m", try a.print("Depend on {s}", .{on}) });
+        try w.git(dir, &.{ "push", "--quiet", "origin", "main" });
+        try w.git(dir, &.{ "tag", "--force", "v0.1.0" });
+        try w.git(dir, &.{ "push", "--quiet", "--force", "origin", "v0.1.0" });
+    }
+    try std.testing.expect(succeeded(try w.f.bay("lib", &.{ "add", "--dev", try a.print("{s}#v0.1.0", .{try w.pinUrl("tool")}) })));
+    try w.f.write("lib", "build.zig", try std.mem.replaceOwned(u8, a, try w.read("lib", "build.zig"), "pub fn dev(b: *std.Build, _: type) void {\n", "pub fn dev(b: *std.Build, _: type) void {\n    _ = b.dependency(\"tool\", .{});\n"));
+    try w.git("lib", &.{ "add", "." });
+    try w.git("lib", &.{ "commit", "--quiet", "-m", "Develop with tool" });
+    try w.git("lib", &.{ "push", "--quiet", "origin", "main" });
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"core\", \"lib\" } }\n");
+    const head = try w.head("lib");
+
+    const plan = try w.f.bay("lib", &.{ "tidy", "--dry-run" });
+    if (!succeeded(plan)) std.debug.print("{s}\n{s}\n", .{ plan.stdout, plan.stderr });
+    try std.testing.expect(succeeded(plan));
+    try std.testing.expect(contains(plan.stderr, "core would be pinned at its release"));
+    try std.testing.expect(std.mem.find(u8, plan.stderr, "file exists in modules") == null);
+    try std.testing.expectEqualStrings(head, try w.head("lib"));
     try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
 }

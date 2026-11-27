@@ -114,40 +114,55 @@ else reads them, and `bay audit releases` checks that it was so.
   Deprecated move the minor; the rest the last number. An empty section releases nothing. preflight's gate checks the
   section against its API diff since the last tag, so a disagreement is a refusal, never a silent bump.
 - **Steps.** Refuse a dirty tree, a branch behind its remote, a release to anything but the remote's default branch
-  (releases are one line), a push URL that is not SSH, a version already tagged, a pin at no release, or a package
-  with no `gate` step. Write `## [X.Y.Z] - date` and `.version`, commit `Release vX.Y.Z`. Gate that commit through
-  the package's own `gate` step (the preflight its manifest pins: run, never linked, which would make bay judge every
-  package with its own preflight and close a ring), here and on each machine in `machines.zon` (a name, the command
-  that runs bay there, a directory), sent as a git bundle; all at once, each line of output named.
-- **The hosted gate, before any tag.** A package on github.com whose `ci.yml` (preflight's) dispatches a `tier` with
-  `release` among its options is gated there too. The release commit is pushed to `refs/heads/release/vX.Y.Z`, never
-  to main; the release tier is dispatched on it through GitHub's API with the person's own login (`GITHUB_TOKEN`, else
+  (releases are one line), a push URL that is not SSH, a version already tagged, or a pin at no release. Write
+  `## [X.Y.Z] - date` and `.version`, commit `Release vX.Y.Z`: the version commit.
+- **The proof: the full run of the head the tag names.** A package on github.com whose `ci.yml` (preflight's)
+  dispatches a full tier (`full`, `release` before preflight 0.20.0, read from the generated workflow, never assumed)
+  is proved there. Its version commit is configured and built here (`bay fetch`, then its `check` step, or its install
+  step where neither build has one) and lands on the default branch as any change does: nothing on the Mac runs a full
+  suite. The commit is pushed to `refs/heads/release/vX.Y.Z` as well, so a push to main meanwhile cannot move what is
+  proved, and the tier is dispatched there through GitHub's API with the person's own login (`GITHUB_TOKEN`, else
   `gh auth token`; bay stores none) and waited on, each job said as it ends (`BAY_POLL_SECONDS` between looks, 30 by
-  default). One hosted run at a time on the machine: the `release_queue` lock in bay's data directory, waited on, since
-  a release tier fills the hosted runners. Red, or a run GitHub would not start or answer: the candidate is deleted,
-  the run's page and failing jobs printed, the branch reset; nothing reaches main or a tag. A login is asked for before
-  anything is made.
-- **The push.** One atomic push over SSH of the branch, the tag and the candidate's deletion, read back with
-  `git ls-remote`, and only then the local tag. The tag is annotated, its message the version and, where the hosted
-  tier passed it, a `Gated-by:` line with the run's page. A GitHub Release follows, its notes the CHANGELOG section
-  and the `Gated-by` run, and for programs, binaries and `SHA256SUMS`.
-- **Git is the record of an interrupted release.** A red gate resets the branch. A stopped run leaves its release
-  commit at HEAD; the next run finds it, gates it again and pushes. A release found on the remote is confirmed and
-  tagged here. A release commit under later commits, or the version tagged elsewhere, is refused by name. A commit
-  gated green whose push failed is recorded in bay's data directory, with the hosted run that passed it, and pushed
-  next time without a second gate: only the same user can write the record, and that user can push with git anyway.
-- **The train**, `bay release --workspace`: members in dependency order, each tidied to the releases made before it
-  (one `### Changed` line, "Pins x 1.2.0 and y 0.3.1."), gated and released when its section has entries; a member
-  whose only change is development pins is gated and pushed untagged. A red member stops its dependents only. Every
-  member says it is the family's, `"policy": "family"` in its `ci/preflight.json` (the key preflight's configuration
-  and build both read; bay never writes it), or the train is refused first, each member without it named.
+  default). The run found is recorded in bay's data directory under its commit, so a stopped wait takes the same run
+  up again. A batch's runs are paced to the account's runners (GitHub Free: 20 jobs at once, 5 on macOS; a job queued
+  past its runner's wait is cancelled unrun): a run is dispatched only while the jobs its plan holds, read from the
+  matrices `ci.yml` carries, fit beside those already running. One batch at a time on the machine: the
+  `release_queue` lock, waited on. A login is asked for before anything is made.
+- **The tag goes on the proved head.** Green: an annotated tag on that very commit, its message the version and a
+  `Proved-by:` line with the run's page, pushed atomically with the branch (already there) and read back with
+  `git ls-remote`, and only then the local tag; the candidate is deleted. A GitHub Release follows, its notes the
+  CHANGELOG section and the run, and for programs, binaries and `SHA256SUMS`. Red: the failing jobs named, the
+  candidate deleted, the version commit left on main untagged. A package with no full tier on GitHub is gated here
+  instead, through its own `gate` step (the preflight its manifest pins: run, never linked, which would make bay judge
+  every package with its own preflight and close a ring), here and on each machine in `machines.zon` (a name, the
+  command that runs bay there, a directory), sent as a git bundle, all at once, each line of output named; then landed
+  and tagged.
+- **Git is the record of an interrupted release.** A version commit that fails its build or gate resets the branch. A
+  version the CHANGELOG releases and no tag names is a release under way, its version commit landed or not: the next
+  run takes it up at HEAD, landing what is not landed, proving that head and tagging it, never cutting the version
+  again; a fix lands on it with its line in the version's own section, and an entry under `[Unreleased]` meanwhile is
+  refused. A release found on the remote is confirmed and tagged here. A commit checked green whose landing failed is
+  recorded in bay's data directory and landed next time without a second check: only the same user can write the
+  record, and that user can push with git anyway.
+- **The train**, `bay --workspace release`: the family as one batch. Refused first: a member without
+  `"policy": "family"` in its `ci/preflight.json` (the key preflight's configuration and build both read; bay never
+  writes it), off its default branch, dirty or behind; then the family is built once as a workspace at the commits it
+  releases. In dependency order each member is pinned at the version commits of the batch members it depends on, as
+  their tags will pin them (`?ref=vX.Y.Z#<commit>`: Zig fetches the commit and never reads the ref, so the pin
+  fetches before the tag exists and is byte for byte the tag's pin after), tidied to the releases there are (one
+  `### Changed` line, "Pins x 1.2.0 and y 0.3.1.", for the versions that moved), and its version commit landed; a
+  member whose only change is development pins is checked and pushed untagged. Then every landed head is proved at
+  once, and each proved head is tagged in order once the batch members it pins are tagged, so its tag's pins name tags
+  at exactly those commits. A failed member stops its dependents only; a red run leaves its dependents proved and
+  untagged until its fix.
 - **One package onto one release**, `bay pin <dependency> <version>`: pinned at the tag and tidied, the re-pin named
-  and committed as the train does, then released when the section held entries before it; a re-pin alone is gated
+  and committed as the train does, then released when the section held entries before it; a re-pin alone is checked
   and pushed untagged, its entry waiting for the next release. The refusals of a release come first.
 - **The audit**, `bay audit releases`: every `v*` tag of the package's repository on GitHub, from the first release
-  gated there on, must be an annotated tag whose `Gated-by` run was a green release tier on that commit and on its
-  candidate branch, with a GitHub Release whose notes name the run. Each tag that falls short is named with what it
-  lacks, and the run fails; the tags before that first release are named once, as history.
+  proved there on, must be an annotated tag whose `Proved-by` run (or, for releases made before the proof, its
+  `Gated-by` release tier run) is green on that very commit and its candidate ref, with a GitHub Release whose notes
+  name the run. Each tag that falls short is named with what it lacks, and the run fails; the tags before that first
+  release are named once, as history.
 - `--dry-run` prints the version, the section and the plan, and writes nothing.
 
 ## Prebuilt pins

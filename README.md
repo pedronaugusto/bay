@@ -320,34 +320,41 @@ The version is what the section asks for: `### Breaking` and `### Removed` move 
 below 1.0 and the major from it, `### Added` and `### Deprecated` the minor from 1.0, and
 anything else the last number. An empty section releases nothing. The section becomes
 `## [X.Y.Z] - date` (its groups in order, a group written twice made one), the manifest's
-`.version` takes the version, and both are committed as `Release vX.Y.Z`. That commit is
-gated by the package's own `gate` step (preflight's, from its development build), and only
-when the gate is green do the branch and the tag `vX.Y.Z` go to the remote's default
-branch, in one atomic push over SSH, read back before the tag is made here. The tag is
-annotated, its message the version. A release goes only to the remote's default branch, so
-releases are one line; a branch with no upstream goes where `git push -u` would send it,
-under its own name on the remote git pushes to by default or the one remote there is, and
-keeps that as its upstream. A red gate leaves the branch where it was.
+`.version` takes the version, and both are committed as `Release vX.Y.Z`, the version
+commit. A release goes only to the remote's default branch, so releases are one line; a
+branch with no upstream goes where `git push -u` would send it, under its own name on the
+remote git pushes to by default or the one remote there is, and keeps that as its upstream.
 
-On GitHub, where the package's `ci.yml` (preflight's) dispatches a `tier` with `release`
-among its options, the release tier passes the commit before its tag: bay pushes it to
-`release/vX.Y.Z`, never to main, dispatches the tier there with your own login
-(`GITHUB_TOKEN`, else `gh auth token`; bay keeps no token) and waits, saying each job as it
-ends. One such run at a time goes from a machine. Green, the push carries the candidate's
-deletion with the branch and the tag, whose `Gated-by:` line names the run; red, the
-candidate is deleted, the failing jobs are named and nothing is tagged. A job GitHub gave
-no runner (cancelled before one took it: no runner, no steps, the run a failure) never ran,
-so bay runs the run's unpassed jobs again, up to three times, saying each, and then refuses,
-naming the jobs that never ran; a run a person cancelled is refused as it stands. The GitHub Release
-follows the push, its notes the section and the run. `bay audit releases` checks each
-release tag of the repository so: annotated, its run green on its commit, its GitHub
-Release naming the run; the tags from before the first such release are named once, as
-history. `bay release --dry-run` prints the version, the section and the plan, and makes
-the release commit in a copy of the package (the section cut, the manifest at the new
+On GitHub, where the package's `ci.yml` (preflight's) dispatches a full tier (`full`, or
+`release` before preflight 0.20.0, read from the workflow the package's preflight
+generated), that tier's run proves the release. The version commit is configured and built
+here (`bay fetch`, then its `check` step) and lands on the default branch as any change
+does; then bay pushes it to `release/vX.Y.Z` too, so a push to main meanwhile cannot move
+what is proved, dispatches the tier there with your own login (`GITHUB_TOKEN`, else `gh auth
+token`; bay keeps no token) and waits, saying each job as it ends. Green, an annotated tag
+goes on that very commit, its `Proved-by:` line naming the run, and the candidate is
+deleted; red, the failing jobs are named, the candidate is deleted, and the version commit
+stays on main untagged. A version the CHANGELOG releases and no tag names is a release
+under way: the fix lands on it with its line in that version's own section, and the next
+`bay release` proves the new head and tags it, never cutting the version again (an entry
+under `[Unreleased]` meanwhile is refused). Each run found is recorded on this machine
+under its commit, so a release stopped while it waits takes the same run up again. A job
+GitHub gave no runner (cancelled before one took it: no runner, no steps, the run a
+failure) never ran, so bay runs the run's unpassed jobs again, up to three times, saying
+each, and then refuses, naming the jobs that never ran; a run a person cancelled is refused
+as it stands. A package with no full tier on GitHub is gated here instead, by its own
+`gate` step (preflight's, from its development build) and on the machines below, before its
+version commit lands and is tagged; a red gate leaves the branch where it was.
+
+The GitHub Release follows the tag, its notes the section and the run. `bay audit releases`
+checks each release tag of the repository so: annotated, its run green on its commit, its
+GitHub Release naming the run; the tags from before the first such release are named once,
+as history. `bay release --dry-run` prints the version, the section and the plan, and makes
+the version commit in a copy of the package (the section cut, the manifest at the new
 version, `bay tidy`) and configures its builds, so a package that does not configure at the
-version it would release is refused before any commit;
-`bay release --no-push` commits and gates, and holds the gated commit for a later `bay
-release`, someone else's it may be, to push without gating it again.
+version it would release is refused before any commit; `bay release --no-push` commits and
+checks (or gates), and holds the commit for a later `bay release`, someone else's it may
+be, to land without checking it again.
 
 It refuses a tree with changes, a branch behind its remote, a branch with no upstream that
 more than one remote could take, a branch that would go anywhere but the remote's default
@@ -355,8 +362,8 @@ branch, a remote that is not SSH, a package in a workspace with
 other members (their trees would stand in for its pins in the gate; `bay --workspace
 release` releases them), a version already tagged, a manifest and a changelog at
 different releases, and a line under no group. A release stopped after its commit is finished by the next `bay
-release`, which gates the commit again; one whose push failed after a green gate is pushed
-without gating it again; one pushed whose tag never reached this clone is tagged here.
+release`, which checks the commit again; one whose landing failed after a green check is landed
+without checking it again; one tagged whose tag never reached this clone is tagged here.
 
 Two branches adding lines under one group merge with no conflict when git merges
 CHANGELOG.md with its `union` driver:
@@ -377,31 +384,42 @@ that runs bay there and a directory there for its copies:
 }
 ```
 
-The release commit reaches each as a git bundle on that command's stdin, and every machine
+The version commit reaches each as a git bundle on that command's stdin, and every machine
 gates at once with this one, its lines named; the tag waits for all of them.
 
-`bay --workspace release` is the train: the members in dependency order, one at a time.
-Each is pinned at the releases of the members before it (as `bay tidy` pins them), its
-re-pinned dependencies named in its CHANGELOG (`- Pins a 0.3.1.` under `### Changed`), what
-its build makes from its pins made again (its `generate` step, when either build has one:
-preflight's makes the CI caller, which names the preflight the member pins), and committed,
-then released. Each is gated on what its release publishes, as its hosted gate builds it:
-the members the train has released are at their tags, which are their trees, and every
-other member builds at the pins, not from its tree; a development pin on such a member at a
-commit its origin holds on no branch or tag is refused. A member whose only change is
-development pins is gated and pushed with no tag; a member that fails stops the members
-that depend on it. A development pin that would
-close a ring (a tool developed with a member that ships it) moves last, once the release it
-waits for is out. `--dry-run` prints the plan and changes nothing: each member's release and
-what makes it, its section or the pins that move, the train's own releases included; each
-member's `generate` step run with the pins it would write, in a copy, and again for each
-closing re-pin with the trees of the releases it waits for, so a config the new release's
-`generate` refuses stops the plan, with what it said; each release commit made in a copy
+`bay --workspace release` releases the family together, as one batch. Each member says it
+is the family's, `"policy": "family"` in its `ci/preflight.json`, and each is on its
+remote's default branch, clean and not behind it, or nothing moves; then the family is built
+once as a workspace at the commits it releases (`bay check` in each member, every other
+member's tree in place of its pin). Then, in dependency order, one member at a time, each
+is pinned at the version commits of the batch members it depends on, as their tags will
+pin them: `?ref=vX.Y.Z#<commit>`, which Zig fetches by its commit before the tag exists.
+Its re-pinned dependencies are named in its CHANGELOG (`- Pins a 0.3.1.` under `### Changed`),
+what its build makes from its pins made again (its `generate` step, when either build has
+one: preflight's makes the CI caller, which names the preflight the member pins), and
+committed; then its version commit is made, checked and landed as `bay release` lands one.
+Each is checked on what its release publishes: the batch members whose version commits
+are made are at those commits, which are their trees, and every other member builds at the
+pins, not from its tree; a development pin on such a member at a commit its origin holds
+on no branch or tag is refused. A member whose only change is development pins is checked
+and pushed with no tag; a member that fails stops the members that depend on it.
+
+Once every member has landed, their heads' full runs go on GitHub at once, as the account's
+runners allow: GitHub Free runs 20 jobs at once, 5 of them on macOS, and a job queued too
+long is cancelled unrun, so a run is dispatched only while the jobs its plan holds (read
+from the matrices in its `ci.yml`) fit beside those of the runs already going; one whose
+plan alone is larger runs by itself. A red run stops the dispatches still to go. Then each
+proved head is tagged in order, once every batch member it pins is tagged, so the tag's pins
+name tags that exist at exactly those commits; a member pinning one whose run was red waits,
+proved and untagged, for the next train. A development pin that would close a ring (a tool
+developed with a member that ships it) moves last, once the release it waits for is out.
+`--dry-run` prints the plan and changes nothing: each member's release and what makes it,
+its section or the pins that move, the batch's own releases included; each member's
+`generate` step run with the pins it would write, in a copy, and again for each closing
+re-pin with the trees of the releases it waits for, so a config the new release's
+`generate` refuses stops the plan, with what it said; each version commit made in a copy
 and configured, as `bay release --dry-run` makes it; and each member refused where its run
-would refuse it, a checkout off its remote's default branch among them, which the run
-refuses before its re-pin is committed. Each
-member says it is the family's, `"policy": "family"` in its `ci/preflight.json`, or the
-train is refused before anything moves, each member without it named.
+would refuse it, a checkout off its remote's default branch among them.
 
 `bay pin <dependency> <version>` moves one package onto a dependency's release as the train
 moves a member: pinned at the tag, tidied, the re-pin named and committed, then released
@@ -449,10 +467,10 @@ every package below the graph, lazy ones included, for a bundle any host builds 
 | `bay outdated` | Packages the builds use with a newer release on their remote, or at a version their newest release retracts |
 | `bay licenses [--dev]` | Each package a build contains, with the license its files state; `--dev` adds the development tools |
 | `bay audit` | Each package the builds select, checked against its repository's published security advisories (GitHub; `GITHUB_TOKEN` when set) and its own retractions; fails on any finding |
-| `bay audit releases` | Each release tag of the package's GitHub repository, checked as `bay release` makes it: annotated, its `Gated-by` run of the release tier green on its commit, its GitHub Release naming the run; fails on any tag that falls short |
+| `bay audit releases` | Each release tag of the package's GitHub repository, checked as `bay release` makes it: annotated, its `Proved-by` run (or, as releases were made before, its `Gated-by` run) green on its very commit, its GitHub Release naming the run; fails on any tag that falls short |
 | `bay vendor` | Every package the graph reads and the builds take on this host, into `zig-pkg`; `--all-hosts`, every package any host's build may ask for |
-| `bay release [--dry-run] [--no-push]` | Release the package from its CHANGELOG's `[Unreleased]` section: commit, gate here, on the machines in `machines.zon` and, where its `ci.yml` runs a release tier, on GitHub; push the default branch and its tag at once over SSH |
-| `bay --workspace release` | Release every member that changed, in dependency order, each pinned at the releases before it |
+| `bay release [--dry-run] [--no-push]` | Release the package from its CHANGELOG's `[Unreleased]` section: the version commit configured and built here and landed, then proved by its full run on GitHub where its `ci.yml` has one (else gated here and on the machines in `machines.zon`), and its tag pushed on it over SSH |
+| `bay --workspace release` | Release every member that changed as one batch: version commits landed in dependency order, each pinned at those before it; the heads proved on GitHub at once; tagged in order |
 | `bay pin [--dry-run] <dependency> <version>` | Move the package onto a dependency's release: pinned, named in the CHANGELOG, committed, gated and pushed; released when `[Unreleased]` held entries before |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
 | `bay fetch` | Fetch what both builds take on this host, lazy dependencies their configuration asks for included |

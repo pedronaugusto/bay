@@ -1,6 +1,7 @@
 //! One train per workspace and one gate per directory on a machine: each holds a lock that a
-//! second refuses by name, never runs beside. One hosted release run at a time on a machine:
-//! the release queue, which a second release waits for rather than refuses. Two trains once gated one checkout at once, and
+//! second refuses by name, never runs beside. One batch of full runs on GitHub at a time on a
+//! machine: the release queue, which a second release waits for rather than refuses, as the
+//! runners are the account's and a batch paces its runs to them. Two trains once gated one checkout at once, and
 //! the second's build failed on a file the first was writing. The locks are files in bay's data
 //! directory, named for what they hold and its path, and the system lets them go when the
 //! process ends, however it ends. What holds a lock says so in a file beside it, which no lock
@@ -13,7 +14,7 @@ const dirs = @import("dirs.zig");
 const say = @import("say.zig");
 
 /// What a lock holds a directory for; `release_queue` holds bay's data directory, for the
-/// hosted release run every release on the machine takes in turn.
+/// batch of full runs on GitHub every release on the machine takes in turn.
 pub const Kind = enum { train, gate, release_queue };
 
 /// A held lock, let go by `release` or by the process ending.
