@@ -1522,7 +1522,7 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, hosted: ?Hosted, gate_machines: 
         try say.out(c.io, "{s}\n", .{out.written()});
         try say.out(c.io, "commit Release {s} on {s}\n", .{ plan.tag, up.branch });
         releaseCopy(c, cut.manifest, cut.text, plan.version) catch |err| switch (err) {
-            error.Reported => try say.fail(c.io, "the version commit, at {f}, does not configure, so it would not land: fix what it says above", .{plan.version}),
+            error.Reported => try say.fail(c.io, "the version commit, at {f}, does not build here, so it would not land: fix what it says above", .{plan.version}),
             else => return err,
         };
     } else try say.out(c.io, "{s} under way at HEAD\n", .{plan.tag});
@@ -1548,8 +1548,9 @@ fn dryRun(c: Context, up: Upstream, plan: Plan, hosted: ?Hosted, gate_machines: 
 /// `bay --workspace release`: the family released together, as one batch. Every member says it
 /// is the family's (`"policy": "family"` in its ci/preflight.json), or nothing moves; a member
 /// off its remote's default branch, with changes, or behind its remote is refused before
-/// anything moves; and the family is built once as a workspace at the commits it releases
-/// (`bay check` in each member, every other member's tree in place of its pin). Then:
+/// anything moves; and the family is built once in the workspace at the commits it releases
+/// (the dry run's plan: each member's release commit made in a copy, pinned as the train pins
+/// it, and built). Then:
 /// 1. each member in order, after the members it ships and is developed with, is pinned at
 ///    the version commits of the batch members it depends on (`?ref=v<X>#<commit>`: the pin
 ///    their tags make, which Zig fetches by its commit before the tag exists), and its version
@@ -1574,13 +1575,14 @@ pub fn train(c: Context, options: Options) !u8 {
             else => return err,
         };
     }
-    // The family, built once as a workspace at the commits the batch releases.
-    for (cars) |car| {
-        var member = c;
-        member.package = car.directory;
-        try say.note(c.io, "{s}: built with the family's trees (bay check in the workspace)", .{car.name});
-        if (!try checkBuild(member)) try say.fail(c.io, "{s} does not build with the other members' trees at the commits the batch releases: nothing moved", .{car.name});
-    }
+    // The family, built once in the workspace at the commits the batch releases: the plan, each
+    // member's release commit made in a copy with the pins the train writes, and built. A member
+    // built in its own tree would still pin the members before it where it stands, and a pin
+    // below one's tree is two copies of it in one build.
+    _ = trainPlan(c, cars) catch |err| switch (err) {
+        error.Reported => try say.fail(c.io, "the plan stops above: nothing moved", .{}),
+        else => return err,
+    };
     const done = try c.a.alloc(Done, cars.len);
     const landed = try c.a.alloc(?Landed, cars.len);
     @memset(landed, null);
@@ -1955,14 +1957,15 @@ pub fn checkout(c: Context, name: []const u8) !struct { top: []const u8, package
     return .{ .top = top_copy, .package = package };
 }
 
-/// The release commit a release would make, made in a copy of the package and configured as
-/// its gate configures it: the CHANGELOG cut at `version`, the manifest `manifest_text` naming
-/// it, what the build makes from the manifest made again (`bay tidy`), and the package's build
-/// and its development build configured (`bay fetch`), Zig compiling each build script. A
-/// package that does not configure at the version it would release (a build that checks the
-/// manifest's version against a file of its own) is refused in a dry run, before any commit.
+/// The release commit a release would make, made in a copy of the package and built as its
+/// landing builds it: the CHANGELOG cut at `version`, the manifest `manifest_text` naming it,
+/// what the build makes from the manifest made again (`bay tidy`), and the package's build and
+/// its development build configured and built (`checkBuild`: `bay fetch`, then its check). A
+/// package that does not build at the version it would release (a build that checks the
+/// manifest's version against a file of its own, a member that does not compile against the
+/// releases the batch makes) is refused before any commit.
 /// The copy (`checkout`) is a clone of the package, so a workspace holds it as it holds the package. It
-/// goes once it configures; one a failure leaves is replaced by the next dry run's.
+/// goes once it builds; one a failure leaves is replaced by the next one's.
 fn releaseCopy(c: Context, manifest_text: [:0]const u8, log: []const u8, version: std.SemanticVersion) !void {
     var problem: changelog.Problem = undefined;
     const cut_log = changelog.cut(c.a, log, version, try today(c.a, c.io), &problem) catch |err| switch (err) {
@@ -1977,21 +1980,21 @@ fn releaseCopy(c: Context, manifest_text: [:0]const u8, log: []const u8, version
     var there = c;
     there.package = copy.package;
     try bayIn(there, &.{"tidy"});
-    try bayIn(there, &.{"fetch"});
+    if (!try checkBuild(there)) return error.Reported;
     try Io.Dir.cwd().deleteTree(c.io, copy.top);
-    try say.note(c.io, "its release commit, at {f}, configures (made in a copy)", .{version});
+    try say.note(c.io, "its release commit, at {f}, builds (made in a copy: bay fetch, bay check)", .{version});
 }
 
 /// A car's release commit, made in a copy at the version it would tag, the re-pins of what it
 /// ships named in its section as the run names them, and configured (`releaseCopy`): a member
-/// that does not configure at that version stops the plan, not its gate after the commit.
+/// that does not build at that version stops the plan, and the train before anything moves.
 fn carCopy(c: Context, name: []const u8, manifest_text: [:0]const u8, log: []const u8, shipped: []const []const u8, version: std.SemanticVersion) !void {
     const named = if (shipped.len == 0) log else changelog.addEntry(c.a, log, .changed, try c.a.print("- Pins {s}.", .{try listed(c.a, shipped)})) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => try say.fail(c.io, "{s}: CHANGELOG.md has no `## [Unreleased]` section to name the re-pins in", .{name}),
     };
     releaseCopy(c, manifest_text, named, version) catch |err| switch (err) {
-        error.Reported => try say.fail(c.io, "{s}: its release commit, at {f}, does not configure, so the train would stop at its gate: fix what it says above", .{ name, version }),
+        error.Reported => try say.fail(c.io, "{s}: its release commit, at {f}, does not build here, so the train would stop at it: fix what it says above", .{ name, version }),
         else => return err,
     };
 }
@@ -2001,7 +2004,7 @@ fn carCopy(c: Context, name: []const u8, manifest_text: [:0]const u8, log: []con
 /// and its moved pins make, landed, proved and tagged; and the development pins the closing
 /// pass moves after it.
 fn trainPlan(c: Context, cars: []const each.Car) !u8 {
-    try say.out(c.io, "first: the family built once in the workspace, at the commits the batch releases (bay check in each member); nothing moves before it is\n", .{});
+    try say.out(c.io, "first: this plan, each member's release commit made in a copy with the pins the train writes and built in the workspace (bay fetch, bay check); nothing moves before every one builds\n", .{});
     const versions = try c.a.alloc(?std.SemanticVersion, cars.len);
     @memset(versions, null);
     // The version each member stands at before the train: its release, when it makes none.

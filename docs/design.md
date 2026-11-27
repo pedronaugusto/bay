@@ -148,8 +148,8 @@ else reads them, and `bay audit releases` checks that it was so.
   record, and that user can push with git anyway.
 - **The train**, `bay --workspace release`: the family as one batch. Refused first: a member without
   `"policy": "family"` in its `ci/preflight.json` (the key preflight's configuration and build both read; bay never
-  writes it), off its default branch, dirty or behind; then the family is built once as a workspace at the commits it
-  releases. In dependency order each member is pinned at the version commits of the batch members it depends on, as
+  writes it), off its default branch, dirty or behind; then the family is built once in the workspace at the commits it
+  releases (the dry run's plan: each member's release commit made in a copy, pinned as the train pins it, and built). In dependency order each member is pinned at the version commits of the batch members it depends on, as
   their tags will pin them (`?ref=vX.Y.Z#<commit>`: Zig fetches the commit and never reads the ref, so the pin
   fetches before the tag exists and is byte for byte the tag's pin after), tidied to the releases there are (one
   `### Changed` line, "Pins x 1.2.0 and y 0.3.1.", for the versions that moved), and its version commit landed; a

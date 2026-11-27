@@ -1053,6 +1053,40 @@ test "a train's plan pins a member with nothing to release at its release, in ev
     for ([_][]const u8{ "a", "b", "z" }) |dir| try std.testing.expectEqualStrings(try w.head(dir), try w.remoteAt(dir, "refs/tags/v0.1.1"));
 }
 
+test "a train builds a member pinned below a released member at the pins it writes, before anything moves" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var w: World = try .init(arena.allocator());
+    defer w.deinit();
+    // lib pins core 0.1.0; core is released as 0.1.1 after it, and mid pins that. In the
+    // workspace core is 0.1.1, its tree that release: lib's pin is below it until the train
+    // re-pins lib, so lib built where it stands would hold core twice.
+    try w.package("core", "0.1.0", "");
+    try w.package("lib", "0.1.0", "");
+    try std.testing.expect(succeeded(try w.f.bay("lib", &.{ "add", try w.f.a.print("{s}#v0.1.0", .{try w.pinUrl("core")}) })));
+    try w.git("lib", &.{ "add", "." });
+    try w.git("lib", &.{ "commit", "--quiet", "-m", "Pin core" });
+    try w.git("lib", &.{ "push", "--quiet", "origin", "main" });
+    try w.change("core", "### Added\n\n- More.\n");
+    try std.testing.expect(succeeded(try w.releaseIn("core", &.{})));
+    try w.package("mid", "0.1.0", "");
+    try std.testing.expect(succeeded(try w.f.bay("mid", &.{ "add", try w.f.a.print("{s}#v0.1.1", .{try w.pinUrl("core")}) })));
+    try w.git("mid", &.{ "add", "." });
+    try w.git("mid", &.{ "commit", "--quiet", "-m", "Pin core" });
+    try w.git("mid", &.{ "push", "--quiet", "origin", "main" });
+    for ([_][]const u8{ "mid", "lib" }) |dir| try w.change(dir, "### Fixed\n\n- A fix.\n");
+    for ([_][]const u8{ "core", "mid", "lib" }) |dir| try familyPolicy(&w, dir, "family");
+    try w.f.write(".", "bay.work", ".{ .members = .{ \"core\", \"mid\", \"lib\" } }\n");
+    const train = try w.f.bay(".", &.{ "--workspace", "release" });
+    if (!succeeded(train)) {
+        std.debug.print("the train refused:\n{s}\n", .{train.stderr});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(contains(train.stderr, "its release commit, at 0.1.1, builds (made in a copy: bay fetch, bay check)"));
+    for ([_][]const u8{ "mid", "lib" }) |dir| try std.testing.expectEqualStrings(try w.head(dir), try w.remoteAt(dir, "refs/tags/v0.1.1"));
+    try std.testing.expect(contains(try w.read("lib", "build.zig.zon"), "?ref=v0.1.1#"));
+}
+
 test "a train builds each member on the pins it moved it to, and one that does not build goes no further" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1872,7 +1906,7 @@ test "a train's dry run refuses a member not on its remote's default branch, as 
     try std.testing.expect(contains(clean.stdout, "1. lib 0.1.0 -> 0.1.1 (fix): its [Unreleased] section\n"));
 }
 
-test "a dry run makes the release commit in a copy at its version and configures it, refusing one that does not configure there" {
+test "a dry run makes the release commit in a copy at its version and builds it, refusing one that does not build there" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var w: World = try .init(arena.allocator());
@@ -1901,12 +1935,12 @@ test "a dry run makes the release commit in a copy at its version and configures
     const alone = try w.releaseIn("lib", &.{"--dry-run"});
     try std.testing.expect(refused(alone));
     try std.testing.expect(contains(alone.stderr, "version.zig names 0.1.0; build.zig.zon names 0.1.1"));
-    try std.testing.expect(contains(alone.stderr, "the version commit, at 0.1.1, does not configure, so it would not land"));
+    try std.testing.expect(contains(alone.stderr, "the version commit, at 0.1.1, does not build here, so it would not land"));
     try w.f.write(".", "bay.work", ".{ .members = .{ \"lib\" } }\n");
     const plan = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
     try std.testing.expect(refused(plan));
     try std.testing.expect(contains(plan.stderr, "version.zig names 0.1.0; build.zig.zon names 0.1.1"));
-    try std.testing.expect(contains(plan.stderr, "lib: its release commit, at 0.1.1, does not configure, so the train would stop at its gate"));
+    try std.testing.expect(contains(plan.stderr, "lib: its release commit, at 0.1.1, does not build here, so the train would stop at it"));
     try std.testing.expectEqualStrings(start, try w.head("lib"));
     try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
     try std.testing.expectEqualStrings("", try w.remoteAt("lib", "refs/tags/v0.1.1"));
@@ -1929,7 +1963,7 @@ test "a dry run makes the release commit in a copy at its version and configures
     const clean = try w.f.bay(".", &.{ "--workspace", "release", "--dry-run" });
     if (!succeeded(clean)) std.debug.print("{s}\n{s}\n", .{ clean.stdout, clean.stderr });
     try std.testing.expect(succeeded(clean));
-    try std.testing.expect(contains(clean.stderr, "its release commit, at 0.1.1, configures (made in a copy)"));
+    try std.testing.expect(contains(clean.stderr, "its release commit, at 0.1.1, builds (made in a copy: bay fetch, bay check)"));
     try std.testing.expectError(error.FileNotFound, w.f.tmp.dir.access(w.f.io, candidate, .{}));
     try std.testing.expectEqualStrings("", try w.out("lib", &.{ "status", "--porcelain" }));
 }

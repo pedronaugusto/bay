@@ -351,8 +351,8 @@ checks each release tag of the repository so: annotated, its run green on its co
 GitHub Release naming the run; the tags from before the first such release are named once,
 as history. `bay release --dry-run` prints the version, the section and the plan, and makes
 the version commit in a copy of the package (the section cut, the manifest at the new
-version, `bay tidy`) and configures its builds, so a package that does not configure at the
-version it would release is refused before any commit; `bay release --no-push` commits and
+version, `bay tidy`) and builds it (`bay fetch`, `bay check`), so a package that does not build
+at the version it would release is refused before any commit; `bay release --no-push` commits and
 checks (or gates), and holds the commit for a later `bay release`, someone else's it may
 be, to land without checking it again.
 
@@ -390,8 +390,8 @@ gates at once with this one, its lines named; the tag waits for all of them.
 `bay --workspace release` releases the family together, as one batch. Each member says it
 is the family's, `"policy": "family"` in its `ci/preflight.json`, and each is on its
 remote's default branch, clean and not behind it, or nothing moves; then the family is built
-once as a workspace at the commits it releases (`bay check` in each member, every other
-member's tree in place of its pin). Then, in dependency order, one member at a time, each
+once in the workspace at the commits it releases: the dry run's plan, each member's release
+commit made in a copy, pinned as the train pins it, and built (`bay fetch`, `bay check`). Then, in dependency order, one member at a time, each
 is pinned at the version commits of the batch members it depends on, as their tags will
 pin them: `?ref=vX.Y.Z#<commit>`, which Zig fetches by its commit before the tag exists.
 Its re-pinned dependencies are named in its CHANGELOG (`- Pins a 0.3.1.` under `### Changed`),
