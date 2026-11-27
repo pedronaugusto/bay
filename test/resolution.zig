@@ -802,6 +802,25 @@ test "a member whose pins are behind builds from a copy with them rewritten, and
     const built = try f.bay("app", &.{ "build", "run" });
     try std.testing.expect(succeeded(built));
     try std.testing.expect(std.mem.find(u8, built.stderr, "a sees 0.1.1, b sees 0.1.1") != null);
+    // a's copy, its pin rewritten: another resolve while a's tree is unchanged leaves the copy's
+    // files as they are (a build reading them meanwhile, as a step that runs bay again in the
+    // package does, reads the same files), and a changed tree is copied again.
+    const copy = copy: {
+        const forks = try std.fs.path.join(f.a, &.{ f.root, "app", ".zig-cache", "bay", "forks" });
+        var dir = try Io.Dir.cwd().openDir(f.io, forks, .{ .iterate = true });
+        defer dir.close(f.io);
+        var entries = dir.iterate();
+        while (try entries.next(f.io)) |entry| if (entry.kind == .directory and std.mem.startsWith(u8, entry.name, "a-working-")) break :copy try std.fs.path.join(f.a, &.{ forks, entry.name, "build.zig" });
+        return error.TestUnexpectedResult;
+    };
+    const first = try Io.Dir.cwd().statFile(f.io, copy, .{});
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "build", "run" })));
+    try std.testing.expectEqual(first.inode, (try Io.Dir.cwd().statFile(f.io, copy, .{})).inode);
+    const script = try f.tmp.dir.readFileAlloc(f.io, "a/build.zig", f.a, .limited(1 << 16));
+    try f.write("a", "build.zig", try std.mem.concat(f.a, u8, &.{ script, "// changed\n" }));
+    try std.testing.expect(succeeded(try f.bay("app", &.{ "build", "run" })));
+    try std.testing.expect(std.mem.endsWith(u8, try Io.Dir.cwd().readFileAlloc(f.io, copy, f.a, .limited(1 << 16)), "// changed\n"));
+    try f.write("a", "build.zig", script);
     try std.testing.expect(succeeded(try f.bay("app", &.{"tidy"})));
     try std.testing.expectEqualStrings(before, try f.tmp.dir.readFileAlloc(f.io, "a/build.zig.zon", f.a, .limited(1 << 16)));
     // Each member tidied by itself: a's pin rises to the selection.

@@ -344,12 +344,84 @@ fn writeFork(input: Input, packages: *store.Store, remote: select.Place.Remote, 
     return directory;
 }
 
-/// A copy of a main module's working tree with `rewrites` in its manifest,
-/// made afresh for every build, since the tree is being worked on.
+/// A copy of a main module's working tree with `rewrites` in its manifest, made again only
+/// when the tree has changed since: the digest of what it was made from is kept beside it
+/// (`<fork>.digest`), and a fork whose digest is the tree's is left as it is. A build reads
+/// the fork while it compiles, and another resolve in the package (a step of the build that
+/// runs bay) would otherwise replace its files under it ("file contents changed during
+/// update").
 fn writeWorkingFork(input: Input, main: select.Revision, rewrites: []const manifest.Dependency) ![]const u8 {
-    const directory = try std.fs.path.join(input.a, &.{ input.package, forks_directory, try input.a.print("{s}-working-{x}", .{ main.identity.name, digestOf(rewrites) }) });
+    const a = input.a;
+    const directory = try std.fs.path.join(a, &.{ input.package, forks_directory, try a.print("{s}-working-{x}", .{ main.identity.name, digestOf(rewrites) }) });
+    const marker = try a.print("{s}.digest", .{directory});
+    const digest = try a.print("{x}", .{try treeDigest(input.io, a, main.place.directory)});
+    const made = if (intake.readFile(input.io, Io.Dir.cwd(), marker, a, .fromRaw(64))) |kept| std.mem.eql(u8, kept.readForParse(), digest) else |err| switch (err) {
+        error.FileNotFound => false,
+        else => |e| return e,
+    };
+    if (made) if (Io.Dir.cwd().access(input.io, directory, .{})) |_| return directory else |err| switch (err) {
+        error.FileNotFound => {},
+        else => |e| return e,
+    };
+    Io.Dir.cwd().deleteFile(input.io, marker) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => |e| return e,
+    };
     try materialize(input, main.place.directory, directory, rewrites);
+    try Io.Dir.cwd().writeFile(input.io, .{ .sub_path = marker, .data = digest });
     return directory;
+}
+
+/// A digest of the files `copyTree` copies from `root`: each one's path, kind and contents (a
+/// link's target), in path order, so the same tree digests the same whatever order its
+/// directory lists it in.
+fn treeDigest(io: Io, a: std.mem.Allocator, root: []const u8) !u64 {
+    var dir = try Io.Dir.cwd().openDir(io, root, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(a);
+    defer walker.deinit();
+    const Entry = struct { path: []const u8, digest: u64 };
+    var entries: std.ArrayList(Entry) = .empty;
+    while (try walker.next(io)) |entry| {
+        if (beside(entry.basename)) {
+            if (entry.kind == .directory) walker.leave(io);
+            continue;
+        }
+        var one = std.hash.Wyhash.init(@backingInt(entry.kind));
+        switch (entry.kind) {
+            .file => try digestFile(io, dir, entry.path, &one),
+            .sym_link => {
+                var buffer: [std.fs.max_path_bytes]u8 = undefined;
+                one.update(buffer[0..try intake.readLink(dir, io, entry.path, &buffer)]);
+            },
+            else => {},
+        }
+        try entries.append(a, .{ .path = try a.dupe(u8, entry.path), .digest = one.final() });
+    }
+    std.mem.sort(Entry, entries.items, {}, struct {
+        fn less(_: void, x: Entry, y: Entry) bool {
+            return std.mem.lessThan(u8, x.path, y.path);
+        }
+    }.less);
+    var digest = std.hash.Wyhash.init(0);
+    for (entries.items) |entry| {
+        digest.update(entry.path);
+        digest.update(std.mem.asBytes(&entry.digest));
+    }
+    return digest.final();
+}
+
+/// The contents of the file at `path` in `dir`, read a buffer at a time into `digest`.
+fn digestFile(io: Io, dir: Io.Dir, path: []const u8, digest: *std.hash.Wyhash) !void {
+    const file = try dir.openFile(io, path, .{});
+    defer file.close(io);
+    var buffer: [64 * 1024]u8 = undefined;
+    var reader = intake.readerStreaming(file, io, &.{});
+    while (true) {
+        const n = reader.interface.readSliceShort(&buffer) catch return reader.err orelse error.ReadFailed;
+        digest.update(buffer[0..n]);
+        if (n < buffer.len) break;
+    }
 }
 
 fn digestOf(rewrites: []const manifest.Dependency) u64 {
