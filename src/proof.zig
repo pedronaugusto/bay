@@ -7,9 +7,12 @@
 //!
 //! A batch's runs are paced to the account's runners. GitHub Free runs 20 jobs at once, 5 of
 //! them on macOS, and a job left queued past its runner's wait is cancelled unrun (almanac
-//! 44324896023): a run is dispatched only while the jobs its plan holds fit beside those of
-//! the runs already going, its plan read from the matrices ci.yml carries. A run whose plan
-//! alone is past the budget runs by itself.
+//! 44324896023): a run is dispatched only while the jobs its plan holds fit beside the jobs
+//! the runs already going still hold, its plan read from the matrices ci.yml carries. What a
+//! run going holds is read from GitHub at each look, its jobs queued or in progress, so the
+//! next run starts as the last ones' tails leave room; a run dispatched and not yet shown, or
+//! between its phases with no job listed, holds its plan. A run whose plan alone is past the
+//! budget starts when the batch holds no runner.
 const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
@@ -35,7 +38,45 @@ pub const Demand = struct {
     fn within(demand: Demand, budget: Budget) Demand {
         return .{ .jobs = @min(demand.jobs, budget.jobs), .macos = @min(demand.macos, budget.macos) };
     }
+
+    /// Whether a run of this plan may start beside `busy`: its jobs fit beside them, or the
+    /// batch holds no runner at all.
+    fn fits(demand: Demand, busy: Demand, budget: Budget) bool {
+        if (busy.jobs == 0) return true;
+        const takes = demand.within(budget);
+        return busy.jobs + takes.jobs <= budget.jobs and busy.macos + takes.macos <= budget.macos;
+    }
 };
+
+/// What a run going holds of the runners, as GitHub lists its jobs: those queued or in
+/// progress. Null where none is (a run not started, or between its phases): its plan counts.
+fn heldBy(job_list: []const github.Job) ?Demand {
+    var held: Demand = .{};
+    for (job_list) |job| if (job.active()) {
+        held.jobs += 1;
+        if (job.onMacos()) held.macos += 1;
+    };
+    return if (held.jobs == 0) null else held;
+}
+
+test "a run going holds its jobs queued or in progress, and the next starts once they leave room" {
+    const tail = [_]github.Job{
+        .{ .name = "a", .status = "completed", .labels = &.{"ubuntu-latest"} },
+        .{ .name = "b", .status = "completed", .labels = &.{"macos-latest"} },
+        .{ .name = "c", .status = "in_progress", .labels = &.{"windows-latest"} },
+        .{ .name = "d", .status = "queued", .labels = &.{"macos-15"} },
+    };
+    const held = heldBy(&tail).?;
+    try std.testing.expectEqual(2, held.jobs);
+    try std.testing.expectEqual(1, held.macos);
+    try std.testing.expect(heldBy(tail[0..2]) == null);
+    // Beside a tail of 2: a plan of 18 fits, 19 does not; one past the budget waits for none held.
+    try std.testing.expect((Demand{ .jobs = 18, .macos = 4 }).fits(held, account));
+    try std.testing.expect(!(Demand{ .jobs = 19 }).fits(held, account));
+    try std.testing.expect(!(Demand{ .jobs = 3, .macos = 5 }).fits(held, account));
+    try std.testing.expect(!(Demand{ .jobs = 41, .macos = 9 }).fits(held, account));
+    try std.testing.expect((Demand{ .jobs = 41, .macos = 9 }).fits(.{}, account));
+}
 
 /// The tier ci.yml's dispatch offers for the full matrix: `full`, or `release`, which preflight
 /// named it before 0.20.0. Null where its dispatch offers neither: the package runs no full
@@ -187,6 +228,8 @@ const Running = struct {
     reruns: u32 = 0,
     misses: u32 = 0,
     said: std.StringHashMapUnmanaged(void) = .empty,
+    /// What it held at the last look (`heldBy`); null before any, or with none listed.
+    holds: ?Demand = null,
 };
 
 const State = union(enum) {
@@ -212,19 +255,22 @@ pub fn prove(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, he
     }
     var stopped = false;
     while (true) {
+        // What the runs going hold: their jobs queued or in progress at the last look, or their
+        // plan where none was listed.
         var busy: Demand = .{};
-        for (states, heads) |state, head| switch (state) {
-            .looking, .running => {
-                const takes = head.demand.within(budget);
-                busy.jobs += takes.jobs;
-                busy.macos += takes.macos;
-            },
-            .pending, .done => {},
-        };
+        for (states, heads) |state, head| {
+            const holds = switch (state) {
+                .looking => head.demand.within(budget),
+                .running => |running| running.holds orelse head.demand.within(budget),
+                .pending, .done => continue,
+            };
+            busy.jobs += holds.jobs;
+            busy.macos += holds.macos;
+        }
         if (!stopped) for (states, outcomes, heads) |*state, *outcome, head| {
             if (state.* != .pending) continue;
+            if (!head.demand.fits(busy, budget)) continue;
             const takes = head.demand.within(budget);
-            if (busy.jobs != 0 and (busy.jobs + takes.jobs > budget.jobs or busy.macos + takes.macos > budget.macos)) continue;
             const since = try dispatchedSince(io, a);
             var problem: github.Problem = .{};
             const inputs = try a.print("{{\"tier\":\"{s}\"}}", .{head.tier});
@@ -292,6 +338,7 @@ fn step(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, head: H
     const now = github.run(api, head.repository, running.id, &problem) catch |err| return missed(io, a, head, state, outcome, err, problem);
     const job_list = github.jobs(api, head.repository, running.id, &problem) catch |err| return missed(io, a, head, state, outcome, err, problem);
     running.misses = 0;
+    running.holds = heldBy(job_list);
     if (now.run_attempt < running.attempt) return;
     for (job_list) |job| if (job.conclusion) |conclusion| if (!running.said.contains(job.name)) {
         try running.said.put(a, job.name, {});

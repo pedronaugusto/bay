@@ -205,8 +205,21 @@ pub const Job = struct {
     /// The runner that took the job; null or zero for one no runner took.
     runner_id: ?u64 = null,
     steps: []const Step = &.{},
+    /// The labels its `runs-on` asks a runner for (`macos-latest`, `ubuntu-24.04`, …).
+    labels: []const []const u8 = &.{},
 
     pub const Step = struct { name: []const u8 = "" };
+
+    /// Holding a runner, or waiting for one: queued, waiting or in progress, not completed.
+    pub fn active(job: Job) bool {
+        return !std.mem.eql(u8, job.status, "completed");
+    }
+
+    /// Asks for a macOS runner, which the account has fewer of.
+    pub fn onMacos(job: Job) bool {
+        for (job.labels) |label| if (std.mem.startsWith(u8, label, "macos")) return true;
+        return false;
+    }
 
     /// Passed: ended green, or skipped.
     pub fn passed(job: Job) bool {

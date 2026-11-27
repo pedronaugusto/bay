@@ -126,7 +126,9 @@ else reads them, and `bay audit releases` checks that it was so.
   default). The run found is recorded in bay's data directory under its commit, so a stopped wait takes the same run
   up again. A batch's runs are paced to the account's runners (GitHub Free: 20 jobs at once, 5 on macOS; a job queued
   past its runner's wait is cancelled unrun): a run is dispatched only while the jobs its plan holds, read from the
-  matrices `ci.yml` carries, fit beside those already running. One batch at a time on the machine: the
+  matrices `ci.yml` carries, fit beside the jobs the runs going still have queued or in progress, read from GitHub
+  at each look (a run not yet shown, or with no job listed, holds its plan); one whose plan alone is larger starts
+  when the batch holds no runner. One batch at a time on the machine: the
   `release_queue` lock, waited on. A login is asked for before anything is made.
 - **The tag goes on the proved head.** Green: an annotated tag on that very commit, its message the version and a
   `Proved-by:` line with the run's page, pushed atomically with the branch (already there) and read back with
