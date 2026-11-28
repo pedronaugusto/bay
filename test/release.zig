@@ -1565,7 +1565,7 @@ test "a full run whose jobs GitHub gave no runner runs them again, three times a
     try std.testing.expect(contains(cancelled.stderr, try a.print("v1.1.1: its full run is cancelled (macos): {s}; v1.1.1 landed", .{page})));
 }
 
-test "a train lands each version commit pinned at those before it, proves the heads on GitHub at once, and tags them in order; a red run leaves its dependents waiting until its fix" {
+test "a train lands each version commit pinned at those before it, proves the heads on GitHub at once, and tags each as its run is green once the members it pins are tagged; a red run leaves its dependents waiting until its fix" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1634,8 +1634,8 @@ test "a train lands each version commit pinned at those before it, proves the he
     try std.testing.expect(contains(first.stderr, "b: waiting"));
 
     // core's fix lands on it, its line in its own section; the train takes both releases up: b
-    // pinned at core's new head, the same version, named once in its CHANGELOG; both proved and
-    // tagged, core first.
+    // pinned at core's new head, the same version, named once in its CHANGELOG; each tagged as
+    // its run is green: core while b's run goes on, b after it.
     const log = try w.read("core", "CHANGELOG.md");
     try w.f.write("core", "CHANGELOG.md", try std.mem.replaceOwned(u8, a, log, "- A fix.\n", "- A fix.\n- Its fix.\n"));
     try w.git("core", &.{ "commit", "--quiet", "-am", "Its fix" });
@@ -1645,16 +1645,20 @@ test "a train lands each version commit pinned at those before it, proves the he
         .{ .status = .ok, .body = try Run.of(a, listing, "core", "21", ""), .head = core_head },
         .{ .status = .ok, .body = try Run.of(a, ended, "core", "21", "success"), .head = core_head },
         .{ .status = .ok, .body = jobs_green },
+        .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
+        .{ .status = .created, .body = "{\"id\":1,\"upload_url\":\"x\",\"html_url\":\"https://github.com/o/core/releases/tag/v0.1.1\"}" },
         .{ .status = .ok, .body = try Run.of(a, listing, "b", "22", ""), .head = b_head },
         .{ .status = .ok, .body = try Run.of(a, ended, "b", "22", "success"), .head = b_head },
         .{ .status = .ok, .body = jobs_green },
-        .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
-        .{ .status = .created, .body = "{\"id\":1,\"upload_url\":\"x\",\"html_url\":\"https://github.com/o/core/releases/tag/v0.1.1\"}" },
         .{ .status = .not_found, .body = "{\"message\":\"Not Found\"}" },
         .{ .status = .created, .body = "{\"id\":2,\"upload_url\":\"x\",\"html_url\":\"https://github.com/o/b/releases/tag/v0.1.1\"}" },
     });
     if (!succeeded(second)) std.debug.print("{s}\n", .{second.stderr});
     try std.testing.expect(succeeded(second));
+    // core's GitHub Release, which follows its tag, was asked for before b's run was looked for.
+    try std.testing.expect(std.mem.startsWith(u8, fake.seen.items[5].target, "/repos/o/core/releases"));
+    try std.testing.expect(std.mem.startsWith(u8, fake.seen.items[7].target, "/repos/o/b/actions/runs"));
+    try std.testing.expect(std.mem.find(u8, second.stderr, "released core v0.1.1").? < std.mem.find(u8, second.stderr, "b v0.1.1: its full run is https").?);
     const core_tagged = try w.head("core");
     try std.testing.expectEqualStrings("Its fix", try w.out("core", &.{ "log", "-1", "--format=%s" }));
     try std.testing.expectEqualStrings(core_tagged, try w.remoteAt("core", "refs/tags/v0.1.1"));

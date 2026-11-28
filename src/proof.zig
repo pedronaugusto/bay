@@ -12,7 +12,9 @@
 //! run going holds is read from GitHub at each look, its jobs queued or in progress, so the
 //! next run starts as the last ones' tails leave room; a run dispatched and not yet shown, or
 //! between its phases with no job listed, holds its plan. A run whose plan alone is past the
-//! budget starts when the batch holds no runner.
+//! budget starts when the batch holds no runner. Of the account's runners the batch takes 14
+//! jobs, 3 of them on macOS (`releases`): the rest are kept for the account's landings, whose ci
+//! runs never wait behind a release's.
 //!
 //! The account's runners are shared with every other run of the account, and with GitHub's own
 //! pace, which the batch does not see. It reads them from its own runs instead: a run going
@@ -33,6 +35,14 @@ pub const Budget = struct { jobs: u32, macos: u32 };
 
 /// GitHub Free's runners for an account: 20 jobs at once, 5 on macOS.
 pub const account: Budget = .{ .jobs = 20, .macos = 5 };
+
+/// The runners a batch leaves free for the account's landings: their ci runs never wait behind
+/// a release's in GitHub's queue, where a landing that waited an hour or more behind releases
+/// held up every session that needed it.
+pub const landings: Budget = .{ .jobs = 6, .macos = 2 };
+
+/// What a batch's runs hold at most: the account's runners but those kept for landings.
+pub const releases: Budget = .{ .jobs = account.jobs - landings.jobs, .macos = account.macos - landings.macos };
 
 /// The jobs a run holds at its most at once, and how many of them are on macOS.
 pub const Demand = struct {
@@ -139,6 +149,17 @@ test "a run going holds its jobs queued or in progress, and the next starts once
     try std.testing.expect((Demand{ .jobs = 41, .macos = 9 }).fits(.{}, account));
 }
 
+test "a batch leaves 6 jobs and 2 macOS jobs of the account's runners to its landings" {
+    try std.testing.expectEqual(14, releases.jobs);
+    try std.testing.expectEqual(3, releases.macos);
+    const held: Demand = .{ .jobs = 5, .macos = 1 };
+    // Beside 5 held: a plan of 9 fits the releases' 14, 10 does not, though the account has room for 15.
+    try std.testing.expect((Demand{ .jobs = 9, .macos = 2 }).fits(held, releases));
+    try std.testing.expect(!(Demand{ .jobs = 10 }).fits(held, releases));
+    try std.testing.expect((Demand{ .jobs = 10 }).fits(held, account));
+    try std.testing.expect(!(Demand{ .jobs = 2, .macos = 3 }).fits(held, releases));
+}
+
 /// The tier ci.yml's dispatch offers for the full matrix: `full`, or `release`, which preflight
 /// named it before 0.20.0. Null where its dispatch offers neither: the package runs no full
 /// tier on GitHub. Read from the generated workflow, never assumed.
@@ -235,6 +256,12 @@ pub const Head = struct {
 /// as a red run elsewhere in the batch stopped the dispatches.
 pub const Outcome = union(enum) { green: []const u8, red: []const u8, unrun };
 
+/// Told of a head's outcome as it ends: the head's index in the heads proved, and its outcome.
+pub const Ended = struct {
+    context: *anyopaque,
+    call: *const fn (context: *anyopaque, index: usize, outcome: Outcome) anyerror!void,
+};
+
 /// Where this machine records the run found for a head: `<data>/proofs/<owner>/<repo>/<sha>`.
 fn recordPath(a: std.mem.Allocator, data: []const u8, repository: []const u8, sha: []const u8) ![]const u8 {
     return std.fs.path.join(a, &.{ data, "proofs", repository, sha });
@@ -305,8 +332,9 @@ const State = union(enum) {
 /// Proves each of `heads`: its recorded run waited on, or its full run dispatched on its
 /// candidate ref as the budget allows and waited on, each job said as it ends. A red run stops
 /// further dispatches (those heads are `unrun`), and the runs going are waited on to their end.
-/// `data` is bay's data directory, where runs are recorded.
-pub fn prove(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, heads: []const Head, budget: Budget, poll: Io.Duration) ![]Outcome {
+/// `data` is bay's data directory, where runs are recorded. `ended`, where given, is told each
+/// head's outcome as it ends, while the other runs go on.
+pub fn prove(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, heads: []const Head, budget: Budget, poll: Io.Duration, ended: ?Ended) ![]Outcome {
     const states = try a.alloc(State, heads.len);
     const outcomes = try a.alloc(Outcome, heads.len);
     for (states, outcomes, heads) |*state, *outcome, head| {
@@ -332,13 +360,15 @@ pub fn prove(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, he
                 try say.note(io, "{s}: {s}", .{ head.name, outcome.red });
                 state.* = .done;
                 stopped = true;
+                if (ended) |tell| try tell.call(tell.context, index, outcome.*);
                 break;
             };
             try say.note(io, "{s}: its full run ({s} tier, {d} jobs, {d} on macOS) dispatched at {s}", .{ head.name, head.tier, head.demand.jobs, head.demand.macos, head.sha[0..12] });
             state.* = .{ .looking = .{ .since = since } };
         };
         var open = false;
-        for (states, outcomes, heads) |*state, *outcome, head| {
+        for (states, outcomes, heads, 0..) |*state, *outcome, head, index| {
+            const was_done = state.* == .done;
             try step(io, a, api, data, head, state, outcome);
             switch (state.*) {
                 .done => if (outcome.* == .red) {
@@ -351,6 +381,7 @@ pub fn prove(io: Io, a: std.mem.Allocator, api: github.Api, data: []const u8, he
                 },
                 .looking, .running => open = true,
             }
+            if (!was_done and state.* == .done) if (ended) |tell| try tell.call(tell.context, index, outcome.*);
         }
         if (!open) break;
         try io.sleep(poll, .awake);

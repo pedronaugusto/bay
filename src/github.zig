@@ -4,6 +4,7 @@
 //! server (GitHub Enterprise, or a test's).
 const std = @import("std");
 const Io = std.Io;
+const download = @import("download.zig");
 
 pub const default_api = "https://api.github.com";
 
@@ -65,6 +66,8 @@ pub const Api = struct {
     /// The API's base, `https://api.github.com` or GITHUB_API_URL.
     base: []const u8,
     token: []const u8,
+    /// How long a request waits for all of its answer (`download.within`), then unanswered.
+    deadline: Io.Duration = download.answer_deadline,
 };
 
 /// What bay reads of a release GitHub holds (`release` in GitHub's schema, where none of these
@@ -155,18 +158,26 @@ fn request(api: Api, method: std.http.Method, url: []const u8, payload: ?[]const
         .{ .name = "accept", .value = "application/vnd.github+json" },
         .{ .name = "x-github-api-version", .value = "2022-11-28" },
     };
-    const result = api.client.fetch(.{
-        .location = .{ .url = url },
-        .method = method,
-        .payload = payload,
-        // With no token, GitHub answers what it shows anyone: a public repository's runs and releases.
-        .headers = .{ .content_type = .{ .override = content_type }, .user_agent = .{ .override = "bay" }, .authorization = if (api.token.len == 0) .omit else .{ .override = try a.print("Bearer {s}", .{api.token}) } },
-        .extra_headers = &headers,
-        // A redirect is answered, not followed: the token goes only to the host asked.
-        .redirect_behavior = .unhandled,
-        .response_writer = &body.writer,
+    // A payload (a release's program) adds a second for each 64 KiB it sends.
+    const deadline: Io.Duration = .fromNanoseconds(api.deadline.nanoseconds + @as(i96, @intCast(if (payload) |sent| sent.len / (64 << 10) else 0)) * std.time.ns_per_s);
+    // Given `deadline` for all of its answer: a connection gone silent is a look unanswered,
+    // which the caller looks again after, where it would wait on it for good.
+    const result = download.within(api.client.io, deadline, std.http.Client.fetch, .{
+        api.client,
+        .{
+            .location = .{ .url = url },
+            .method = method,
+            .payload = payload,
+            // With no token, GitHub answers what it shows anyone: a public repository's runs and releases.
+            .headers = .{ .content_type = .{ .override = content_type }, .user_agent = .{ .override = "bay" }, .authorization = if (api.token.len == 0) .omit else .{ .override = try a.print("Bearer {s}", .{api.token}) } },
+            .extra_headers = &headers,
+            // A redirect is answered, not followed: the token goes only to the host asked.
+            .redirect_behavior = .unhandled,
+            .response_writer = &body.writer,
+        },
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return fail(a, problem, "{s} did not answer within {f}", .{ url, download.Spoken{ .duration = deadline } }),
         else => return fail(a, problem, "could not reach {s}: {t}", .{ url, err }),
     };
     const written = body.written();
@@ -372,4 +383,23 @@ pub fn releaseNotes(api: Api, repository: []const u8, tag: []const u8, problem: 
         else => return fail(a, problem, "{s} answered a release bay cannot read", .{url}),
     };
     return held.body orelse "";
+}
+
+test "a look at GitHub whose connection goes silent is unanswered at its deadline, where it waited for good" {
+    const io = std.testing.io;
+    var silent: download.Silent = try .init(io);
+    defer silent.deinit(io);
+    const thread = try std.Thread.spawn(.{}, download.Silent.serve, .{ &silent, io });
+    // A request given up leaves its connection to the arena, as bay's own allocator holds it.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var client: std.http.Client = .{ .allocator = a, .io = io };
+    const api: Api = .{ .client = &client, .a = a, .base = try silent.url(a), .token = "t", .deadline = .fromMilliseconds(200) };
+    var problem: Problem = .{};
+    const looked = newestRun(api, "o/r", "release/v0.1.0", "1111111111111111111111111111111111111111", "2026-01-01T00:00:00Z", &problem);
+    silent.stop(io);
+    thread.join();
+    try std.testing.expectError(error.GitHub, looked);
+    try std.testing.expect(std.mem.find(u8, problem.what, "did not answer within 200 ms") != null);
 }

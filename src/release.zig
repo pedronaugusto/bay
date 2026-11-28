@@ -324,7 +324,7 @@ fn releaseOne(c: Context, options: Options) !Outcome {
         .held => |version| return .{ .held = version },
         .landed => |landed| landed,
     };
-    const proved = (try proveLanded(c, &.{landed}))[0];
+    const proved = (try proveLanded(c, &.{landed}, null))[0];
     switch (proved) {
         .gated => try tagLanded(landed, null),
         .green => |page| try tagLanded(landed, page),
@@ -512,12 +512,17 @@ const Proof = union(enum) { gated, green: []const u8, red: []const u8, unrun };
 /// The full runs of the landed heads GitHub proves, at once as the account's runners allow,
 /// each on its candidate ref (`release/vX.Y.Z` at its commit), deleted once its run ends; one
 /// batch on this machine at a time (the release queue). A head gated here is proved already.
-fn proveLanded(c: Context, landed: []const Landed) ![]Proof {
+/// `tags`, where given, is told each head's proof as it comes (`Tags.proved`), the gated ones
+/// first, so a member is tagged while the batch's other runs go on.
+fn proveLanded(c: Context, landed: []const Landed, tags: ?*Tags) ![]Proof {
     const proofs = try c.a.alloc(Proof, landed.len);
     var heads: std.ArrayList(proof.Head) = .empty;
     var which: std.ArrayList(usize) = .empty;
-    for (landed, proofs, 0..) |one, *proved, index| {
+    for (landed, proofs) |one, *proved| {
         proved.* = .gated;
+        if (one.hosted == null) if (tags) |t| try t.proved(one, .gated);
+    }
+    for (landed, 0..) |one, index| {
         const hosted = one.hosted orelse continue;
         const candidate = try candidateRef(c, one.tag);
         // A candidate a stopped run left is this release's own: replaced, never pushed onto.
@@ -537,18 +542,70 @@ fn proveLanded(c: Context, landed: []const Landed) ![]Proof {
     defer client.deinit();
     const base = c.environ.get("GITHUB_API_URL") orelse "";
     const api: github.Api = .{ .client = &client, .a = c.a, .base = if (base.len == 0) github.default_api else base, .token = token };
-    const outcomes = try proof.prove(c.io, c.a, api, data, heads.items, proof.account, poll);
-    for (outcomes, which.items) |outcome, index| {
-        const one = landed[index];
-        _ = try git(one.member, &.{ "push", "--quiet", one.up.remote, try c.a.print(":{s}", .{try candidateRef(c, one.tag)}) });
-        proofs[index] = switch (outcome) {
-            .green => |page| .{ .green = page },
-            .red => |what| .{ .red = what },
-            .unrun => .unrun,
-        };
-    }
+    // Each run's end: its candidate deleted, its proof kept, and `tags` told.
+    const Ends = struct {
+        c: Context,
+        landed: []const Landed,
+        which: []const usize,
+        proofs: []Proof,
+        tags: ?*Tags,
+
+        fn call(context: *anyopaque, head: usize, outcome: proof.Outcome) anyerror!void {
+            const ends: *@This() = @ptrCast(@alignCast(context));
+            const index = ends.which[head];
+            const one = ends.landed[index];
+            _ = try git(one.member, &.{ "push", "--quiet", one.up.remote, try ends.c.a.print(":{s}", .{try candidateRef(ends.c, one.tag)}) });
+            ends.proofs[index] = switch (outcome) {
+                .green => |page| .{ .green = page },
+                .red => |what| .{ .red = what },
+                .unrun => .unrun,
+            };
+            if (ends.tags) |t| try t.proved(one, ends.proofs[index]);
+        }
+    };
+    var ends: Ends = .{ .c = c, .landed = landed, .which = which.items, .proofs = proofs, .tags = tags };
+    _ = try proof.prove(c.io, c.a, api, data, heads.items, proof.releases, poll, .{ .context = &ends, .call = Ends.call });
     return proofs;
 }
+
+/// A batch's tags, made as its proofs come: a member is tagged once its head is proved and
+/// every batch member it pins at a version commit is tagged, while the other runs go on, where
+/// every member waited for the whole batch. `done` is each car's end, `proofs` its proof once
+/// it has one.
+const Tags = struct {
+    cars: []const each.Car,
+    landed: []const ?Landed,
+    done: []Done,
+    proofs: []?Proof,
+
+    /// `one`'s proof come: kept, and every member it leaves ready tagged, in train order.
+    fn proved(t: *Tags, one: Landed, got: Proof) !void {
+        for (t.landed, t.proofs) |l, *p| if (l) |is| if (std.mem.eql(u8, is.commit, one.commit) and std.mem.eql(u8, is.member.package, one.member.package)) {
+            p.* = got;
+        };
+        for (t.cars, t.done, t.landed, t.proofs) |car, *outcome, l, p| {
+            const landed = l orelse continue;
+            if (outcome.* != .landed) continue;
+            const page: ?[]const u8 = switch (p orelse continue) {
+                .green => |url| url,
+                .gated => null,
+                .red, .unrun => continue,
+            };
+            const ready = for (car.needs) |need| {
+                if (t.landed[need] != null and t.done[need] != .released) break false;
+            } else true;
+            if (!ready) continue;
+            tagLanded(landed, page) catch |err| switch (err) {
+                error.Reported => {
+                    outcome.* = .failed;
+                    continue;
+                },
+                else => return err,
+            };
+            outcome.* = .released;
+        }
+    }
+};
 
 /// A landed head tagged: its pins first checked as a release's must be, now that the batch's
 /// members it pins at their version commits are tagged there; then its annotated tag (whose
@@ -1601,18 +1658,16 @@ pub fn train(c: Context, options: Options) !u8 {
     }
     // The landed heads, proved at once.
     var batch: std.ArrayList(Landed) = .empty;
-    var at: std.ArrayList(usize) = .empty;
-    for (landed, 0..) |one, index| if (one) |l| {
-        try batch.append(c.a, l);
-        try at.append(c.a, index);
-    };
-    const proofs = try proveLanded(c, batch.items);
+    for (landed) |one| if (one) |l| try batch.append(c.a, l);
     const proved = try c.a.alloc(?Proof, cars.len);
     @memset(proved, null);
-    for (at.items, proofs) |index, p| proved[index] = p;
-    // Each proved head tagged, in order: after every batch member it pins at a version commit.
+    // Each proved head tagged as its proof comes, once every batch member it pins at a version
+    // commit is tagged (`Tags`); what is left untagged at the end is said here.
+    var tags: Tags = .{ .cars = cars, .landed = landed, .done = done, .proofs = proved };
+    _ = try proveLanded(c, batch.items, &tags);
     for (cars, done, landed, proved) |car, *outcome, one, p| {
         const l = one orelse continue;
+        if (outcome.* != .landed) continue;
         switch (p.?) { // safe: every landed head has a proof
             .red => |what| {
                 try say.note(c.io, "{s}: {s}; its version commit {s} stays landed and untagged: fix it there, the fix's line in {s}'s section, and release again", .{ car.name, what, l.commit[0..12], l.tag });
@@ -1626,22 +1681,12 @@ pub fn train(c: Context, options: Options) !u8 {
             },
             .gated, .green => {},
         }
+        // Proved, and still untagged: a batch member it pins at a version commit is not tagged.
         const waiting = for (car.needs) |need| {
             if (landed[need] != null and done[need] != .released) break cars[need].name;
-        } else null;
-        if (waiting) |name| {
-            try say.note(c.io, "{s}: not tagged, as it pins {s}'s version commit, which is not", .{ car.name, name });
-            outcome.* = .waiting;
-            continue;
-        }
-        tagLanded(l, if (p.? == .green) p.?.green else null) catch |err| switch (err) {
-            error.Reported => {
-                outcome.* = .failed;
-                continue;
-            },
-            else => return err,
-        };
-        outcome.* = .released;
+        } else unreachable; // unreachable: `Tags` tags a proved head whose batch pins are tagged
+        try say.note(c.io, "{s}: not tagged, as it pins {s}'s version commit, which is not", .{ car.name, waiting });
+        outcome.* = .waiting;
     }
     // A development pin that would close a ring is left out of the order (a tool developed
     // with a release of a member that ships it): its member went first, and now pins the

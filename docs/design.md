@@ -124,7 +124,7 @@ else reads them, and `bay audit releases` checks that it was so.
   proved, and the tier is dispatched there through GitHub's API with the person's own login (`GITHUB_TOKEN`, else
   `gh auth token`; bay stores none) and waited on, each job said as it ends (`BAY_POLL_SECONDS` between looks, 30 by
   default). The run found is recorded in bay's data directory under its commit, so a stopped wait takes the same run
-  up again. A batch's runs are paced to the account's runners (GitHub Free: 20 jobs at once, 5 on macOS; a job queued
+  up again. A batch's runs are paced to the account's runners (GitHub Free: 20 jobs at once, 5 on macOS, of which the batch takes 14, 3 on macOS, leaving the rest to landings; a job queued
   past its runner's wait is cancelled unrun): a run is dispatched only while the jobs its plan holds, read from the
   matrices `ci.yml` carries, fit beside the jobs the runs going still have queued or in progress, read from GitHub
   at each look (a run not yet shown, or with no job listed, holds its plan); one whose plan alone is larger starts
@@ -155,7 +155,7 @@ else reads them, and `bay audit releases` checks that it was so.
   fetches before the tag exists and is byte for byte the tag's pin after), tidied to the releases there are (one
   `### Changed` line, "Pins x 1.2.0 and y 0.3.1.", for the versions that moved), and its version commit landed; a
   member whose only change is development pins is checked and pushed untagged. Then every landed head is proved at
-  once, and each proved head is tagged in order once the batch members it pins are tagged, so its tag's pins name tags
+  once, and each head is tagged as soon as its run is green and the batch members it pins are tagged, while the other runs go on, so its tag's pins name tags
   at exactly those commits. A failed member stops its dependents only; a red run leaves its dependents proved and
   untagged until its fix.
 - **One package onto one release**, `bay pin <dependency> <version>`: pinned at the tag and tidied, the re-pin named

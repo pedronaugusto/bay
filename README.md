@@ -409,14 +409,16 @@ on no branch or tag is refused. A member whose only change is development pins i
 and pushed with no tag; a member that fails stops the members that depend on it.
 
 Once every member has landed, their heads' full runs go on GitHub at once, as the account's
-runners allow: GitHub Free runs 20 jobs at once, 5 of them on macOS, and a job queued too
-long is cancelled unrun, so a run is dispatched only while the jobs its plan holds (read
+runners allow: GitHub Free runs 20 jobs at once, 5 of them on macOS, of which the batch takes
+14, 3 on macOS, and leaves the rest to the account's landings, whose ci runs never wait
+behind a release's. A job queued too long is cancelled unrun, so a run is dispatched only while the jobs its plan holds (read
 from the matrices in its `ci.yml`) fit beside the jobs the runs going still have queued or in
 progress, read from GitHub at each look, so one run's tail overlaps the next one's start;
 one whose plan alone is larger starts once the batch holds no runner. A job of the batch's
 own runs queued at two looks in a row means the account has no runner for it, whatever holds
-them (other repositories' runs among them), and nothing more is dispatched until it starts. A red run stops the dispatches still to go. Then each
-proved head is tagged in order, once every batch member it pins is tagged, so the tag's pins
+them (other repositories' runs among them), and nothing more is dispatched until it starts. A red run stops the dispatches still to go. Each
+head is tagged as soon as its run is green and every batch member it pins is tagged, while
+the other runs go on, so the tag's pins
 name tags that exist at exactly those commits; a member pinning one whose run was red waits,
 proved and untagged, for the next train. A development pin that would close a ring (a tool
 developed with a member that ships it) moves last, once the release it waits for is out.
@@ -477,7 +479,7 @@ every package below the graph, lazy ones included, for a bundle any host builds 
 | `bay audit releases` | Each release tag of the package's GitHub repository, checked as `bay release` makes it: annotated, its `Proved-by` run (or, as releases were made before, its `Gated-by` run) green on its very commit, its GitHub Release naming the run; fails on any tag that falls short |
 | `bay vendor` | Every package the graph reads and the builds take on this host, into `zig-pkg`; `--all-hosts`, every package any host's build may ask for |
 | `bay release [--dry-run] [--no-push]` | Release the package from its CHANGELOG's `[Unreleased]` section: the version commit configured and built here and landed, then proved by its full run on GitHub where its `ci.yml` has one (else gated here and on the machines in `machines.zon`), and its tag pushed on it over SSH |
-| `bay --workspace release` | Release every member that changed as one batch: version commits landed in dependency order, each pinned at those before it; the heads proved on GitHub at once; tagged in order |
+| `bay --workspace release` | Release every member that changed as one batch: version commits landed in dependency order, each pinned at those before it; the heads proved on GitHub at once; each tagged as its run is green, after the members it pins |
 | `bay pin [--dry-run] <dependency> <version>` | Move the package onto a dependency's release: pinned, named in the CHANGELOG, committed, gated and pushed; released when `[Unreleased]` held entries before |
 | `bay locate [--dev]` | The package's directory, or its development build's root |
 | `bay fetch` | Fetch what both builds take on this host, lazy dependencies their configuration asks for included |
