@@ -128,8 +128,11 @@ fn toolPath(c: Context) ![]const u8 {
     defer lock.close(io);
     if (try exists(io, tool)) return tool;
     try say.note(io, "building {s} from cloak {s}, once", .{ tool_name, remote.hash });
-    const fetched = intake.run(a, io, .{ .argv = &.{ remote.zig, "fetch", remote.url }, .stdout_limit = .limited(1024), .stderr_limit = .limited(16 * 1024) }) catch |err|
-        try say.fail(io, "could not run {s} fetch: {t}", .{ remote.zig, err });
+    // Stopped at its deadline, as a request is: a fetch whose connection went silent would wait for good.
+    const fetched = intake.runWithin(a, io, .{ .argv = &.{ remote.zig, "fetch", remote.url }, .stdout_limit = .limited(1024), .stderr_limit = .limited(16 * 1024) }, intake.remote_deadline) catch |err| switch (err) {
+        error.Timeout => try say.fail(io, "{s} fetch {s} did not finish within {f}", .{ remote.zig, remote.url, intake.remote_deadline }),
+        else => try say.fail(io, "could not run {s} fetch: {t}", .{ remote.zig, err }),
+    };
     if (fetched.term != .exited or fetched.term.exited != 0) {
         try say.relay(io, fetched.stderr.readForParse());
         try say.fail(io, "{s} fetch refused {s}", .{ remote.zig, remote.url });

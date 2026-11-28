@@ -1352,6 +1352,7 @@ test {
     _ = @import("github.zig");
     _ = graph;
     _ = install;
+    _ = @import("intake.zig");
     _ = licenses;
     _ = audit;
     _ = machines;

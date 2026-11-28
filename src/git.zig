@@ -329,8 +329,11 @@ fn git(io: Io, a: std.mem.Allocator, directory: ?[]const u8, args: []const []con
     try argv.append(a, "git");
     if (directory) |path| try argv.appendSlice(a, &.{ "-C", path });
     try argv.appendSlice(a, args);
-    const result = intake.run(a, io, .{ .argv = argv.items, .stdout_limit = .limited(256 << 20), .stderr_limit = .limited(1 << 20) }) catch |err|
-        try say.fail(io, "could not run git: {t}", .{err});
+    // A git that reaches a remote (ls-remote, fetch) is stopped at its deadline, as a request is.
+    const result = intake.runWithin(a, io, .{ .argv = argv.items, .stdout_limit = .limited(256 << 20), .stderr_limit = .limited(1 << 20) }, intake.remote_deadline) catch |err| switch (err) {
+        error.Timeout => try say.fail(io, "git {s} did not finish within {f}", .{ args[0], intake.remote_deadline }),
+        else => try say.fail(io, "could not run git: {t}", .{err}),
+    };
     if (result.term != .exited or result.term.exited != 0) {
         try say.relay(io, result.stderr.readForParse());
         try say.fail(io, "git {s} failed", .{args[0]});

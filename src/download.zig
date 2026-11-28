@@ -2,7 +2,10 @@
 //! and builds, and the ref listings of git remotes.
 const std = @import("std");
 const Io = std.Io;
+const aegis = @import("aegis");
 const say = @import("say.zig");
+const intake = @import("intake.zig");
+pub const Wait = intake.Wait;
 
 /// What a request asks: at most `limit` bytes of body, with `headers` sent
 /// beside bay's own (an API's media type, a token), asked again as `retry` says
@@ -11,28 +14,17 @@ pub const Get = struct {
     limit: u64,
     headers: []const std.http.Header = &.{},
     retry: Retry = .{},
-    answer: Io.Duration = answer_deadline,
+    answer: Wait = answer_deadline,
 };
 
 /// How long any request bay makes waits for its answer (reached, asked, and its head; all of
 /// it, for GitHub's API) before it is given up as unanswered: a connection gone silent ends in
 /// no error of its own, and a train once waited on one for an hour, its run long green.
-pub const answer_deadline: Io.Duration = .fromSeconds(60);
+pub const answer_deadline: Wait = .literal("60s");
 
 /// How long a body may take to arrive once its head has: an archive of hundreds of megabytes
 /// over a slow link, and no longer.
-pub const body_deadline: Io.Duration = .fromSeconds(15 * 60);
-
-/// A duration as a person reads it: in whole seconds, or in milliseconds where it is not.
-pub const Spoken = struct {
-    duration: Io.Duration,
-
-    pub fn format(spoken: Spoken, writer: *Io.Writer) Io.Writer.Error!void {
-        const ns = spoken.duration.nanoseconds;
-        if (@rem(ns, std.time.ns_per_s) == 0) return writer.print("{d} s", .{@divExact(ns, std.time.ns_per_s)});
-        return writer.print("{d} ms", .{@divTrunc(ns, std.time.ns_per_ms)});
-    }
-};
+pub const body_deadline: Wait = .literal("15m");
 
 fn Within(comptime function: anytype) type {
     const returned = @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union;
@@ -41,13 +33,13 @@ fn Within(comptime function: anytype) type {
 
 /// `function(args)`, given until `deadline`: its result, or `error.Timeout` where it has not
 /// returned by then, when it is canceled (a read it is blocked in interrupted) and waited for.
-pub fn within(io: Io, deadline: Io.Duration, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) Within(function) {
+pub fn within(io: Io, deadline: Wait, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) Within(function) {
     const Ends = union(enum) { done: @typeInfo(@TypeOf(function)).@"fn".return_type.?, late: Io.Cancelable!void };
     var buffer: [2]Ends = undefined;
     var select: Io.Select(Ends) = .init(io, &buffer);
     defer select.cancelDiscard();
     try select.concurrent(.done, function, args);
-    try select.concurrent(.late, Io.sleep, .{ io, deadline, .awake });
+    try select.concurrent(.late, Io.sleep, .{ io, deadline.toIoDuration(), .awake });
     return switch (try select.await()) {
         .done => |result| result,
         .late => error.Timeout,
@@ -59,7 +51,7 @@ pub fn within(io: Io, deadline: Io.Duration, comptime function: anytype, args: s
 /// long before each after it.
 pub const Retry = struct {
     tries: u8 = 4,
-    wait: Io.Duration = .fromSeconds(1),
+    wait: Wait = .literal("1s"),
 };
 
 /// The errors of a network that is briefly not there: a name its resolver could
@@ -93,8 +85,8 @@ pub fn retried(io: Io, retry: Retry, ask: anytype) !void {
     while (true) : (tries += 1) {
         ask.once() catch |err| {
             if (tries >= retry.tries or !transient(err)) return err;
-            try io.sleep(wait, .awake);
-            wait = .fromNanoseconds(wait.nanoseconds * 2);
+            try io.sleep(wait.toIoDuration(), .awake);
+            wait = wait.saturatingMul(2);
             continue;
         };
         return;
@@ -114,7 +106,7 @@ pub fn get(client: *std.http.Client, url: []const u8, sink: *Io.Writer, options:
         client: *std.http.Client,
         uri: std.Uri,
         headers: []const std.http.Header,
-        deadline: Io.Duration,
+        deadline: Wait,
         request: std.http.Client.Request = undefined,
         response: std.http.Client.Response = undefined,
         redirect_buffer: [8 * 1024]u8 = undefined,
@@ -166,7 +158,7 @@ pub fn get(client: *std.http.Client, url: []const u8, sink: *Io.Writer, options:
         error.ReadFailed => try say.fail(io, "reading {s} failed: {t}", .{ url, response.bodyErr() orelse error.ReadFailed }),
         error.WriteFailed => return error.WriteFailed,
         error.StreamTooLong => try say.fail(io, "{s} is longer than {d} bytes", .{ url, limit }),
-        error.Timeout => try say.fail(io, "{s} sent its head and then not all of its body within {f}", .{ url, Spoken{ .duration = body_deadline } }),
+        error.Timeout => try say.fail(io, "{s} sent its head and then not all of its body within {f}", .{ url, body_deadline }),
         else => |e| return e,
     };
 }
@@ -223,7 +215,7 @@ test "a request sends the caller's headers beside bay's, and takes the body up t
 
 test "a fetch the network fails twice is asked again and answers, and one the server refuses is asked once" {
     const io = std.testing.io;
-    const quick: Retry = .{ .wait = .fromMilliseconds(1) };
+    const quick: Retry = .{ .wait = .literal("1ms") };
     // A fetch whose first tries fail as `fails` says, and whose next one answers.
     const Stub = struct {
         fails: []const anyerror,
@@ -247,43 +239,22 @@ test "a fetch the network fails twice is asked again and answers, and one the se
     try std.testing.expectEqual(4, down.tries);
 }
 
-/// A server on the loopback that takes each connection and never answers it, as a connection
-/// gone silent does, holding it open until `stop`. For the tests of what a request does then.
+/// A server on the loopback that never answers, as a connection gone silent: it listens and
+/// accepts nothing, so the system completes each connection from its backlog and the request
+/// sent on it waits for good. For the tests of what a request does then.
 pub const Silent = struct {
-    server: Io.net.Server,
-    held: [8]?Io.net.Stream = @splat(null),
-    taken: std.atomic.Value(usize) = .init(0),
-    stopping: std.atomic.Value(bool) = .init(false),
+    server: aegis.own.Server,
 
     pub fn init(io: Io) !Silent {
         const loopback: Io.net.IpAddress = try .parse("127.0.0.1", 0);
-        return .{ .server = try loopback.listen(io, .{}) };
+        return .{ .server = .init(try loopback.listen(io, .{})) };
     }
 
     pub fn url(s: *Silent, a: std.mem.Allocator) ![]const u8 {
-        return a.print("http://127.0.0.1:{d}", .{s.server.socket.address.getPort()});
-    }
-
-    pub fn serve(s: *Silent, io: Io) void {
-        while (true) {
-            const stream = s.server.accept(io) catch return;
-            if (s.stopping.load(.acquire)) {
-                stream.close(io);
-                return;
-            }
-            const index = s.taken.fetchAdd(1, .acq_rel);
-            if (index < s.held.len) s.held[index] = stream else stream.close(io);
-        }
-    }
-
-    /// Ends `serve`, woken from `accept` by one more connection, and closes what it held.
-    pub fn stop(s: *Silent, io: Io) void {
-        s.stopping.store(true, .release);
-        if (s.server.socket.address.connect(io, .{ .mode = .stream })) |waker| waker.close(io) else |_| {}
+        return a.print("http://127.0.0.1:{d}", .{s.server.borrow().socket.address.getPort()});
     }
 
     pub fn deinit(s: *Silent, io: Io) void {
-        for (s.held) |held| if (held) |stream| stream.close(io);
         s.server.deinit(io);
     }
 };
@@ -292,19 +263,15 @@ test "a request whose connection goes silent is unanswered at its deadline, aske
     const io = std.testing.io;
     var silent: Silent = try .init(io);
     defer silent.deinit(io);
-    const thread = try std.Thread.spawn(.{}, Silent.serve, .{ &silent, io });
     // A request given up leaves its connection to the arena, as bay's own allocator holds it.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var client: std.http.Client = .{ .allocator = arena.allocator(), .io = io };
     const url = try silent.url(arena.allocator());
     const started = Io.Clock.awake.now(io);
-    const asked = getAlloc(&client, arena.allocator(), url, .{ .limit = 16, .answer = .fromMilliseconds(200), .retry = .{ .tries = 2, .wait = .fromMilliseconds(1) } });
+    const asked = getAlloc(&client, arena.allocator(), url, .{ .limit = 16, .answer = .literal("200ms"), .retry = .{ .tries = 2, .wait = .literal("1ms") } });
     const waited = started.durationTo(Io.Clock.awake.now(io));
-    silent.stop(io);
-    thread.join();
     try std.testing.expectError(error.Reported, asked);
     // Two tries, each given up at its deadline: well inside a few seconds, and never for good.
-    try std.testing.expectEqual(2, silent.taken.load(.acquire));
     try std.testing.expect(waited.nanoseconds < 5 * std.time.ns_per_s);
 }

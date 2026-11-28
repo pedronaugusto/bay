@@ -67,7 +67,7 @@ pub const Api = struct {
     base: []const u8,
     token: []const u8,
     /// How long a request waits for all of its answer (`download.within`), then unanswered.
-    deadline: Io.Duration = download.answer_deadline,
+    deadline: download.Wait = download.answer_deadline,
 };
 
 /// What bay reads of a release GitHub holds (`release` in GitHub's schema, where none of these
@@ -159,7 +159,8 @@ fn request(api: Api, method: std.http.Method, url: []const u8, payload: ?[]const
         .{ .name = "x-github-api-version", .value = "2022-11-28" },
     };
     // A payload (a release's program) adds a second for each 64 KiB it sends.
-    const deadline: Io.Duration = .fromNanoseconds(api.deadline.nanoseconds + @as(i96, @intCast(if (payload) |sent| sent.len / (64 << 10) else 0)) * std.time.ns_per_s);
+    const sends: u32 = @intCast(@min(if (payload) |sent| sent.len / (64 << 10) else 0, std.math.maxInt(u32)));
+    const deadline = api.deadline.saturatingAdd(download.Wait.literal("1s").saturatingMul(sends));
     // Given `deadline` for all of its answer: a connection gone silent is a look unanswered,
     // which the caller looks again after, where it would wait on it for good.
     const result = download.within(api.client.io, deadline, std.http.Client.fetch, .{
@@ -177,7 +178,7 @@ fn request(api: Api, method: std.http.Method, url: []const u8, payload: ?[]const
         },
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Timeout => return fail(a, problem, "{s} did not answer within {f}", .{ url, download.Spoken{ .duration = deadline } }),
+        error.Timeout => return fail(a, problem, "{s} did not answer within {f}", .{ url, deadline }),
         else => return fail(a, problem, "could not reach {s}: {t}", .{ url, err }),
     };
     const written = body.written();
@@ -389,17 +390,14 @@ test "a look at GitHub whose connection goes silent is unanswered at its deadlin
     const io = std.testing.io;
     var silent: download.Silent = try .init(io);
     defer silent.deinit(io);
-    const thread = try std.Thread.spawn(.{}, download.Silent.serve, .{ &silent, io });
     // A request given up leaves its connection to the arena, as bay's own allocator holds it.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var client: std.http.Client = .{ .allocator = a, .io = io };
-    const api: Api = .{ .client = &client, .a = a, .base = try silent.url(a), .token = "t", .deadline = .fromMilliseconds(200) };
+    const api: Api = .{ .client = &client, .a = a, .base = try silent.url(a), .token = "t", .deadline = .literal("200ms") };
     var problem: Problem = .{};
     const looked = newestRun(api, "o/r", "release/v0.1.0", "1111111111111111111111111111111111111111", "2026-01-01T00:00:00Z", &problem);
-    silent.stop(io);
-    thread.join();
     try std.testing.expectError(error.GitHub, looked);
-    try std.testing.expect(std.mem.find(u8, problem.what, "did not answer within 200 ms") != null);
+    try std.testing.expect(std.mem.find(u8, problem.what, "did not answer within 200ms") != null);
 }

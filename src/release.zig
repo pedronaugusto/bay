@@ -80,8 +80,11 @@ const Ran = struct { ok: bool, out: []const u8, err: []const u8 };
 
 fn git(c: Context, args: []const []const u8) !Ran {
     const argv = try std.mem.concat(c.a, []const u8, &.{ &.{"git"}, args });
-    const result = intake.run(c.a, c.io, .{ .argv = argv, .cwd = .{ .path = c.package }, .environ_map = c.environ }) catch |err|
-        try say.fail(c.io, "could not run git: {t}", .{err});
+    // A git that reaches a remote (fetch, push, ls-remote) is stopped at its deadline, as a request is.
+    const result = intake.runWithin(c.a, c.io, .{ .argv = argv, .cwd = .{ .path = c.package }, .environ_map = c.environ }, intake.remote_deadline) catch |err| switch (err) {
+        error.Timeout => try say.fail(c.io, "git {s} did not finish within {f}", .{ args[0], intake.remote_deadline }),
+        else => try say.fail(c.io, "could not run git: {t}", .{err}),
+    };
     return .{
         .ok = result.term == .exited and result.term.exited == 0,
         .out = std.mem.trim(u8, result.stdout.readForParse(), " \r\n"),

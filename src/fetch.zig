@@ -25,11 +25,14 @@ pub fn fetch(io: Io, a: std.mem.Allocator, zig: []const u8, scratch: []const u8,
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = "pub fn build(_: *@import(\"std\").Build) void {}\n" });
     try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try root.scratchManifest(a, "bay_add", "") });
     const save = if (name) |given| try a.print("--save={s}", .{given}) else "--save";
-    var child = std.process.spawn(io, .{ .argv = &.{ zig, "fetch", save, try asZigReads(a, url) }, .cwd = .{ .path = scratch } }) catch |err|
-        try say.fail(io, "could not run {s}: {t}", .{ zig, err });
-    switch (try child.wait(io)) {
-        .exited => |code| if (code != 0) return null,
-        else => return null,
+    // Stopped at its deadline, as a request is: a fetch whose connection went silent would wait for good.
+    const fetched = intake.runWithin(a, io, .{ .argv = &.{ zig, "fetch", save, try asZigReads(a, url) }, .cwd = .{ .path = scratch }, .stdout_limit = .limited(1 << 16), .stderr_limit = .limited(1 << 20) }, intake.remote_deadline) catch |err| switch (err) {
+        error.Timeout => try say.fail(io, "{s} fetch {s} did not finish within {f}", .{ zig, url, intake.remote_deadline }),
+        else => try say.fail(io, "could not run {s}: {t}", .{ zig, err }),
+    };
+    if (fetched.term != .exited or fetched.term.exited != 0) {
+        try say.relay(io, fetched.stderr.readForParse());
+        return null;
     }
     const text = (try intake.readFile(io, dir, "build.zig.zon", a, .fromRaw(1 << 20))).readForParse();
     const parsed = try manifest.parse(a, try a.dupeSentinel(u8, text, 0));
